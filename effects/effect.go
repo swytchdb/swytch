@@ -234,7 +234,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		voidedBinds: xsync.NewMap[string, struct{}](),
 	}
 	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
-		return int64(proto.Size(v))
+		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
 	})
 	e.cache = cache
 
