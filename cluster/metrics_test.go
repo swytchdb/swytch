@@ -99,4 +99,3 @@ func TestRecordPeerReconnect(t *testing.T) {
 		t.Fatal("expected reconnects counter >= 1")
 	}
 }
-

@@ -37,6 +37,7 @@ import (
 	"github.com/swytchdb/cache/redis/shared"
 	"github.com/swytchdb/cache/telemetry"
 	"github.com/swytchdb/cache/tracing"
+	"github.com/zeebo/xxh3"
 )
 
 // Version is set at build time
@@ -294,8 +295,13 @@ Examples:
 		telCtx, cancel := context.WithCancel(context.Background())
 		telemetryCancel = cancel
 		nodeID := fmt.Sprintf("%x", uint64(activeRuntime.Engine.NodeID()))
+		var clusterID string
+		if effectsCfg.JoinAddr != "" {
+			clusterID = fmt.Sprintf("%x", xxh3.HashString(effectsCfg.JoinAddr))
+		}
 		tc := telemetry.New(telemetry.Config{
 			NodeID:       nodeID,
+			ClusterID:    clusterID,
 			Version:      Version,
 			Features:     "redis",
 			AdopterEmail: *inviteMe,

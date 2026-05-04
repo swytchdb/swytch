@@ -48,6 +48,7 @@ type HeartbeatStats struct {
 
 type Config struct {
 	NodeID       string
+	ClusterID    string
 	Version      string
 	Features     string
 	AdopterEmail string
@@ -55,11 +56,12 @@ type Config struct {
 }
 
 type Client struct {
-	nodeID   string
-	version  string
-	goos     string
-	goarch   string
-	features string
+	nodeID    string
+	clusterID string
+	version   string
+	goos      string
+	goarch    string
+	features  string
 
 	adopterEmail string
 	statsFunc    func() HeartbeatStats
@@ -76,6 +78,7 @@ func New(cfg Config) *Client {
 	}
 	return &Client{
 		nodeID:            cfg.NodeID,
+		clusterID:         cfg.ClusterID,
 		version:           cfg.Version,
 		goos:              runtime.GOOS,
 		goarch:            runtime.GOARCH,
@@ -114,6 +117,9 @@ func (c *Client) sendStartup(ctx context.Context) {
 	params := url.Values{}
 	params.Set("ev", "startup")
 	params.Set("node_id", c.nodeID)
+	if c.clusterID != "" {
+		params.Set("cluster_id", c.clusterID)
+	}
 	params.Set("ver", c.version)
 	params.Set("os", c.goos)
 	params.Set("arch", c.goarch)
@@ -128,6 +134,9 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 	params := url.Values{}
 	params.Set("ev", "heartbeat")
 	params.Set("node_id", c.nodeID)
+	if c.clusterID != "" {
+		params.Set("cluster_id", c.clusterID)
+	}
 	params.Set("nodes", strconv.Itoa(stats.Nodes))
 	params.Set("uptime", strconv.Itoa(stats.UptimeSeconds))
 	if stats.MemoryAvail != 0 {

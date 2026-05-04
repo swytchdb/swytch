@@ -34,6 +34,7 @@ import (
 
 	"github.com/swytchdb/cache/beacon"
 	"github.com/swytchdb/cache/telemetry"
+	"github.com/zeebo/xxh3"
 )
 
 var Version = "dev"
@@ -154,8 +155,13 @@ func Run(args []string) error {
 		telemetryCancel = cancel
 		startTime := time.Now()
 		nodeID := fmt.Sprintf("%x", uint64(rt.Engine.NodeID()))
+		var clusterID string
+		if *joinAddr != "" {
+			clusterID = fmt.Sprintf("%x", xxh3.HashString(*joinAddr))
+		}
 		tc := telemetry.New(telemetry.Config{
 			NodeID:       nodeID,
+			ClusterID:    clusterID,
 			Version:      Version,
 			Features:     "sql",
 			AdopterEmail: *inviteMe,
