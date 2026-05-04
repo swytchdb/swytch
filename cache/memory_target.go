@@ -257,7 +257,7 @@ func (c *CloxCache[K, V]) adjustForMemoryTarget(targetBytes, avgItemSize int64) 
 		if growTarget <= currentCapacity {
 			return
 		}
-		maxIncrease := currentCapacity * 11 / 10
+		maxIncrease := currentCapacity + max(1, currentCapacity/10)
 		newCapacity := min(growTarget, maxIncrease)
 		slog.Debug("headroom available: increasing capacity",
 			"from", currentCapacity, "to", newCapacity,

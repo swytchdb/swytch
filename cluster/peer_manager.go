@@ -123,13 +123,12 @@ func (pm *PeerManager) registerInboundConn(peerID NodeId, conn *quic.Conn) (newP
 	if peerID == pm.selfID {
 		return false
 	}
-	pm.inboundMu.RLock()
+	pm.inboundMu.Lock()
 	existing := pm.inboundConns[peerID]
-	pm.inboundMu.RUnlock()
 	if existing == conn {
+		pm.inboundMu.Unlock()
 		return false
 	}
-	pm.inboundMu.Lock()
 	pm.inboundConns[peerID] = conn
 	pm.inboundMu.Unlock()
 	slog.Debug("inbound connection registered",
