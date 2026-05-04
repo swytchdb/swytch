@@ -23,6 +23,7 @@ COPY keytrie/ ./keytrie/
 COPY metrics/ ./metrics/
 COPY redis/ ./redis/
 COPY sql/ ./sql/
+COPY telemetry/ ./telemetry/
 COPY tracing/ ./tracing/
 COPY *.go .
 
