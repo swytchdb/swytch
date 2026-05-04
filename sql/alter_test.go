@@ -461,17 +461,17 @@ func TestAlterRenameTable(t *testing.T) {
 		t.Fatalf("explain post-rename: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var detail string
+	var detail strings.Builder
 	for rows.Next() {
 		var id, parent, notused int
 		var d string
 		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
 			t.Fatal(err)
 		}
-		detail += d + " | "
+		detail.WriteString(d + " | ")
 	}
-	if !strings.Contains(detail, "idx_users_name") {
-		t.Errorf("index not used post-rename: plan = %q", detail)
+	if !strings.Contains(detail.String(), "idx_users_name") {
+		t.Errorf("index not used post-rename: plan = %q", detail.String())
 	}
 
 	// DROP INDEX via the original name still works (x/<idx>.table
@@ -566,17 +566,17 @@ func TestAlterRenameColumn(t *testing.T) {
 		t.Fatalf("explain: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var plan string
+	var plan strings.Builder
 	for rows.Next() {
 		var id, parent, notused int
 		var d string
 		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
 			t.Fatal(err)
 		}
-		plan += d + " | "
+		plan.WriteString(d + " | ")
 	}
-	if !strings.Contains(plan, "idx_name") {
-		t.Errorf("index should still be used post-rename: plan = %q", plan)
+	if !strings.Contains(plan.String(), "idx_name") {
+		t.Errorf("index should still be used post-rename: plan = %q", plan.String())
 	}
 
 	// Untouched columns survive.

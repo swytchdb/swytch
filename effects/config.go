@@ -42,14 +42,14 @@ type KeyRangeRule struct {
 
 // EngineConfig holds configuration for creating an Engine.
 type EngineConfig struct {
-	NodeID         pb.NodeID
-	Index          keytrie.KeyIndex
-	Cache          StateCache      // nil disables caching
-	Broadcaster    Broadcaster     // nil for standalone
-	RTTProvider    PeerRTTProvider // nil disables RTT-based leader selection
-	DefaultMode    SafetyMode
-	KeyRangeRules  []KeyRangeRule
-	MemoryLimit    int64         // memory budget for effect cache (0 = 10MB default)
+	NodeID        pb.NodeID
+	Index         keytrie.KeyIndex
+	Cache         StateCache      // nil disables caching
+	Broadcaster   Broadcaster     // nil for standalone
+	RTTProvider   PeerRTTProvider // nil disables RTT-based leader selection
+	DefaultMode   SafetyMode
+	KeyRangeRules []KeyRangeRule
+	MemoryLimit   int64 // memory budget for effect cache (0 = 10MB default)
 	// MemoryLimitPercent, when non-zero, expresses the cache budget as a
 	// fraction (0,1] of the memory available to this process. Takes
 	// precedence over MemoryLimit. The cache enforces this via a live

@@ -104,10 +104,7 @@ func (h *HorizonSet) computeHorizonWait(peers []pb.NodeID) time.Duration {
 	// captures the real network floor; we don't invent latency on
 	// top. Capped at the configured ceiling for unreasonable
 	// measurements.
-	wait := maxRTT * 2
-	if wait > h.timeout {
-		wait = h.timeout
-	}
+	wait := min(maxRTT*2, h.timeout)
 	return wait
 }
 

@@ -256,7 +256,7 @@ func containsCaseInsensitive(s, sub string) bool {
 	ss, subs := []byte(s), []byte(sub)
 	for i := 0; i+len(subs) <= len(ss); i++ {
 		match := true
-		for j := 0; j < len(subs); j++ {
+		for j := range subs {
 			a, b := ss[i+j], subs[j]
 			if a >= 'A' && a <= 'Z' {
 				a += 'a' - 'A'

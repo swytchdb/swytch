@@ -166,7 +166,6 @@ func (b *Beacon) Members() []Member {
 	return out
 }
 
-
 // waitForSymmetricPeers blocks until at least one peer is alive+symmetric
 // in the health table, or ctx is cancelled.
 func (b *Beacon) waitForSymmetricPeers(ctx context.Context) error {

@@ -34,16 +34,16 @@ import (
 const defaultEndpoint = "https://stats.getswytch.com"
 
 type HeartbeatStats struct {
-	Nodes          int
-	UptimeSeconds  int
-	MemoryAvail    int64
-	MemoryUsage    int64
-	HitCount       uint64
-	MissCount      uint64
-	Evictions      uint64
-	EntryCount     int
-	Capacity       int
-	AverageK       float64
+	Nodes         int
+	UptimeSeconds int
+	MemoryAvail   int64
+	MemoryUsage   int64
+	HitCount      uint64
+	MissCount     uint64
+	Evictions     uint64
+	EntryCount    int
+	Capacity      int
+	AverageK      float64
 }
 
 type Config struct {

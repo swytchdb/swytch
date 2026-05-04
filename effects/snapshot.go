@@ -1032,7 +1032,6 @@ func bindsShareBase(a, b *forkChoiceBindEntry) bool {
 	return false
 }
 
-
 // sortedNodesToEffects extracts pb.Effect pointers from a topologically sorted slice.
 func sortedNodesToEffects(sorted []AnnotatedNode) []*pb.Effect {
 	effects := make([]*pb.Effect, len(sorted))

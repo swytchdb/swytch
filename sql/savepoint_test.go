@@ -192,7 +192,7 @@ func TestRollbackToRepeatedly(t *testing.T) {
 	mustExecCtx(t, conn, ctx, "INSERT INTO t VALUES (1)")
 	mustExecCtx(t, conn, ctx, "SAVEPOINT sp")
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		mustExecCtx(t, conn, ctx, "INSERT INTO t VALUES (999)")
 		mustExecCtx(t, conn, ctx, "ROLLBACK TO SAVEPOINT sp")
 	}

@@ -231,7 +231,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 			c.CollectStats = true
 			return c
 		}()),
-		voidedBinds:        xsync.NewMap[string, struct{}](),
+		voidedBinds: xsync.NewMap[string, struct{}](),
 	}
 	e.cache = cache
 

@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -278,12 +279,7 @@ func (t *tableSchema) pkColumn() *columnSchema {
 // isPKColumn reports whether the given column ordinal is part of
 // the primary key.
 func (t *tableSchema) isPKColumn(ord int) bool {
-	for _, o := range t.PKColumns {
-		if o == ord {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(t.PKColumns, ord)
 }
 
 // pkPosition returns the ordinal position of ord within t.PKColumns,

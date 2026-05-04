@@ -34,14 +34,14 @@ import (
 // are forwarded to beacon.RuntimeConfig; anything redis-specific
 // stays here.
 type EffectsConfig struct {
-	Enabled           bool
-	ClusterPassphrase string
-	JoinAddr          string
-	ClusterPort       int
-	AdvertiseAddr     string
+	Enabled            bool
+	ClusterPassphrase  string
+	JoinAddr           string
+	ClusterPort        int
+	AdvertiseAddr      string
 	MemoryLimit        int64
 	MemoryLimitPercent float64
-	Port              int // main Redis port, used to compute default ClusterPort
+	Port               int // main Redis port, used to compute default ClusterPort
 }
 
 // RegisterEffectsFlags adds effects-specific flags to the flag set.

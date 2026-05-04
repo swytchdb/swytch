@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -213,13 +214,7 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 		// old name so loadIndexSchema on a fresh context resolves
 		// to the new name.
 		for _, idx := range tbl.Indexes {
-			mustRewrite := false
-			for _, c := range idx.Columns {
-				if c == newCol {
-					mustRewrite = true
-					break
-				}
-			}
+			mustRewrite := slices.Contains(idx.Columns, newCol)
 			if !mustRewrite {
 				continue
 			}
@@ -313,10 +308,8 @@ func (s *Server) handleAlterDropColumn(sess *session, tableName, rest string) (*
 		if colIdx < 0 {
 			return fmt.Errorf("no such column: %s", colName)
 		}
-		for _, pkOrd := range tbl.PKColumns {
-			if colIdx == pkOrd {
-				return fmt.Errorf("cannot drop primary key column %q", colName)
-			}
+		if slices.Contains(tbl.PKColumns, colIdx) {
+			return fmt.Errorf("cannot drop primary key column %q", colName)
 		}
 		canonicalName := tbl.Columns[colIdx].Name
 
@@ -1004,7 +997,7 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 		if ord < 0 {
 			return nil, true, fmt.Errorf("CREATE INDEX %s: column %q not found on table %s", name, colName, table)
 		}
-		for j := 0; j < ci; j++ {
+		for j := range ci {
 			if colOrdinals[j] == ord {
 				return nil, true, fmt.Errorf("CREATE INDEX %s: duplicate column %q", name, colName)
 			}
@@ -1574,7 +1567,7 @@ func parseCreateIndex(ddl string) (name, table string, columns []string, unique 
 	if inside == "" {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty column list: %q", ddl)
 	}
-	for _, part := range strings.Split(inside, ",") {
+	for part := range strings.SplitSeq(inside, ",") {
 		col := trimIdent(strings.TrimSpace(part))
 		if col == "" {
 			return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty column in list: %q", ddl)

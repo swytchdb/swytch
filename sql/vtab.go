@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -323,10 +324,8 @@ func (v *swytchVTable) matchIndexEquality(idx *indexSchema, constraints []sqlite
 			}
 		}
 	}
-	for _, slot := range slots {
-		if slot == -1 {
-			return nil
-		}
+	if slices.Contains(slots, -1) {
+		return nil
 	}
 	return slots
 }
@@ -356,10 +355,8 @@ func (v *swytchVTable) matchPKEquality(constraints []sqlite.IndexConstraint) []i
 			}
 		}
 	}
-	for _, slot := range result {
-		if slot == -1 {
-			return nil
-		}
+	if slices.Contains(result, -1) {
+		return nil
 	}
 	return result
 }
@@ -1517,7 +1514,7 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 			return Predicate{}, fmt.Errorf("index-range plan: missing equality prefix")
 		}
 		terms := make([]Predicate, 0, len(ords)+1)
-		for i := 0; i < eqCount; i++ {
+		for i := range eqCount {
 			if ords[i] < 0 {
 				return Predicate{}, fmt.Errorf("index %q column %d missing", name, i)
 			}

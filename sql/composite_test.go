@@ -117,17 +117,17 @@ func TestCompositePKCRUD(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = rows.Close() }()
-	var plan string
+	var plan strings.Builder
 	for rows.Next() {
 		var id, parent, notused int
 		var d string
 		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
 			t.Fatal(err)
 		}
-		plan += d + " | "
+		plan.WriteString(d + " | ")
 	}
-	if !strings.Contains(plan, "INDEX 1:") {
-		t.Logf("plan: %q", plan)
+	if !strings.Contains(plan.String(), "INDEX 1:") {
+		t.Logf("plan: %q", plan.String())
 		// SQLite vtab plan IDs are reported as "INDEX <num>"; plan 1
 		// is our planPKEquality. Don't hard-fail if SQLite renders
 		// differently — the semantic test above is authoritative.

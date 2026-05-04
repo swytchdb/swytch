@@ -119,21 +119,22 @@ func NewPeerManager(config *ClusterConfig, handler EffectHandler, logReader LogR
 //
 // Registrations for this node's own NodeID are ignored — a node never
 // legitimately dials itself.
-func (pm *PeerManager) registerInboundConn(peerID NodeId, conn *quic.Conn) {
+func (pm *PeerManager) registerInboundConn(peerID NodeId, conn *quic.Conn) (newPeer bool) {
 	if peerID == pm.selfID {
-		return
+		return false
 	}
 	pm.inboundMu.RLock()
 	existing := pm.inboundConns[peerID]
 	pm.inboundMu.RUnlock()
 	if existing == conn {
-		return
+		return false
 	}
 	pm.inboundMu.Lock()
 	pm.inboundConns[peerID] = conn
 	pm.inboundMu.Unlock()
 	slog.Debug("inbound connection registered",
 		"peer", peerID, "local_node_id", pm.selfID)
+	return true
 }
 
 // forgetInboundConn removes inbound-map entries that reference the
@@ -191,8 +192,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				return pm.inboundConnFor(peerID)
 			},
 			func(peerID NodeId, conn *quic.Conn) {
-				pm.registerInboundConn(peerID, conn)
-				if peerID != pm.selfID && pm.heartbeat != nil {
+				if pm.registerInboundConn(peerID, conn) && pm.heartbeat != nil {
 					pm.heartbeat.SendHeartbeatTo(peerID)
 				}
 			},
