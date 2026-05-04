@@ -190,7 +190,12 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				}
 				return pm.inboundConnFor(peerID)
 			},
-			pm.registerInboundConn,
+			func(peerID NodeId, conn *quic.Conn) {
+				pm.registerInboundConn(peerID, conn)
+				if pm.heartbeat != nil {
+					pm.heartbeat.SendHeartbeatTo(peerID)
+				}
+			},
 		)
 
 		// Start heartbeat manager
@@ -212,7 +217,13 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 	// Connect to all peers
 	pm.mu.Lock()
 	for _, peer := range pm.config.Peers() {
-		pc := newPeerConn(peer.ID, peer.Address, peer.Region, selfRegion, pm.handler, pm.clientTLS, pm.acceptOutboundStreams)
+		peerID := peer.ID
+		pc := newPeerConn(peer.ID, peer.Address, peer.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
+			pm.acceptOutboundStreams(conn)
+			if pm.heartbeat != nil {
+				pm.heartbeat.SendHeartbeatTo(peerID)
+			}
+		})
 		pm.peers[peer.ID] = pc
 		pc.Start(pm.ctx)
 
@@ -547,7 +558,13 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 	// Connect new peers
 	for _, added := range diff.Added {
 		slog.Info("connecting to new peer", "peer", added.ID, "address", added.Address, "region", added.Region)
-		pc := newPeerConn(added.ID, added.Address, added.Region, selfRegion, pm.handler, pm.clientTLS, pm.acceptOutboundStreams)
+		peerID := added.ID
+		pc := newPeerConn(added.ID, added.Address, added.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
+			pm.acceptOutboundStreams(conn)
+			if pm.heartbeat != nil {
+				pm.heartbeat.SendHeartbeatTo(peerID)
+			}
+		})
 		pm.peers[added.ID] = pc
 		pc.Start(pm.ctx)
 		pm.registerPeer(added)
@@ -561,7 +578,13 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 			delete(pm.peers, changed.ID)
 		}
 		pm.unregisterPeer(changed.ID)
-		pc := newPeerConn(changed.ID, changed.Address, changed.Region, selfRegion, pm.handler, pm.clientTLS, pm.acceptOutboundStreams)
+		peerID := changed.ID
+		pc := newPeerConn(changed.ID, changed.Address, changed.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
+			pm.acceptOutboundStreams(conn)
+			if pm.heartbeat != nil {
+				pm.heartbeat.SendHeartbeatTo(peerID)
+			}
+		})
 		pm.peers[changed.ID] = pc
 		pc.Start(pm.ctx)
 		pm.registerPeer(changed)

@@ -104,6 +104,20 @@ func (hm *HeartbeatManager) Start(sendFunc func(peerID NodeId, data []byte) erro
 	go hm.livenessLoop()
 }
 
+// SendHeartbeatTo sends a single heartbeat to a specific peer immediately,
+// bypassing the ticker. Used to accelerate symmetry establishment on new
+// connections.
+func (hm *HeartbeatManager) SendHeartbeatTo(peerID NodeId) {
+	if hm.sendFunc == nil {
+		return
+	}
+	timestamp := uint64(time.Now().UnixNano())
+	packet := MarshalHeartbeat(hm.nodeID, timestamp)
+	if err := hm.sendFunc(peerID, packet); err != nil {
+		slog.Debug("immediate heartbeat send failed", "peer", peerID, "error", err)
+	}
+}
+
 // Stop stops the heartbeat manager.
 func (hm *HeartbeatManager) Stop() {
 	close(hm.cancel)

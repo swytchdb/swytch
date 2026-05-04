@@ -100,6 +100,23 @@ func (b *Beacon) Start(ctx context.Context) error {
 		}
 	}
 
+	if b.cfg.JoinAddr != "" && b.expectedPeers > 0 {
+		// Phase 1.5: Wait for at least one peer to become alive+symmetric
+		// via heartbeat exchange. With immediate heartbeats sent on
+		// connection (PeerManager wiring), this completes in <100ms.
+		// Required so registerSelf's SafeMode replication has valid targets.
+		symCtx, symCancel := context.WithTimeout(b.ctx, 10*time.Second)
+		if err := b.waitForSymmetricPeers(symCtx); err != nil {
+			slog.Warn("beacon: no symmetric peers available, continuing anyway", "error", err)
+		}
+		symCancel()
+
+		// Phase 1.75: Subscribe to the membership key before registering
+		// self. NACKs from peers carry their existing membership tips so
+		// the local engine has peer data before registerSelf runs.
+		b.primeSubscription()
+	}
+
 	// Phase 2: Register self in membership. Local emit — fast.
 	if err := b.registerSelf(); err != nil {
 		return err
@@ -148,6 +165,36 @@ func (b *Beacon) Members() []Member {
 	return out
 }
 
+
+// waitForSymmetricPeers blocks until at least one peer is alive+symmetric
+// in the health table, or ctx is cancelled.
+func (b *Beacon) waitForSymmetricPeers(ctx context.Context) error {
+	ht := b.pm.HealthTable()
+	if ht == nil {
+		return nil
+	}
+	for {
+		if len(ht.AlivePeerIDs()) > 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// primeSubscription triggers an early subscription to the membership key
+// by calling GetSnapshot. NACKs from peers carry their existing membership
+// tips into the local engine. Errors are non-fatal since the subscription
+// will be retried during waitForMembershipConverged.
+func (b *Beacon) primeSubscription() {
+	_, _, _, err := b.engine.GetSnapshot(MembershipKey)
+	if err != nil {
+		slog.Debug("beacon: prime subscription incomplete (will retry)", "error", err)
+	}
+}
 
 // registerSelf writes this node's INSERT_OP + type tag + initial TTL.
 func (b *Beacon) registerSelf() error {
