@@ -440,7 +440,7 @@ func (r *Replicator) HandleNotify(peerID NodeId, requestID uint64, notify *pb.Of
 		"key", string(notify.GetKey()),
 		"offset", notify.GetOrigin().GetOffset())
 
-	RecordNotificationReceived(peerID, notify.GetHlc().AsTime(), notify.GetSendTime())
+	RecordNotificationReceived()
 
 	var nacks []*pb.NackNotify
 	if r.handler != nil && notify != nil {

@@ -21,45 +21,9 @@ package cluster
 
 import (
 	"fmt"
-	"math"
-	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-)
-
-// --- 9.1 Replication Latency ---
-
-var (
-	lslMs = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cluster_lsl_ms",
-		Help: "Light-speed latency to each peer in ms (minimum observed HLC delta over sliding window)",
-	}, []string{"peer"})
-
-	protocolOverheadMs = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cluster_protocol_overhead_ms",
-		Help: "Extra latency beyond LSL (observed_latency - lsl)",
-	}, []string{"peer"})
-)
-
-// --- 9.2 Causality ---
-
-var (
-	causalityViolationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cluster_causality_violations_total",
-		Help: "Counter of effects arriving with HLC beyond the causal horizon",
-	}, []string{"peer"})
-
-	causalHorizonMs = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cluster_causal_horizon_ms",
-		Help: "Causal horizon width per peer: max observed HLC drift (ms). Effects with HLC > now + this value are violations.",
-	}, []string{"peer"})
-
-	maxHlcDriftMs = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cluster_max_hlc_drift_ms",
-		Help: "Maximum observed HLC drift per peer",
-	}, []string{"peer"})
 )
 
 // --- 9.3 Throughput ---
@@ -251,55 +215,6 @@ func RecordRetransmissionGiveUp(peerID NodeId) {
 	retransmissionGiveUpsTotal.WithLabelValues(peerLabel(peerID)).Inc()
 }
 
-// --- LSL Tracker ---
-
-// Peak-hold decay constants (like audio meter red-lines)
-const (
-	peakHoldDuration  = 2 * time.Minute  // Hold peak for this long before decay
-	peakDecayHalfLife = 30 * time.Second // Half-life for exponential decay
-)
-
-// peakHold tracks a peak value with decay behavior like audio meters.
-// The peak jumps instantly to new highs, holds for a period, then
-// exponentially decays toward the current observed value.
-type peakHold struct {
-	peak     float64   // Current peak value
-	peakTime time.Time // When peak was last set
-	current  float64   // Most recent observed value
-}
-
-// lslTracker maintains a sliding window minimum for light-speed latency per peer
-// and tracks HLC drift with peak-hold decay behavior.
-type lslTracker struct {
-	mu        sync.Mutex
-	minByMs   map[string]float64   // peer label -> min LSL in ms
-	driftPeak map[string]*peakHold // peer label -> peak drift with decay
-}
-
-var lslState = &lslTracker{
-	minByMs:   make(map[string]float64),
-	driftPeak: make(map[string]*peakHold),
-}
-
-// getPeakWithDecay returns the current peak value after applying decay.
-// If the peak was set more than peakHoldDuration ago, it decays exponentially
-// toward the current observed value.
-func (ph *peakHold) getPeakWithDecay(now time.Time) float64 {
-	elapsed := now.Sub(ph.peakTime)
-	if elapsed <= peakHoldDuration {
-		// Still in hold period, return full peak
-		return ph.peak
-	}
-
-	// Apply exponential decay toward current value
-	decayTime := elapsed - peakHoldDuration
-	// decay = e^(-t * ln(2) / halfLife) = 0.5^(t/halfLife)
-	decayFactor := math.Pow(0.5, float64(decayTime)/float64(peakDecayHalfLife))
-
-	// Interpolate between current and peak based on decay
-	return ph.current + (ph.peak-ph.current)*decayFactor
-}
-
 // --- Inline metric update functions ---
 
 // RecordNotificationSent increments the sent counter for a broadcast.
@@ -307,89 +222,9 @@ func RecordNotificationSent() {
 	NotificationsSentTotal.Inc()
 }
 
-// RecordNotificationReceived records receipt of an OffsetNotify from a peer.
-// Computes latency metrics from the send_time timestamp (wall clock at send).
-// The sendTimeNs parameter is the sender's wall clock at transmission time (nanoseconds).
-// If sendTimeNs is 0 (legacy message), falls back to hlcNs for backward compatibility.
-func RecordNotificationReceived(peerID NodeId, hlc time.Time, sendTimeNs uint64) {
+// RecordNotificationReceived increments the received counter.
+func RecordNotificationReceived() {
 	NotificationsReceivedTotal.Inc()
-
-	peer := peerLabel(peerID)
-	now := time.Now()
-	nowMs := float64(now.UnixMilli())
-
-	// Use send_time for drift measurement (actual clock drift between nodes)
-	// Fall back to HLC if send_time not present (backward compatibility)
-	var driftSourceMs float64
-	if sendTimeNs > 0 {
-		driftSourceMs = float64(sendTimeNs) / 1e6
-	} else {
-		driftSourceMs = float64(hlc.UnixNano()) / 1e6
-	}
-
-	// Clock drift: sender_wall_clock - receiver_wall_clock
-	// Positive = sender clock ahead, Negative = sender clock behind
-	driftMs := driftSourceMs - nowMs
-
-	// LSL approximation: minimum observed |drift| over time
-	absDrift := math.Abs(driftMs)
-	lslState.mu.Lock()
-	currentMin, ok := lslState.minByMs[peer]
-	if !ok || absDrift < currentMin {
-		lslState.minByMs[peer] = absDrift
-		currentMin = absDrift
-	}
-
-	// Peak-hold drift tracking with decay (like audio meter red-lines)
-	ph, exists := lslState.driftPeak[peer]
-	var prevPeak float64
-	if !exists {
-		ph = &peakHold{
-			peak:     absDrift,
-			peakTime: now,
-			current:  absDrift,
-		}
-		lslState.driftPeak[peer] = ph
-		prevPeak = 0 // No previous peak for new peers
-	} else {
-		// Capture previous peak BEFORE any updates (for violation check)
-		prevPeak = ph.getPeakWithDecay(now)
-
-		// Always update current observed value
-		ph.current = absDrift
-
-		// Get the decayed peak value
-		decayedPeak := prevPeak
-
-		// If new value exceeds decayed peak, set new peak
-		if absDrift > decayedPeak {
-			ph.peak = absDrift
-			ph.peakTime = now
-		} else {
-			// Update peak to the decayed value (so decay is persistent)
-			ph.peak = decayedPeak
-		}
-	}
-
-	currentPeak := ph.peak
-	lslState.mu.Unlock()
-
-	lslMs.WithLabelValues(peer).Set(currentMin)
-	protocolOverheadMs.WithLabelValues(peer).Set(absDrift - currentMin)
-	maxHlcDriftMs.WithLabelValues(peer).Set(currentPeak)
-
-	// Causal horizon per §6.3 of the whitepaper: the point in time beyond which
-	// no unobserved effect can exist is now + max_drift. An effect with HLC past
-	// that horizon claims a timestamp that exceeds any previously observed drift,
-	// indicating clock divergence or data corruption.
-	causalHorizonMs.WithLabelValues(peer).Set(currentPeak)
-
-	if exists {
-		horizon := nowMs + prevPeak
-		if driftSourceMs > horizon {
-			causalityViolationsTotal.WithLabelValues(peer).Inc()
-		}
-	}
 }
 
 // --- 9.10 QUIC Transport ---

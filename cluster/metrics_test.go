@@ -20,25 +20,11 @@
 package cluster
 
 import (
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
-
-// nextTestPeerID generates unique peer IDs across test runs in the same process,
-// so that -count=N doesn't pollute lslState between iterations.
-var nextTestPeerID atomic.Uint64
-
-func init() {
-	nextTestPeerID.Store(1000)
-}
-
-func uniquePeerID() NodeId {
-	return NodeId(nextTestPeerID.Add(1))
-}
 
 func getCounterValue(c prometheus.Counter) float64 {
 	var m dto.Metric
@@ -63,8 +49,7 @@ func TestRecordNotificationSent(t *testing.T) {
 
 func TestRecordNotificationReceived(t *testing.T) {
 	before := getCounterValue(NotificationsReceivedTotal)
-	now := time.Now()
-	RecordNotificationReceived(42, now, uint64(now.UnixNano()))
+	RecordNotificationReceived()
 	after := getCounterValue(NotificationsReceivedTotal)
 	if after != before+1 {
 		t.Fatalf("expected counter to increment by 1, got %f -> %f", before, after)
@@ -115,77 +100,3 @@ func TestRecordPeerReconnect(t *testing.T) {
 	}
 }
 
-func TestCausalityViolationNotTriggeredForNormalDrift(t *testing.T) {
-	peerID := uniquePeerID()
-
-	before := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-
-	// First message: send_time 100ms in the past (normal network delay).
-	// This establishes max_drift = 100ms.
-	now := time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(-100*time.Millisecond).UnixNano()))
-
-	// Second message: send_time 50ms in the past (less drift than max).
-	now = time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(-50*time.Millisecond).UnixNano()))
-
-	after := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-	if after != before {
-		t.Fatalf("expected no causality violations for normal drift, got %f new violations", after-before)
-	}
-}
-
-func TestCausalityViolationNotTriggeredForModestFutureDrift(t *testing.T) {
-	peerID := uniquePeerID()
-
-	before := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-
-	// First message: send_time 200ms in the past. Establishes max_drift = 200ms.
-	now := time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(-200*time.Millisecond).UnixNano()))
-
-	// Second message: send_time 100ms in the FUTURE. This is within the horizon
-	// (now + 200ms), so it should NOT be a violation.
-	now = time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(100*time.Millisecond).UnixNano()))
-
-	after := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-	if after != before {
-		t.Fatalf("expected no causality violation for drift within horizon, got %f new violations", after-before)
-	}
-}
-
-func TestCausalityViolationTriggeredBeyondHorizon(t *testing.T) {
-	peerID := uniquePeerID()
-
-	before := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-
-	// First message: send_time 50ms in the past. Establishes max_drift = 50ms.
-	now := time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(-50*time.Millisecond).UnixNano()))
-
-	// Second message: send_time 500ms in the FUTURE. This far exceeds the horizon
-	// (now + max_drift where max_drift was 50ms), so it IS a violation.
-	now = time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(500*time.Millisecond).UnixNano()))
-
-	after := getCounterValue(causalityViolationsTotal.WithLabelValues(peerLabel(peerID)))
-	if after <= before {
-		t.Fatal("expected causality violation for send_time far beyond horizon")
-	}
-}
-
-func TestCausalHorizonGaugeReflectsMaxDrift(t *testing.T) {
-	peerID := uniquePeerID()
-	peer := peerLabel(peerID)
-
-	// Send a message with send_time 150ms in the past. max_drift = 150ms.
-	now := time.Now()
-	RecordNotificationReceived(peerID, now, uint64(now.Add(-150*time.Millisecond).UnixNano()))
-
-	horizonVal := getGaugeValue(causalHorizonMs.WithLabelValues(peer))
-	// The gauge should reflect max_drift (~150ms), not an absolute timestamp.
-	if horizonVal < 100 || horizonVal > 250 {
-		t.Fatalf("expected causal horizon gauge ~150 (max_drift), got %f", horizonVal)
-	}
-}
