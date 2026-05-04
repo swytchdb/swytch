@@ -274,10 +274,6 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	// Send to cross-region peers (fire-and-forget, off critical path)
 	go r.sendCrossRegion(notify, wireData, regions)
 
-	// Also fire-and-forget to dead same-region peers so they receive
-	// effects when the partition heals — don't wait for ACKs from these.
-	go r.sendToDeadPeers(notify, wireData, regions, targets)
-
 	// No alive same-region targets — fail immediately
 	if len(targets) == 0 {
 		return rejectedFuture(ErrNoPeers)
@@ -337,40 +333,6 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	}
 
 	return future
-}
-
-// sendToDeadPeers sends fire-and-forget notifications to same-region peers
-// that are currently dead. This ensures they receive effects when the
-// partition heals, without blocking the caller or tracking ACKs.
-func (r *Replicator) sendToDeadPeers(notify *pb.OffsetNotify, wireData []byte, regions map[NodeId]string, aliveTargets []NodeId) {
-	allPeers := r.healthTable.AllSameRegionPeers(r.localRegion, regions)
-
-	aliveSet := make(map[NodeId]bool, len(aliveTargets))
-	for _, id := range aliveTargets {
-		aliveSet[id] = true
-	}
-
-	var fullNotify *pb.OffsetNotify
-
-	for _, peerID := range allPeers {
-		if aliveSet[peerID] {
-			continue
-		}
-
-		if fullNotify == nil {
-			fullNotify = proto.Clone(notify).(*pb.OffsetNotify)
-			fullNotify.EffectData = wireData
-		}
-
-		requestID := r.tracker.nextID.Add(1)
-		notifyPkt, err := MarshalNotifyPacket(requestID, fullNotify)
-		if err != nil {
-			continue
-		}
-
-		// Fire and forget
-		_, _ = r.transport.Send(peerID, notifyPkt)
-	}
 }
 
 // sendCrossRegion sends the notification to all cross-region peers.
