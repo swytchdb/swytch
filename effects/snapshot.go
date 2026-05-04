@@ -393,15 +393,18 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		return nil, 0, nil
 	}
 
-	// Separate isolated subscription roots from data nodes. Isolated
-	// subscriptions (no deps) don't carry data but their presence as
-	// disconnected components prevents snapshot seeding. Resolve the
-	// data chain first (with snapshot optimization), then reduce subs
-	// on top (idempotent — double-counting subscriptions is a no-op).
-	var dataNodes, subRoots []*DAGNode
+	// Separate isolated subscription roots from the resolution path.
+	// Build the data DAG without them (their deps from data nodes become
+	// dangling and are ignored by BuildDAG). Resolve the data chain with
+	// snapshot seeding, then reduce subscription effects on top — subs
+	// are commutative with data and implicitly depend on everything else.
+	subRootOffsets := make(map[Tip]bool)
+	var dataNodes []*DAGNode
+	var subRootEffects []*pb.Effect
 	for _, n := range nodes {
 		if n.Effect.GetSubscription() != nil && len(n.Effect.Deps) == 0 {
-			subRoots = append(subRoots, n)
+			subRootOffsets[n.Offset] = true
+			subRootEffects = append(subRootEffects, n.Effect)
 		} else {
 			dataNodes = append(dataNodes, n)
 		}
@@ -414,12 +417,8 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		slog.Debug("DAG", "encoded", encodeDAG(dag), "key", key, "txn_id", txID)
 		result = resolveFull(dag)
 	}
-	if len(subRoots) > 0 {
-		subEffects := make([]*pb.Effect, len(subRoots))
-		for i, n := range subRoots {
-			subEffects[i] = n.Effect
-		}
-		result = ReduceChain(result, subEffects)
+	if len(subRootEffects) > 0 {
+		result = ReduceChain(result, subRootEffects)
 	}
 
 	// Prune stale tips: any index tip that was successfully read and
