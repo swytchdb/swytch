@@ -239,12 +239,12 @@ func (b *Beacon) refreshLoop() {
 		case <-b.ctx.Done():
 			return
 		case <-ticker.C:
-			snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey)
+			ctx := b.engine.NewContext()
+			snapshot, _, err := ctx.GetSnapshot(MembershipKey)
 			if err != nil {
 				slog.Debug("beacon: failed to read membership before TTL refresh", "error", err)
 				continue
 			}
-			ctx := b.engine.NewContext()
 			if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
 				slog.Warn("beacon: failed to emit TTL refresh", "error", err)
 				continue
