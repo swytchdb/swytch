@@ -192,7 +192,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 			},
 			func(peerID NodeId, conn *quic.Conn) {
 				pm.registerInboundConn(peerID, conn)
-				if pm.heartbeat != nil {
+				if peerID != pm.selfID && pm.heartbeat != nil {
 					pm.heartbeat.SendHeartbeatTo(peerID)
 				}
 			},

@@ -106,15 +106,16 @@ func (b *Beacon) Start(ctx context.Context) error {
 		// connection (PeerManager wiring), this completes in <100ms.
 		// Required so registerSelf's SafeMode replication has valid targets.
 		symCtx, symCancel := context.WithTimeout(b.ctx, 10*time.Second)
-		if err := b.waitForSymmetricPeers(symCtx); err != nil {
-			slog.Warn("beacon: no symmetric peers available, continuing anyway", "error", err)
-		}
+		err := b.waitForSymmetricPeers(symCtx)
 		symCancel()
-
-		// Phase 1.75: Subscribe to the membership key before registering
-		// self. NACKs from peers carry their existing membership tips so
-		// the local engine has peer data before registerSelf runs.
-		b.primeSubscription()
+		if err != nil {
+			slog.Warn("beacon: no symmetric peers available, skipping prime subscription", "error", err)
+		} else {
+			// Phase 1.75: Subscribe to the membership key before registering
+			// self. NACKs from peers carry their existing membership tips so
+			// the local engine has peer data before registerSelf runs.
+			b.primeSubscription()
+		}
 	}
 
 	// Phase 2: Register self in membership. Local emit — fast.

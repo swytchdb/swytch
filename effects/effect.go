@@ -226,7 +226,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
-		effectCache:        clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))),
+		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
+			c := clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))
+			c.CollectStats = true
+			return c
+		}()),
 		voidedBinds:        xsync.NewMap[string, struct{}](),
 	}
 	e.cache = cache
