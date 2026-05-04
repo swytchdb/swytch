@@ -227,7 +227,9 @@ func (b *Beacon) refreshLoop() {
 	// pinned to the DNS-synthetic view until the first tick fires,
 	// which at the 10s default is long enough for an early client
 	// query to route against an incomplete peer set.
-	b.syncMembership()
+	if snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey); err == nil {
+		b.syncMembership(snapshot)
+	}
 
 	ticker := time.NewTicker(b.cfg.heartbeatInterval())
 	defer ticker.Stop()
@@ -237,7 +239,11 @@ func (b *Beacon) refreshLoop() {
 		case <-b.ctx.Done():
 			return
 		case <-ticker.C:
-			b.engine.GetSnapshot(MembershipKey)
+			snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey)
+			if err != nil {
+				slog.Debug("beacon: failed to read membership before TTL refresh", "error", err)
+				continue
+			}
 			ctx := b.engine.NewContext()
 			if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
 				slog.Warn("beacon: failed to emit TTL refresh", "error", err)
@@ -246,20 +252,14 @@ func (b *Beacon) refreshLoop() {
 			if err := ctx.Flush(); err != nil {
 				slog.Warn("beacon: failed to flush TTL refresh", "error", err)
 			}
-			b.syncMembership()
+			b.syncMembership(snapshot)
 		}
 	}
 }
 
-// syncMembership reads the current __swytch:members snapshot and updates
-// the PeerManager topology if the member set has changed.
-func (b *Beacon) syncMembership() {
-	snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey)
-	if err != nil {
-		slog.Debug("beacon: failed to read membership", "error", err)
-		return
-	}
-
+// syncMembership updates the PeerManager topology from the given snapshot
+// if the member set has changed.
+func (b *Beacon) syncMembership(snapshot *pb.ReducedEffect) {
 	members := parseMembership(snapshot)
 
 	b.mu.Lock()
