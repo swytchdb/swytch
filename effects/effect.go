@@ -233,6 +233,9 @@ func NewEngine(cfg EngineConfig) *Engine {
 		}()),
 		voidedBinds: xsync.NewMap[string, struct{}](),
 	}
+	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
+		return int64(proto.Size(v))
+	})
 	e.cache = cache
 
 	// Percent-based memory limit: delegate to cloxcache's live
