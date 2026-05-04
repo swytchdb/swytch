@@ -130,6 +130,7 @@ func (hm *HeartbeatManager) Stop() {
 func (hm *HeartbeatManager) ProcessInbound(peerID NodeId, timestamp uint64) {
 	now := time.Now()
 	ph := hm.healthTable.GetOrCreate(peerID)
+	RecordHeartbeatReceived()
 
 	// Detect dead→alive transition before updating state
 	wasAlive := ph.alive.Load()
