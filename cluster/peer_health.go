@@ -177,6 +177,18 @@ func (t *PeerHealthTable) AlivePeerIDs() []NodeId {
 	return result
 }
 
+// PruneUnknownPeers removes health table entries for peers not present in the
+// given set of known peer IDs. This prevents unbounded growth from transient
+// inbound connections (e.g. crash-looping joiners).
+func (t *PeerHealthTable) PruneUnknownPeers(known map[NodeId]struct{}) {
+	t.peers.Range(func(nodeID NodeId, _ *PeerHealth) bool {
+		if _, ok := known[nodeID]; !ok {
+			t.peers.Delete(nodeID)
+		}
+		return true
+	})
+}
+
 // CheckLiveness marks peers as dead if their last heartbeat exceeds the timeout.
 func (t *PeerHealthTable) CheckLiveness(timeout time.Duration) {
 	deadline := time.Now().Add(-timeout).UnixNano()

@@ -590,6 +590,14 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 	}
 
 	pm.config = newCfg
+
+	if pm.healthTable != nil {
+		known := make(map[NodeId]struct{}, len(newCfg.Nodes))
+		for _, n := range newCfg.Nodes {
+			known[n.ID] = struct{}{}
+		}
+		pm.healthTable.PruneUnknownPeers(known)
+	}
 }
 
 // WaitForPeer blocks until the given peer's stream is ready or context is cancelled.
