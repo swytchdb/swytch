@@ -1057,7 +1057,17 @@ type collectResult struct {
 }
 
 func (e *Engine) collectReachableNodes(key string, tips []Tip) (*collectResult, error) {
-	linear := len(tips) <= 1
+	// Subscription effects are isolated nodes (no deps, no descendants)
+	// that don't participate in the data chain. Exclude them when
+	// determining linearity so the snapshot stop optimization fires
+	// for keys with many subscribers but a single data chain.
+	dataTips := 0
+	for _, tip := range tips {
+		if eff, err := e.getEffect(tip); err == nil && eff.GetSubscription() == nil {
+			dataTips++
+		}
+	}
+	linear := dataTips <= 1
 	visited := make(map[Tip]bool)
 	var nodes []*DAGNode
 	stack := make([]Tip, len(tips))
