@@ -393,9 +393,34 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		return nil, 0, nil
 	}
 
-	dag := BuildDAG(nodes)
-	slog.Debug("DAG", "encoded", encodeDAG(dag), "key", key, "txn_id", txID)
-	result := resolveFull(dag)
+	// Separate isolated subscription roots from data nodes. Isolated
+	// subscriptions (no deps) don't carry data but their presence as
+	// disconnected components prevents snapshot seeding. Resolve the
+	// data chain first (with snapshot optimization), then reduce subs
+	// on top (idempotent — double-counting subscriptions is a no-op).
+	var dataNodes, subRoots []*DAGNode
+	for _, n := range nodes {
+		if n.Effect.GetSubscription() != nil && len(n.Effect.Deps) == 0 {
+			subRoots = append(subRoots, n)
+		} else {
+			dataNodes = append(dataNodes, n)
+		}
+	}
+
+	var result *pb.ReducedEffect
+	var dag *DAG
+	if len(dataNodes) > 0 {
+		dag = BuildDAG(dataNodes)
+		slog.Debug("DAG", "encoded", encodeDAG(dag), "key", key, "txn_id", txID)
+		result = resolveFull(dag)
+	}
+	if len(subRoots) > 0 {
+		subEffects := make([]*pb.Effect, len(subRoots))
+		for i, n := range subRoots {
+			subEffects[i] = n.Effect
+		}
+		result = ReduceChain(result, subEffects)
+	}
 
 	// Prune stale tips: any index tip that was successfully read and
 	// is an ancestor (not a real DAG tip) gets removed. This keeps the
@@ -417,7 +442,10 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	//      against committed-tip supersessions keeps the index
 	//      consistent regardless of whether any in-flight tx
 	//      eventually commits or aborts.
-	dagTips := dag.Tips()
+	var dagTips []*DAGNode
+	if dag != nil {
+		dagTips = dag.Tips()
+	}
 	if len(dagTips) < len(tips) && len(nodes) > 0 {
 		currentIndex := e.index.Contains(key)
 		indexSet := map[Tip]bool{}

@@ -649,6 +649,108 @@ func TestGetSnapshot_SubscriptionBroadcast(t *testing.T) {
 	}
 }
 
+// TestGetSnapshot_SnapshotStopsAtLinearChainWithSubscriptionTips verifies that
+// when subscription effects exist as tips alongside a single data chain with a
+// snapshot, the snapshot stop optimization fires (subscriptions don't prevent
+// linearity) and no subscription information is lost.
+func TestGetSnapshot_SnapshotStopsAtLinearChainWithSubscriptionTips(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	// Build a chain: E1(insert) → E2(meta/ttl) → Snap(state=1) → E3(meta/ttl)
+	// Plus 3 subscription effects as isolated roots that get consumed by E2.
+	sub1 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(1), NodeId: 10,
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 10}},
+	})
+	sub2 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(2), NodeId: 20,
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 20}},
+	})
+	sub3 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(3), NodeId: 30,
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 30}},
+	})
+
+	e1 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 5)},
+	})
+
+	// E2 consumes subscriptions + E1 as deps (simulating what Emit does)
+	e2 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(20), NodeId: 1,
+		Deps: []*pb.EffectRef{toPbRef(e1), toPbRef(sub1), toPbRef(sub2), toPbRef(sub3)},
+		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
+			ElementId: []byte("node1"),
+			ExpiresAt: sTs(999999999),
+		}},
+	})
+
+	// Snapshot materializes state at E2
+	snap := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(30), NodeId: 1,
+		Deps: []*pb.EffectRef{toPbRef(e2)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			Collection: pb.CollectionKind_SCALAR,
+			State: &pb.ReducedEffect{
+				Op:         pb.EffectOp_INSERT_OP,
+				Merge:      pb.MergeRule_ADDITIVE_INT,
+				Collection: pb.CollectionKind_SCALAR,
+				Hlc:        sTs(20), NodeId: 1,
+				Scalar: &pb.DataEffect{
+					Op:    pb.EffectOp_INSERT_OP,
+					Merge: pb.MergeRule_ADDITIVE_INT,
+					Value: &pb.DataEffect_IntVal{IntVal: 5},
+				},
+			},
+		}},
+	})
+
+	// E3: another increment after the snapshot
+	tip := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(40), NodeId: 1,
+		Deps: []*pb.EffectRef{toPbRef(snap)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 3)},
+	})
+
+	// Tips: tip (data) + sub1, sub2, sub3 (subscriptions still as tips if not consumed)
+	// In this case subs were consumed by E2, so only tip is a real tip.
+	// But let's simulate the case where new subs arrive AFTER the snapshot:
+	sub4 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(50), NodeId: 40,
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 40}},
+	})
+
+	// Index has tip + sub4 as tips (sub1-3 consumed by E2, not tips)
+	e.index.Insert("k", nil, keytrie.NewTipSet(tip, sub4))
+
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot(5) + E3(3) = 8
+	if r.Scalar.GetIntVal() != 8 {
+		t.Fatalf("expected 8, got %d", r.Scalar.GetIntVal())
+	}
+
+	// Verify via collectReachableNodes that we stopped at the snapshot
+	// and didn't walk all the way to E1/subs
+	cr, err := e.collectReachableNodes("k", []Tip{tip, sub4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should collect: tip, snap, sub4 = 3 nodes (stopped at snap, didn't collect E2, E1, sub1-3)
+	if len(cr.nodes) != 3 {
+		t.Fatalf("expected 3 collected nodes (tip, snap, sub4), got %d", len(cr.nodes))
+	}
+
+	_ = sub1
+	_ = sub2
+	_ = sub3
+	_ = e2
+}
+
 func TestGetSnapshot_MetaWithData(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log, nil)
