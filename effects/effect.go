@@ -1178,10 +1178,19 @@ func (e *Engine) probeAndFetchKey(key string) {
 	e.pendingBootstraps.Store(key, collector)
 	defer e.pendingBootstraps.Delete(key)
 
-	peerIDs := e.broadcaster.PeerIDs()
+	var alivePeers []pb.NodeID
+	if e.rttProvider != nil {
+		alivePeers = e.rttProvider.AlivePeerIDs()
+	} else {
+		alivePeers = e.broadcaster.PeerIDs()
+	}
+	if len(alivePeers) == 0 {
+		return
+	}
+
 	var ackCount atomic.Int32
 	var wg sync.WaitGroup
-	for _, pid := range peerIDs {
+	for _, pid := range alivePeers {
 		wg.Add(1)
 		go func(pid pb.NodeID) {
 			defer wg.Done()
