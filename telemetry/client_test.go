@@ -125,7 +125,11 @@ func TestHeartbeatEvent(t *testing.T) {
 				MemoryAvail:   1024,
 				MemoryUsage:   512,
 				HitCount:      100,
-				MissNoData:    10,
+				MissCount:     10,
+				Evictions:     3,
+				EntryCount:    50,
+				Capacity:      200,
+				AverageK:      1.5,
 			}
 		},
 	})
@@ -160,11 +164,20 @@ func TestHeartbeatEvent(t *testing.T) {
 	if hb.Get("hit_count") != "100" {
 		t.Errorf("expected hit_count=100, got %q", hb.Get("hit_count"))
 	}
-	if hb.Get("miss_no_data_count") != "10" {
-		t.Errorf("expected miss_no_data_count=10, got %q", hb.Get("miss_no_data_count"))
+	if hb.Get("miss_count") != "10" {
+		t.Errorf("expected miss_count=10, got %q", hb.Get("miss_count"))
 	}
-	if hb.Get("miss_remote_data_count") != "" {
-		t.Errorf("expected miss_remote_data_count omitted, got %q", hb.Get("miss_remote_data_count"))
+	if hb.Get("evictions") != "3" {
+		t.Errorf("expected evictions=3, got %q", hb.Get("evictions"))
+	}
+	if hb.Get("entry_count") != "50" {
+		t.Errorf("expected entry_count=50, got %q", hb.Get("entry_count"))
+	}
+	if hb.Get("capacity") != "200" {
+		t.Errorf("expected capacity=200, got %q", hb.Get("capacity"))
+	}
+	if hb.Get("average_k") != "1.50" {
+		t.Errorf("expected average_k=1.50, got %q", hb.Get("average_k"))
 	}
 }
 
@@ -188,7 +201,7 @@ func TestHeartbeatOmitsZeroOptionals(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(reqs))
 	}
 	hb := reqs[0]
-	for _, key := range []string{"memory_available", "memory_usage", "hit_count", "miss_no_data_count", "miss_remote_data_count"} {
+	for _, key := range []string{"memory_available", "memory_usage", "hit_count", "miss_count", "evictions", "entry_count", "capacity", "average_k"} {
 		if hb.Get(key) != "" {
 			t.Errorf("expected %s omitted, got %q", key, hb.Get(key))
 		}

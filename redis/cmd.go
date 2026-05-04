@@ -304,13 +304,19 @@ Examples:
 				if activeRuntime != nil && activeRuntime.PeerManager != nil {
 					nodes = len(activeRuntime.PeerManager.PeerIDs()) + 1
 				}
+				ec := activeRuntime.Engine.EffectCache()
+				hits, misses, evictions := ec.Stats()
 				return telemetry.HeartbeatStats{
 					Nodes:         nodes,
 					UptimeSeconds: int(adapter.UptimeSeconds()),
-					MemoryAvail:   adapter.MaxMemoryBytes(),
-					MemoryUsage:   adapter.MemoryBytes(),
-					HitCount:      adapter.CacheHits(),
-					MissNoData:    adapter.CacheMisses(),
+					MemoryAvail:   ec.MemoryLimit(),
+					MemoryUsage:   ec.Bytes(),
+					HitCount:      hits,
+					MissCount:     misses,
+					Evictions:     evictions,
+					EntryCount:    ec.EntryCount(),
+					Capacity:      ec.Capacity(),
+					AverageK:      ec.AverageK(),
 				}
 			},
 		})

@@ -39,8 +39,11 @@ type HeartbeatStats struct {
 	MemoryAvail    int64
 	MemoryUsage    int64
 	HitCount       uint64
-	MissNoData     uint64
-	MissRemoteData uint64
+	MissCount      uint64
+	Evictions      uint64
+	EntryCount     int
+	Capacity       int
+	AverageK       float64
 }
 
 type Config struct {
@@ -136,11 +139,20 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 	if stats.HitCount != 0 {
 		params.Set("hit_count", strconv.FormatUint(stats.HitCount, 10))
 	}
-	if stats.MissNoData != 0 {
-		params.Set("miss_no_data_count", strconv.FormatUint(stats.MissNoData, 10))
+	if stats.MissCount != 0 {
+		params.Set("miss_count", strconv.FormatUint(stats.MissCount, 10))
 	}
-	if stats.MissRemoteData != 0 {
-		params.Set("miss_remote_data_count", strconv.FormatUint(stats.MissRemoteData, 10))
+	if stats.Evictions != 0 {
+		params.Set("evictions", strconv.FormatUint(stats.Evictions, 10))
+	}
+	if stats.EntryCount != 0 {
+		params.Set("entry_count", strconv.Itoa(stats.EntryCount))
+	}
+	if stats.Capacity != 0 {
+		params.Set("capacity", strconv.Itoa(stats.Capacity))
+	}
+	if stats.AverageK != 0 {
+		params.Set("average_k", strconv.FormatFloat(stats.AverageK, 'f', 2, 64))
 	}
 	c.doGet(ctx, params)
 }
