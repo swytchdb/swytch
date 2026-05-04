@@ -250,9 +250,15 @@ func (c *CloxCache[K, V]) adjustForMemoryTarget(targetBytes, avgItemSize int64) 
 			c.SetCapacity(int(newCapacity))
 		}
 	} else if usageRatio < 0.85 && targetCapacity > currentCapacity {
-		// Under 85% of target and can grow — increase gradually (max 10% per tick)
+		// Cap growth at 4x actual entry count so we don't pre-allocate
+		// hundreds of thousands of empty slots on a nearly-empty cache.
+		usageCap := max(entryCount*4, int64(c.numShards))
+		growTarget := min(targetCapacity, usageCap)
+		if growTarget <= currentCapacity {
+			return
+		}
 		maxIncrease := currentCapacity * 11 / 10
-		newCapacity := min(targetCapacity, maxIncrease)
+		newCapacity := min(growTarget, maxIncrease)
 		slog.Debug("headroom available: increasing capacity",
 			"from", currentCapacity, "to", newCapacity,
 			"usage_ratio", usageRatio)
