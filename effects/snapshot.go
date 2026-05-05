@@ -356,139 +356,282 @@ func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips [
 }
 
 // reconstruct rebuilds the materialized state for a key from its effect DAG.
-// Uses a DAG-based algorithm ported from the types package:
-//  1. Collect all reachable effects (expanding snapshots to their deps)
-//  2. Build DAG, resolve via resolveFull (recursive fork decomposition)
+//
+// Walks the effect graph from tips to the nearest snapshot using the dag
+// walker, which produces a causally ordered sequence with fork-choice
+// ordering baked in. Transactional effects are skipped; bind envelopes
+// are collected and resolved via fork-choice after the main walk.
 //
 // Returns the reduced result and the number of effects walked.
 func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb.ReducedEffect, int, error) {
-	cr, err := e.collectReachableNodes(key, tips)
-	if err != nil {
-		return nil, 0, err
-	}
-	if len(cr.nodes) == 0 {
-		return nil, 0, nil
-	}
-
-	// Filter tentative effects: transactional effects are only visible
-	// when their Bind is confirmed (present in the DAG). Per whitepaper
-	// §4.1: "Write effects are tentative until the Bind is confirmed.
-	// Other nodes skip them when reconstructing current state."
 	var txID string
 	if len(currentTxID) > 0 {
 		txID = currentTxID[0]
 	}
 	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID)
-	preFilterCount := len(cr.nodes)
+
+	d := newDag(e, key, txID)
+
+	var result *pb.ReducedEffect
+	var binds []dagBind
+	var subRootEffects []*pb.Effect
+	count := 0
+
 	var isInvisible func(string) bool
 	if e.horizon != nil {
 		isInvisible = e.horizon.IsInvisible
 	}
-	isVoided := func(txnID string) bool {
-		_, ok := e.voidedBinds.Load(txnID)
-		return ok
+
+	err := d.walk(tips, func(eff *pb.Effect) error {
+		count++
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
+			result = cloneReduced(snap.State)
+			return nil
+		}
+
+		if eff.GetSubscription() != nil && len(eff.Deps) == 0 {
+			subRootEffects = append(subRootEffects, eff)
+			return nil
+		}
+
+		if bind := eff.GetTxnBind(); bind != nil {
+			if isInvisible != nil && isInvisible(eff.TxnId) {
+				return nil
+			}
+			if _, voided := e.voidedBinds.Load(eff.TxnId); voided {
+				return nil
+			}
+			binds = append(binds, dagBind{eff: eff})
+			winning := resolveBinds(e, binds, key)
+			for _, wb := range winning {
+				bindEffects, fetchErr := e.collectBindEffects(wb.eff, key)
+				if fetchErr != nil {
+					return fetchErr
+				}
+				result = ReduceChain(result, bindEffects)
+			}
+			binds = binds[:0]
+			return nil
+		}
+
+		result = ReduceChain(result, []*pb.Effect{eff})
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
 	}
-	nodes := filterTentativeEffectsWithEngine(e, cr.nodes, txID, key, isInvisible, isVoided)
-	if len(nodes) == 0 {
+
+	if count == 0 {
 		return nil, 0, nil
 	}
 
-	// Separate isolated subscription roots from the resolution path.
-	// Build the data DAG without them (their deps from data nodes become
-	// dangling and are ignored by BuildDAG). Resolve the data chain with
-	// snapshot seeding, then reduce subscription effects on top — subs
-	// are commutative with data and implicitly depend on everything else.
-	subRootOffsets := make(map[Tip]bool)
-	var dataNodes []*DAGNode
-	var subRootEffects []*pb.Effect
-	for _, n := range nodes {
-		if n.Effect.GetSubscription() != nil && len(n.Effect.Deps) == 0 {
-			subRootOffsets[n.Offset] = true
-			subRootEffects = append(subRootEffects, n.Effect)
-		} else {
-			dataNodes = append(dataNodes, n)
+	// Resolve any remaining binds not yet processed inline
+	if len(binds) > 0 {
+		winningBinds := resolveBinds(e, binds, key)
+		for _, wb := range winningBinds {
+			bindEffects, fetchErr := e.collectBindEffects(wb.eff, key)
+			if fetchErr != nil {
+				return nil, 0, fetchErr
+			}
+			result = ReduceChain(result, bindEffects)
 		}
 	}
 
-	var result *pb.ReducedEffect
-	var dag *DAG
-	if len(dataNodes) > 0 {
-		dag = BuildDAG(dataNodes)
-		slog.Debug("DAG", "encoded", encodeDAG(dag), "key", key, "txn_id", txID)
-		result = resolveFull(dag)
-	}
 	if len(subRootEffects) > 0 {
 		result = ReduceChain(result, subRootEffects)
 	}
 
-	// Prune stale tips: any index tip that was successfully read and
-	// is an ancestor (not a real DAG tip) gets removed. This keeps the
-	// tip set from growing unboundedly as HandleRemote adds offsets.
-	//
-	// CRITICAL — two preservation rules:
-	//   1. Do NOT prune tips that were unreadable. They may be
-	//      temporarily unavailable (e.g. bind effects not yet
-	//      fetchable) and removing them loses committed transaction
-	//      visibility.
-	//   2. Only prune when the superseding DAG tips are themselves
-	//      committed (present in the current index). Callers inside a
-	//      transaction pass their own pending lastOffset as a recon
-	//      tip; walking from it marks the committed index tip as an
-	//      ancestor. If we prune that ancestor now, and the caller's
-	//      transaction later aborts, the index loses a tip that was
-	//      never actually superseded — leaving subsequent reads with
-	//      no visibility into the table's schema or data. Pruning only
-	//      against committed-tip supersessions keeps the index
-	//      consistent regardless of whether any in-flight tx
-	//      eventually commits or aborts.
-	var dagTips []*DAGNode
-	if dag != nil {
-		dagTips = dag.Tips()
-	}
-	if len(dagTips) < len(tips) && len(nodes) > 0 {
+	// Prune stale tips: input tips that were visited but are not the
+	// actual tips of the graph can be removed from the index.
+	if len(tips) > 1 {
+		realTips := make(map[Tip]bool, len(tips))
+		for _, t := range tips {
+			if !d.visited[t] {
+				realTips[t] = true
+			}
+		}
 		currentIndex := e.index.Contains(key)
-		indexSet := map[Tip]bool{}
 		if currentIndex != nil {
+			indexSet := make(map[Tip]bool)
 			for _, t := range currentIndex.Tips() {
 				indexSet[t] = true
 			}
-		}
-		committedDagTips := false
-		for _, t := range dagTips {
-			if indexSet[t.Offset] {
-				committedDagTips = true
-				break
-			}
-		}
-		if committedDagTips {
-			realTips := make(map[Tip]bool, len(dagTips))
-			for _, t := range dagTips {
-				realTips[t.Offset] = true
-			}
-			collected := make(map[Tip]bool, len(cr.nodes))
-			for _, n := range cr.nodes {
-				collected[n.Offset] = true
-			}
-			var stale []Tip
-			for _, t := range tips {
-				if realTips[t] {
-					continue // it's a real DAG tip, keep it
+			hasCommitted := false
+			for t := range realTips {
+				if indexSet[t] {
+					hasCommitted = true
+					break
 				}
-				if collected[t] {
+			}
+			if hasCommitted {
+				var stale []Tip
+				for _, t := range tips {
+					if realTips[t] || !d.visited[t] {
+						continue
+					}
 					stale = append(stale, t)
 				}
-			}
-			if len(stale) > 0 {
-				slog.Debug("reconstruct: pruning stale tips", "key", key, "stale", stale)
-				e.index.RemoveTips(key, stale)
+				if len(stale) > 0 {
+					slog.Debug("reconstruct: pruning stale tips", "key", key, "stale", stale)
+					e.index.RemoveTips(key, stale)
+				}
 			}
 		}
 	}
 
 	slog.Debug("reconstruct: done", "key", key, "txn_id", txID,
-		"pre_filter_count", preFilterCount, "post_filter_count", len(nodes),
-		"result_nil", result == nil)
-	return result, len(nodes), nil
+		"count", count, "result_nil", result == nil)
+	return result, count, nil
+}
+
+// dagBind holds a bind effect encountered during the dag walk.
+type dagBind struct {
+	eff *pb.Effect
+}
+
+// resolveBinds resolves fork-choice between competing bind effects.
+// Two binds conflict if they share a consumed tip on the given key.
+// Among competitors, lowest fork-choice hash wins.
+func resolveBinds(e *Engine, binds []dagBind, key string) []dagBind {
+	if len(binds) <= 1 {
+		return binds
+	}
+
+	type bindInfo struct {
+		idx          int
+		hash         []byte
+		txnID        string
+		consumedTips []Tip
+		newTip       Tip
+	}
+	infos := make([]bindInfo, 0, len(binds))
+	for i, b := range binds {
+		bind := b.eff.GetTxnBind()
+		for _, kb := range bind.Keys {
+			if string(kb.Key) == key {
+				infos = append(infos, bindInfo{
+					idx:          i,
+					hash:         b.eff.ForkChoiceHash,
+					txnID:        b.eff.TxnId,
+					consumedTips: fromPbRefs(kb.ConsumedTips),
+					newTip:       r(kb.NewTip),
+				})
+				break
+			}
+		}
+	}
+
+	lost := make(map[int]bool)
+	for i := range infos {
+		if lost[infos[i].idx] {
+			continue
+		}
+		for j := i + 1; j < len(infos); j++ {
+			if lost[infos[j].idx] {
+				continue
+			}
+			if !consumedTipsOverlap(infos[i].consumedTips, infos[j].consumedTips) {
+				continue
+			}
+			if e != nil {
+				conflict, bothHadEvidence := e.hasPredicateConflict(
+					infos[i].txnID, infos[j].txnID, key,
+					[]Tip{infos[i].newTip},
+					[]Tip{infos[j].newTip})
+				if bothHadEvidence && !conflict {
+					continue
+				}
+			}
+			if ForkChoiceLess(infos[i].hash, infos[j].hash) {
+				lost[infos[j].idx] = true
+			} else {
+				lost[infos[i].idx] = true
+			}
+		}
+	}
+
+	winners := make([]dagBind, 0, len(binds)-len(lost))
+	for i, b := range binds {
+		if !lost[i] {
+			winners = append(winners, b)
+		}
+	}
+	return winners
+}
+
+// consumedTipsOverlap returns true if two consumed tip sets share any tip.
+func consumedTipsOverlap(a, b []Tip) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	set := make(map[Tip]bool, len(a))
+	for _, t := range a {
+		set[t] = true
+	}
+	for _, t := range b {
+		if set[t] {
+			return true
+		}
+	}
+	return false
+}
+
+// collectBindEffects fetches the transactional effects for a winning bind
+// on the given key. Walks from the bind's NewTip following deps until it
+// reaches the ConsumedTips (the pre-transaction state), collecting only
+// effects that belong to the same transaction.
+func (e *Engine) collectBindEffects(bindEff *pb.Effect, key string) ([]*pb.Effect, error) {
+	bind := bindEff.GetTxnBind()
+	txnID := bindEff.TxnId
+
+	var newTip Tip
+	consumed := make(map[Tip]bool)
+	for _, kb := range bind.Keys {
+		if string(kb.Key) == key {
+			newTip = r(kb.NewTip)
+			for _, ct := range fromPbRefs(kb.ConsumedTips) {
+				consumed[ct] = true
+			}
+			break
+		}
+	}
+
+	var zero Tip
+	if newTip == zero {
+		return nil, nil
+	}
+
+	// Walk from NewTip back to ConsumedTips, collecting txn effects
+	var effects []*pb.Effect
+	visited := make(map[Tip]bool)
+	stack := []Tip{newTip}
+	for len(stack) > 0 {
+		t := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[t] || consumed[t] || t == zero {
+			continue
+		}
+		visited[t] = true
+
+		eff, err := e.getEffect(t)
+		if err != nil {
+			return nil, err
+		}
+		if eff.TxnId != txnID {
+			continue
+		}
+		effects = append(effects, eff)
+		for _, dep := range eff.Deps {
+			stack = append(stack, r(dep))
+		}
+	}
+
+	// Reverse: we walked tip→root, need root→tip for ReduceChain
+	for i, j := 0, len(effects)-1; i < j; i, j = i+1, j-1 {
+		effects[i], effects[j] = effects[j], effects[i]
+	}
+	return effects, nil
 }
 
 // encodeDAG produces a compact string encoding of the DAG.

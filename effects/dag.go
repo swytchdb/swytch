@@ -21,10 +21,298 @@ package effects
 
 import (
 	"bytes"
+	"fmt"
+	"log/slog"
 	"sort"
+	"strings"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
 )
+
+type dag struct {
+	engine      *Engine
+	key         string
+	activeTxnID string
+	visited     map[Tip]bool
+	nodes       map[Tip]*pb.Effect
+	lcaTip      Tip
+}
+
+func newDag(engine *Engine, key string, activeTxnID string) *dag {
+	return &dag{engine: engine, key: key, activeTxnID: activeTxnID}
+}
+
+// walk performs a two-phase traversal of the effect graph:
+//
+//  1. BFS from tips following deps, tracking path convergence. Stops at the
+//     LCA snapshot (first snapshot where all paths have converged). Collects
+//     all nodes between tips and the LCA.
+//  2. Topological replay (DFS post-order) from tips within the collected set,
+//     ordered by fork choice hash at each fork. Calls processor in causal
+//     order (LCA snapshot → tips).
+//
+// Transactional effects (non-empty TxnId, not a bind) are skipped from the
+// processor output but their deps are still followed. Bind effects appear
+// in the sequence as envelopes.
+func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
+	d.visited = make(map[Tip]bool, len(tips)*8)
+	d.nodes = make(map[Tip]*pb.Effect, len(tips)*8)
+
+	// Phase 1: BFS to discover LCA snapshot and collect all nodes.
+	d.bfs(tips, &d.lcaTip)
+
+	if len(d.nodes) == 0 {
+		return nil
+	}
+
+	slog.Debug("dag.walk", "key", d.key, "nodes", len(d.nodes),
+		"lca", d.lcaTip, "encoded", d.encode(tips))
+
+	// Phase 2: topo-order via DFS post-order within collected nodes.
+	ordered := make([]*pb.Effect, 0, len(d.nodes))
+	topoVisited := make(map[Tip]bool, len(d.nodes))
+
+	// Sort tips by fork choice hash for deterministic starting order
+	type pair struct {
+		tip Tip
+		eff *pb.Effect
+	}
+	sortedTips := make([]pair, 0, len(tips))
+	for _, t := range tips {
+		if eff, ok := d.nodes[t]; ok {
+			sortedTips = append(sortedTips, pair{t, eff})
+		}
+	}
+	if len(sortedTips) > 1 {
+		sort.Slice(sortedTips, func(i, j int) bool {
+			return ForkChoiceLess(sortedTips[i].eff.ForkChoiceHash, sortedTips[j].eff.ForkChoiceHash)
+		})
+	}
+
+	for _, p := range sortedTips {
+		d.topoCollect(p.tip, topoVisited, &ordered)
+	}
+
+	for _, eff := range ordered {
+		if err := processor(eff); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bfs explores the graph from tips following deps. A snapshot is the LCA
+// when either: (1) a dep we follow is already visited and is a snapshot
+// (paths converged), or (2) we dequeue a snapshot with an empty queue
+// (no concurrent paths). All visited nodes are stored in d.nodes.
+func (d *dag) bfs(tips []Tip, lcaTip *Tip) {
+	queue := make([]Tip, 0, len(tips)*2)
+
+	for _, t := range tips {
+		eff, err := d.engine.getEffect(t)
+		if err != nil {
+			d.visited[t] = true
+			continue
+		}
+		d.visited[t] = true
+		d.nodes[t] = eff
+		queue = append(queue, t)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff := d.nodes[cur]
+
+		if eff.GetSnapshot() != nil && len(queue) == 0 {
+			*lcaTip = cur
+			return
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == d.key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if d.visited[dt] {
+				if existing, ok := d.nodes[dt]; ok && existing.GetSnapshot() != nil {
+					*lcaTip = dt
+					return
+				}
+				continue
+			}
+			depEff, err := d.engine.getEffect(dt)
+			if err != nil {
+				d.visited[dt] = true
+				continue
+			}
+			d.visited[dt] = true
+			d.nodes[dt] = depEff
+			queue = append(queue, dt)
+		}
+	}
+}
+
+// topoCollect does a post-order DFS within the collected nodes, producing
+// causal order (roots/snapshot first, tips last). At forks, deps are visited
+// in fork choice hash order. Txn effects are skipped from output.
+// Only the LCA snapshot is emitted; other snapshots are walked through.
+func (d *dag) topoCollect(t Tip, visited map[Tip]bool, ordered *[]*pb.Effect) {
+	if visited[t] {
+		return
+	}
+	visited[t] = true
+
+	eff, ok := d.nodes[t]
+	if !ok {
+		return
+	}
+
+	// LCA snapshot: emit as seed and don't descend past it
+	if eff.GetSnapshot() != nil && t == d.lcaTip {
+		*ordered = append(*ordered, eff)
+		return
+	}
+
+	// Follow deps within collected set
+	var refs []*pb.EffectRef
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			if string(kb.Key) == d.key {
+				refs = []*pb.EffectRef{kb.NewTip}
+				break
+			}
+		}
+	} else {
+		refs = eff.GetDeps()
+	}
+
+	if len(refs) > 0 {
+		type pair struct {
+			tip Tip
+			eff *pb.Effect
+		}
+		deps := make([]pair, 0, len(refs))
+		for _, ref := range refs {
+			dt := r(ref)
+			if de, ok := d.nodes[dt]; ok {
+				deps = append(deps, pair{dt, de})
+			}
+		}
+		if len(deps) > 1 {
+			sort.Slice(deps, func(i, j int) bool {
+				return ForkChoiceLess(deps[i].eff.ForkChoiceHash, deps[j].eff.ForkChoiceHash)
+			})
+		}
+		for _, dep := range deps {
+			d.topoCollect(dep.tip, visited, ordered)
+		}
+	}
+
+	// Skip non-LCA snapshots from output (walked through for deps only)
+	if eff.GetSnapshot() != nil {
+		return
+	}
+
+	// Skip transactional effects from output
+	if eff.TxnId != "" && eff.GetTxnBind() == nil && eff.TxnId != d.activeTxnID {
+		return
+	}
+
+	*ordered = append(*ordered, eff)
+}
+
+// encode produces a compact string encoding of the collected dag nodes.
+// Format matches encodeDAG: "N<count>;L<lca_id>;T<tip_ids>;[id:kind:val:deps;...]"
+func (d *dag) encode(tips []Tip) string {
+	idMap := make(map[Tip]int, len(d.nodes))
+	offsets := make([]Tip, 0, len(d.nodes))
+	for off := range d.nodes {
+		offsets = append(offsets, off)
+	}
+	sort.Slice(offsets, func(i, j int) bool {
+		if offsets[i][0] != offsets[j][0] {
+			return offsets[i][0] < offsets[j][0]
+		}
+		return offsets[i][1] < offsets[j][1]
+	})
+	for i, off := range offsets {
+		idMap[off] = i
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "N%d;", len(d.nodes))
+
+	if d.lcaTip != (Tip{}) {
+		fmt.Fprintf(&b, "L%d;", idMap[d.lcaTip])
+	}
+
+	b.WriteString("T")
+	first := true
+	for _, t := range tips {
+		if id, ok := idMap[t]; ok {
+			if !first {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "%d", id)
+			first = false
+		}
+	}
+	b.WriteByte(';')
+
+	for _, off := range offsets {
+		eff := d.nodes[off]
+		nid := idMap[off]
+
+		kind := byte('?')
+		val := int64(0)
+		switch {
+		case eff.GetData() != nil:
+			kind = 'D'
+			val = eff.GetData().GetIntVal()
+		case eff.GetSnapshot() != nil:
+			kind = 'S'
+			if s := eff.GetSnapshot().State; s != nil && s.Scalar != nil {
+				val = s.Scalar.GetIntVal()
+			}
+		case eff.GetNoop() != nil:
+			kind = 'N'
+		case eff.GetMeta() != nil:
+			kind = 'M'
+		case eff.GetSubscription() != nil:
+			kind = 'U'
+		case eff.GetTxnBind() != nil:
+			kind = 'B'
+		case eff.GetSerialization() != nil:
+			kind = 'X'
+		}
+
+		fmt.Fprintf(&b, "%d:%c:%d:", nid, kind, val)
+		depFirst := true
+		for _, dep := range eff.Deps {
+			if did, ok := idMap[r(dep)]; ok {
+				if !depFirst {
+					b.WriteByte(',')
+				}
+				fmt.Fprintf(&b, "%d", did)
+				depFirst = false
+			}
+		}
+		b.WriteByte(';')
+	}
+
+	return b.String()
+}
 
 // DAGNode pairs a log offset with the deserialized effect at that offset.
 type DAGNode struct {
