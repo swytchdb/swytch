@@ -242,7 +242,12 @@ func (b *Beacon) refreshLoop() {
 			ctx := b.engine.NewContext()
 			snapshot, _, err := ctx.GetSnapshot(MembershipKey)
 			if err != nil {
-				slog.Debug("beacon: failed to read membership before TTL refresh", "error", err)
+				panic("beacon: membership unreadable: " + err.Error())
+			}
+			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[strconv.FormatUint(uint64(b.cfg.NodeID), 10)] == nil {
+				if err := b.registerSelf(); err != nil {
+					panic("beacon: failed to re-register after membership loss: " + err.Error())
+				}
 				continue
 			}
 			if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
