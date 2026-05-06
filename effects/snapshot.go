@@ -138,10 +138,6 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// the handler can do fast lookups without a full snapshot.
 	e.updateSerializationState(key, result)
 
-	// Apply expiry + empty-collection filtering
-	result = filterSnapshot(result)
-
-	// Cache the result
 	if result != nil && e.cache != nil {
 		e.cache.Put(key, result)
 	}

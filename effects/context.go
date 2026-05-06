@@ -206,7 +206,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			return nil, nil, err
 		}
 		// Compact long chains by emitting a snapshot into this context
-		if chainLen >= 20+rand.IntN(31) && result != nil {
+		if chainLen >= 20+rand.IntN(31) {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
@@ -219,7 +219,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 				}},
 			}, tips)
 		}
-		return result, tips, nil
+		return filterSnapshot(result), tips, nil
 	}
 
 	// Reconstruct from lastOffset merged with index tips. When an SSI

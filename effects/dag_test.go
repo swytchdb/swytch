@@ -20,6 +20,9 @@
 package effects
 
 import (
+	"encoding/binary"
+	"log/slog"
+	"os"
 	"testing"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
@@ -913,4 +916,176 @@ func TestCompetingBinds_NonOverlappingPredicatesBothVisible(t *testing.T) {
 		t.Fatalf("expected 13 (both txns visible, non-overlapping predicates), got %d",
 			r.Scalar.GetIntVal())
 	}
+}
+
+// TestCompaction_SnapshotAppearsInDAG verifies that after enough effects
+// are emitted to trigger compaction, a snapshot effect actually appears
+// in the DAG and the walker finds it as the LCA on the next read.
+func TestCompaction_SnapshotAppearsInDAG(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	// Emit 60 effects via Context to guarantee compaction triggers
+	// (threshold is 20+rand(31), max 50).
+	for i := range 60 {
+		ctx := e.NewContext()
+		if err := ctx.Emit(&pb.Effect{
+			Key:  []byte("k"),
+			Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+		}); err != nil {
+			t.Fatalf("emit %d: %v", i, err)
+		}
+		if err := ctx.Flush(); err != nil {
+			t.Fatalf("flush %d: %v", i, err)
+		}
+	}
+
+	// Next GetSnapshot should trigger compaction and emit a snapshot.
+	ctx := e.NewContext()
+	r, _, err := ctx.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Scalar.GetIntVal() != 60 {
+		t.Fatalf("expected 60, got %v", r)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the snapshot is in the DAG by walking from the current tips.
+	// The walker should find it as LCA.
+	tips := e.index.Contains("k")
+	if tips == nil {
+		t.Fatal("no tips in index")
+	}
+	d := newDag(e, "k", "")
+	d.visited = make(map[Tip]bool, 64)
+	d.nodes = make(map[Tip]*pb.Effect, 64)
+	if err := d.bfs(tips.Tips(), &d.lcaTip); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that we collected a snapshot node
+	hasSnapshot := false
+	for _, eff := range d.nodes {
+		if eff.GetSnapshot() != nil {
+			hasSnapshot = true
+			break
+		}
+	}
+	if !hasSnapshot {
+		t.Fatal("no snapshot found in collected nodes after compaction")
+	}
+
+	var zero Tip
+	if d.lcaTip == zero {
+		// Dump the encoded DAG for debugging
+		t.Fatalf("snapshot exists in DAG but was not detected as LCA\nencoded: %s", d.encode(tips.Tips()))
+	}
+
+	t.Logf("LCA found at %v, collected %d nodes", d.lcaTip, len(d.nodes))
+}
+
+func TestCompaction_BeaconPattern(t *testing.T) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(slog.Default())
+
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	nodeIDBytes := func(id uint64) []byte {
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, id)
+		return b
+	}
+
+	key := "__swytch:members"
+
+	// Initial registration: KEYED insert + type tag + TTL meta
+	{
+		ctx := e.NewContext()
+		if err := ctx.Emit(&pb.Effect{
+			Key: []byte(key),
+			Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+				Op:         pb.EffectOp_INSERT_OP,
+				Merge:      pb.MergeRule_LAST_WRITE_WINS,
+				Collection: pb.CollectionKind_KEYED,
+				Id:         nodeIDBytes(1),
+				Value:      &pb.DataEffect_Raw{Raw: []byte("127.0.0.1:9000")},
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ctx.Emit(&pb.Effect{
+			Key:  []byte(key),
+			Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_HASH}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ctx.Emit(&pb.Effect{
+			Key: []byte(key),
+			Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
+				ElementId: nodeIDBytes(1),
+				ExpiresAt: sTs(999999999),
+			}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ctx.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Beacon refresh loop: GetSnapshot → meta TTL refresh → flush
+	for i := range 80 {
+		ctx := e.NewContext()
+		_, _, err := ctx.GetSnapshot(key)
+		if err != nil {
+			t.Fatalf("tick %d GetSnapshot: %v", i, err)
+		}
+		if err := ctx.Emit(&pb.Effect{
+			Key: []byte(key),
+			Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
+				ElementId: nodeIDBytes(1),
+				ExpiresAt: sTs(999999999),
+			}},
+		}); err != nil {
+			t.Fatalf("tick %d Emit: %v", i, err)
+		}
+		if err := ctx.Flush(); err != nil {
+			t.Fatalf("tick %d Flush: %v", i, err)
+		}
+	}
+
+	// Check: is a snapshot in the DAG?
+	tips := e.index.Contains(key)
+	if tips == nil {
+		t.Fatal("no tips in index")
+	}
+	d := newDag(e, key, "")
+	d.visited = make(map[Tip]bool, 256)
+	d.nodes = make(map[Tip]*pb.Effect, 256)
+	if err := d.bfs(tips.Tips(), &d.lcaTip); err != nil {
+		t.Fatal(err)
+	}
+
+	hasSnapshot := false
+	for _, eff := range d.nodes {
+		if eff.GetSnapshot() != nil {
+			hasSnapshot = true
+			break
+		}
+	}
+
+	var zero Tip
+	if !hasSnapshot {
+		t.Fatalf("no snapshot in DAG after 80 ticks\ntips: %v\nnodes: %d\nencoded: %s",
+			tips.Tips(), len(d.nodes), d.encode(tips.Tips()))
+	}
+	if d.lcaTip == zero {
+		t.Fatalf("snapshot exists but not detected as LCA\nnodes: %d\nencoded: %s",
+			len(d.nodes), d.encode(tips.Tips()))
+	}
+	t.Logf("LCA at %v, %d nodes", d.lcaTip, len(d.nodes))
 }

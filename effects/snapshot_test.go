@@ -594,11 +594,13 @@ func TestGetSnapshot_ExpiredKeyReturnsNil(t *testing.T) {
 	}
 }
 
-func TestGetSnapshot_ExpiredReconstructedReturnsNil(t *testing.T) {
+func TestGetSnapshot_ExpiredReconstructedStillReturnsState(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log, nil)
 
-	// Data effect + meta with past expiry
+	// Data effect + meta with past expiry. GetSnapshot returns the raw
+	// causal state — expiry filtering is a presentation concern handled
+	// by the protocol layer, not reconstruction.
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
 		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("val"))},
@@ -613,8 +615,8 @@ func TestGetSnapshot_ExpiredReconstructedReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r != nil {
-		t.Fatal("expected nil for expired reconstructed key")
+	if r == nil {
+		t.Fatal("expected non-nil — raw causal state should be returned regardless of expiry")
 	}
 }
 
