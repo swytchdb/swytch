@@ -20,6 +20,7 @@
 package effects
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -82,8 +83,10 @@ func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
 		return nil
 	}
 
-	slog.Debug("dag.walk", "key", d.key, "nodes", len(d.nodes),
-		"lca", d.lcaTip, "encoded", d.encode(tips))
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("dag.walk", "key", d.key, "nodes", len(d.nodes),
+			"lca", d.lcaTip, "encoded", d.encode(tips))
+	}
 
 	// Phase 2: topo-order via DFS post-order within collected nodes.
 	ordered := make([]*pb.Effect, 0, len(d.nodes))
