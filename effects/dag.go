@@ -248,9 +248,11 @@ func (d *dag) topoCollect(t Tip, visited map[Tip]bool, ordered *[]*pb.Effect) {
 }
 
 // encode produces a compact string encoding of the collected dag nodes.
-// Format matches encodeDAG: "N<count>;L<lca_id>;T<tip_ids>;[id:kind:val:deps;...]"
+// Format: "N<count>;L<lca_node>:<lca_off>;T<tip_node>:<tip_off>,...;[<node>:<off>:kind:val:dep_node:dep_off,...;...]"
+// Effects are identified by their full (nodeID, offset) so log readers can
+// directly check whether a specific emitted offset shows up — and with what
+// kind — without reverse-mapping position indexes.
 func (d *dag) encode(tips []Tip) string {
-	idMap := make(map[Tip]int, len(d.nodes))
 	offsets := make([]Tip, 0, len(d.nodes))
 	for off := range d.nodes {
 		offsets = append(offsets, off)
@@ -261,25 +263,22 @@ func (d *dag) encode(tips []Tip) string {
 		}
 		return offsets[i][1] < offsets[j][1]
 	})
-	for i, off := range offsets {
-		idMap[off] = i
-	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "N%d;", len(d.nodes))
 
 	if d.lcaTip != (Tip{}) {
-		fmt.Fprintf(&b, "L%d;", idMap[d.lcaTip])
+		fmt.Fprintf(&b, "L%d:%d;", d.lcaTip[0], d.lcaTip[1])
 	}
 
 	b.WriteString("T")
 	first := true
 	for _, t := range tips {
-		if id, ok := idMap[t]; ok {
+		if _, ok := d.nodes[t]; ok {
 			if !first {
 				b.WriteByte(',')
 			}
-			fmt.Fprintf(&b, "%d", id)
+			fmt.Fprintf(&b, "%d:%d", t[0], t[1])
 			first = false
 		}
 	}
@@ -287,7 +286,6 @@ func (d *dag) encode(tips []Tip) string {
 
 	for _, off := range offsets {
 		eff := d.nodes[off]
-		nid := idMap[off]
 
 		kind := byte('?')
 		val := int64(0)
@@ -312,14 +310,15 @@ func (d *dag) encode(tips []Tip) string {
 			kind = 'X'
 		}
 
-		fmt.Fprintf(&b, "%d:%c:%d:", nid, kind, val)
+		fmt.Fprintf(&b, "%d:%d:%c:%d:", off[0], off[1], kind, val)
 		depFirst := true
 		for _, dep := range eff.Deps {
-			if did, ok := idMap[r(dep)]; ok {
+			dt := r(dep)
+			if _, ok := d.nodes[dt]; ok {
 				if !depFirst {
 					b.WriteByte(',')
 				}
-				fmt.Fprintf(&b, "%d", did)
+				fmt.Fprintf(&b, "%d:%d", dt[0], dt[1])
 				depFirst = false
 			}
 		}

@@ -1054,6 +1054,32 @@ func TestCompaction_BeaconPattern(t *testing.T) {
 		}
 	}
 
+	// Plant a no-deps subscription effect from a "remote" node directly
+	// into log + index AFTER all the ticks. It lands as a sibling tip
+	// alongside the data chain — the same shape we get when a peer's
+	// first subscription arrives via HandleRemote at a moment when the
+	// local context isn't mid-flight to consume it on the next emit.
+	{
+		eff := &pb.Effect{
+			Key:    []byte(key),
+			Hlc:    sTs(1),
+			NodeId: 2,
+			Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+				SubscriberNodeId: 2,
+			}},
+		}
+		eff.ForkChoiceHash = ComputeForkChoiceHash(2, eff.Hlc)
+		oldNID := log.nodeID
+		log.nodeID = 2
+		subTip := log.putEffect(eff)
+		log.nodeID = oldNID
+		mu := e.GetLock(key)
+		mu.Lock()
+		e.updateIndex(key, nil, subTip)
+		mu.Unlock()
+		t.Logf("planted remote subscription at %v after %d ticks", subTip, 80)
+	}
+
 	// Check: is a snapshot in the DAG?
 	tips := e.index.Contains(key)
 	if tips == nil {
