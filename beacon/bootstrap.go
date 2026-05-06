@@ -115,7 +115,9 @@ func (b *Beacon) readMembershipWithRetry(ctx context.Context, expectedPeers int)
 	const maxBackoff = 1 * time.Second
 
 	for {
-		snapshot, _, _, err := b.engine.GetSnapshot(MembershipKey)
+		ectx := b.engine.NewContext()
+		snapshot, _, err := ectx.GetSnapshot(MembershipKey)
+		ectx.Flush()
 		if err == nil {
 			members := parseMembership(snapshot)
 			if len(members) >= expectedPeers {
