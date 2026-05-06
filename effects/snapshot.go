@@ -129,8 +129,8 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	slog.Debug("GetSnapshot: cache miss, reconstructing", "key", key, "tips", tipOffsets)
 	result, chainLen, err := e.reconstruct(key, tipOffsets)
 	if err != nil {
-		slog.Debug("GetSnapshot: reconstruction failed", "key", key, "error", err)
-		return nil, nil, 0, err
+		slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
+		return nil, nil, 0, nil
 	}
 
 	// Sync serialization state from reconstruction result before filtering
