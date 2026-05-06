@@ -206,7 +206,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			return nil, nil, err
 		}
 		// Compact long chains by emitting a snapshot into this context
-		if chainLen >= 5+rand.IntN(16) && result != nil {
+		if chainLen >= 20+rand.IntN(31) && result != nil {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
