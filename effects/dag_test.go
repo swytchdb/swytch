@@ -21,8 +21,6 @@ package effects
 
 import (
 	"encoding/binary"
-	"log/slog"
-	"os"
 	"testing"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
@@ -988,8 +986,6 @@ func TestCompaction_SnapshotAppearsInDAG(t *testing.T) {
 }
 
 func TestCompaction_BeaconPattern(t *testing.T) {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(slog.Default())
 
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log, nil)

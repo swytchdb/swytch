@@ -251,7 +251,7 @@ func (b *Beacon) refreshLoop() {
 			if err != nil {
 				panic("beacon: membership unreadable: " + err.Error())
 			}
-			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[strconv.FormatUint(uint64(b.cfg.NodeID), 10)] == nil {
+			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[string(nodeIDBytes(uint64(b.cfg.NodeID)))] == nil {
 				if err := b.registerSelf(); err != nil {
 					panic("beacon: failed to re-register after membership loss: " + err.Error())
 				}
