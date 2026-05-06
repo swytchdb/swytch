@@ -211,13 +211,18 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 				"key", key,
 				"chainLen", chainLen,
 				"tips", tips)
-			c.Emit(&pb.Effect{
+			if err := c.Emit(&pb.Effect{
 				Key: []byte(key),
 				Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
 					Collection: result.Collection,
 					State:      result,
 				}},
-			}, tips)
+			}, tips); err != nil {
+				slog.Error("compaction: snapshot emit failed",
+					"key", key,
+					"chainLen", chainLen,
+					"error", err)
+			}
 		}
 		return filterSnapshot(result), tips, nil
 	}
@@ -280,10 +285,13 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 
 	// Emit a NOOP to record this read in the causal structure.
 	// The Bind will include this key in its read set.
-	c.Emit(&pb.Effect{
+	if err := c.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-	}, snapshotTips)
+	}, snapshotTips); err != nil {
+		slog.Error("getSnapshotFromTx: NOOP emit failed", "key", key, "error", err)
+		return nil, nil, err
+	}
 
 	return result, snapshotTips, nil
 }
@@ -303,10 +311,13 @@ func (c *Context) Watch(key string) {
 	hadData := snap != nil
 
 	// Emit NOOP to record the observation in the causal log
-	c.Emit(&pb.Effect{
+	if err := c.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-	})
+	}); err != nil {
+		slog.Error("Watch: NOOP emit failed", "key", key, "error", err)
+		return
+	}
 
 	// Capture the NOOP offset before Flush clears c.keys
 	noopOffset := c.keys[key].lastOffset
@@ -380,10 +391,16 @@ func (c *Context) CheckWatches() bool {
 	// This forces deps on the WATCH-time state, creating a fork if the
 	// key was modified (the fork is structurally detectable by any node).
 	for key, ws := range c.watchedKeys {
-		c.Emit(&pb.Effect{
+		if err := c.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-		}, []Tip{ws.noopOffset})
+		}, []Tip{ws.noopOffset}); err != nil {
+			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
+			clear(c.watchedKeys)
+			c.inTx = false
+			c.txSnapshot = nil
+			return false
+		}
 		// Mark as watched for SSI fork detection in flushTx
 		if ck, ok := c.keys[key]; ok {
 			ck.watched = true
@@ -509,7 +526,7 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	key := string(eff.Key)
 
-	data, err := proto.Marshal(eff)
+	data, err := MarshalEffect(eff)
 	if err != nil {
 		return Tip{}, nil, err
 	}

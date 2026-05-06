@@ -28,7 +28,6 @@ import (
 	"time"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -182,7 +181,7 @@ func (e *Engine) ensureSubscribed(key string) error {
 			SubscriberNodeId: uint64(e.nodeID),
 		}},
 	}
-	data, err := proto.Marshal(eff)
+	data, err := MarshalEffect(eff)
 	if err != nil {
 		return err
 	}
@@ -654,7 +653,7 @@ func parseWireEffect(wireData []byte) (*pb.Effect, error) {
 		protoData = wireData
 	}
 	eff := &pb.Effect{}
-	if err := proto.Unmarshal(protoData, eff); err != nil {
+	if err := UnmarshalEffect(protoData, eff); err != nil {
 		return nil, err
 	}
 	return eff, nil

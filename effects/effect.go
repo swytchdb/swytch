@@ -449,7 +449,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	// Deserialize to inspect
 	eff := &pb.Effect{}
-	if err := proto.Unmarshal(protoData, eff); err != nil {
+	if err := UnmarshalEffect(protoData, eff); err != nil {
 		return nil, err
 	}
 
@@ -1165,7 +1165,7 @@ func (e *Engine) probeAndFetchKey(key string) {
 			Discovery:        true,
 		}},
 	}
-	data, err := proto.Marshal(eff)
+	data, err := MarshalEffect(eff)
 	if err != nil {
 		return
 	}
@@ -1311,7 +1311,7 @@ func (e *Engine) storeWireData(offset Tip, wireData []byte) error {
 	}
 	protoData := wireData[4+keyLen:]
 	eff := &pb.Effect{}
-	if err := proto.Unmarshal(protoData, eff); err != nil {
+	if err := UnmarshalEffect(protoData, eff); err != nil {
 		return err
 	}
 	if e.effectCache != nil {

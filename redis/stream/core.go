@@ -21,6 +21,7 @@ package stream
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -861,14 +862,16 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 				// Evict oldest entries to make room (keep maxsize-1 to fit the new one)
 				toEvict := int64(len(entries)) - maxsize + 1
 				for i := int64(0); i < toEvict && i < int64(len(entries)); i++ {
-					_ = cmd.Context.Emit(&pb.Effect{
+					if err := cmd.Context.Emit(&pb.Effect{
 						Key: []byte(pKey),
 						Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 							Op:         pb.EffectOp_REMOVE_OP,
 							Collection: pb.CollectionKind_KEYED,
 							Id:         []byte(entries[i].seq),
 						}},
-					})
+					}); err != nil {
+						slog.Error("stream MAXLEN: REMOVE_OP emit failed", "key", pKey, "error", err)
+					}
 				}
 			}
 		}

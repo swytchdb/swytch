@@ -21,6 +21,7 @@ package str
 
 import (
 	"bytes"
+	"log/slog"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
 	"github.com/swytchdb/cache/effects"
@@ -264,14 +265,16 @@ func cleanupStreamGroups(cmd *shared.Command, key string) {
 	cfgSnap, _, _ := cmd.Context.GetSnapshot(cfgKeyName)
 	if cfgSnap != nil && cfgSnap.NetAdds != nil {
 		for elemID := range cfgSnap.NetAdds {
-			_ = cmd.Context.Emit(&pb.Effect{
+			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(cfgKeyName),
 				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 					Op:         pb.EffectOp_REMOVE_OP,
 					Collection: pb.CollectionKind_KEYED,
 					Id:         []byte(elemID),
 				}},
-			})
+			}); err != nil {
+				slog.Error("stream cleanup: cfg REMOVE_OP emit failed", "key", cfgKeyName, "error", err)
+			}
 		}
 	}
 }

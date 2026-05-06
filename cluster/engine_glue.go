@@ -27,7 +27,6 @@ import (
 	clox "github.com/swytchdb/cache/cache"
 	pb "github.com/swytchdb/cache/cluster/proto"
 	"github.com/swytchdb/cache/effects"
-	"google.golang.org/protobuf/proto"
 )
 
 // EngineEffectHandler adapts an *effects.Engine to the EffectHandler
@@ -106,7 +105,7 @@ func (r *EngineLogReader) ReadEffect(ref *pb.EffectRef) ([]byte, error) {
 
 // marshalEffectToWire serializes an Effect to the wire format.
 func marshalEffectToWire(eff *pb.Effect) ([]byte, error) {
-	protoData, err := proto.Marshal(eff)
+	protoData, err := effects.MarshalEffect(eff)
 	if err != nil {
 		return nil, err
 	}
