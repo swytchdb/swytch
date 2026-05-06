@@ -795,3 +795,122 @@ func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 		t.Fatalf("expected %d, got %d", expectedVal, r.Scalar.GetIntVal())
 	}
 }
+
+// TestCompetingBinds_NonOverlappingPredicatesBothVisible verifies that two
+// transactions sharing consumed tips but with non-overlapping predicates
+// both survive reconstruction. Predicate refinement at commit time allows
+// both to coexist; the read path must agree.
+//
+// TxA observes column 0 == 1 and writes column 0 = 10.
+// TxB observes column 0 == 2 and writes column 0 = 20.
+// Their predicates don't intersect, so both should be visible.
+func TestCompetingBinds_NonOverlappingPredicatesBothVisible(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	root := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(10),
+		NodeId:         1,
+		ForkChoiceHash: ComputeForkChoiceHash(1, sTs(10)),
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 10)},
+	})
+
+	// Transaction A: observation + row-write + data + bind
+	txAObs := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(20), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(20)),
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Observation{Observation: &pb.ObservationEffect{
+			Predicate: &pb.Predicate{
+				Kind:    pb.Predicate_CMP,
+				Col:     0,
+				Op:      pb.PredicateCmpOp_CMP_EQ,
+				Literal: &pb.TypedValue{Kind: pb.TypedValue_INT, IntVal: 1},
+			},
+		}},
+	})
+	txARW := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(21), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(21)),
+		Deps:           []*pb.EffectRef{toPbRef(txAObs)},
+		Kind: &pb.Effect_RowWrite{RowWrite: &pb.RowWriteEffect{
+			Kind:    pb.RowWriteEffect_INSERT,
+			Columns: []*pb.TypedValue{{Kind: pb.TypedValue_INT, IntVal: 10}},
+		}},
+	})
+	txAData := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(22), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(22)),
+		Deps:           []*pb.EffectRef{toPbRef(txARW)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+	})
+	bindA := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(23), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(23)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txAData),
+			}},
+			OriginatorNodeId: 2, TxnHlc: sTs(20),
+		}},
+	})
+
+	// Transaction B: observation + row-write + data + bind
+	// Different predicate: observes col 0 == 2 (non-overlapping with A's col 0 == 1)
+	txBObs := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(30), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(30)),
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Observation{Observation: &pb.ObservationEffect{
+			Predicate: &pb.Predicate{
+				Kind:    pb.Predicate_CMP,
+				Col:     0,
+				Op:      pb.PredicateCmpOp_CMP_EQ,
+				Literal: &pb.TypedValue{Kind: pb.TypedValue_INT, IntVal: 2},
+			},
+		}},
+	})
+	txBRW := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(31), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(31)),
+		Deps:           []*pb.EffectRef{toPbRef(txBObs)},
+		Kind: &pb.Effect_RowWrite{RowWrite: &pb.RowWriteEffect{
+			Kind:    pb.RowWriteEffect_INSERT,
+			Columns: []*pb.TypedValue{{Kind: pb.TypedValue_INT, IntVal: 20}},
+		}},
+	})
+	txBData := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(32), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(32)),
+		Deps:           []*pb.EffectRef{toPbRef(txBRW)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
+	})
+	bindB := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(33), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(33)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txBData),
+			}},
+			OriginatorNodeId: 3, TxnHlc: sTs(30),
+		}},
+	})
+
+	e.index.Insert("k", nil, keytrie.NewTipSet(bindA, bindB))
+
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both transactions should be visible: root(10) + txA(1) + txB(2) = 13
+	if r.Scalar.GetIntVal() != 13 {
+		t.Fatalf("expected 13 (both txns visible, non-overlapping predicates), got %d",
+			r.Scalar.GetIntVal())
+	}
+}

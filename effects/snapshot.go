@@ -373,7 +373,12 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	var result *pb.ReducedEffect
 	var subRootEffects []*pb.Effect
 	count := 0
-	wonTips := make(map[Tip]bool)
+
+	type wonBind struct {
+		txnID string
+		tips  []Tip // start tips for predicate collection
+	}
+	wonTips := make(map[Tip]wonBind)
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
@@ -402,16 +407,29 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			}
 			// Check if this bind competes with an already-won bind.
 			// Topo order visits lower fork-choice hash first, so the
-			// first bind for a given set of consumed tips is the winner.
+			// first bind for a given set of consumed tips is the winner —
+			// unless predicate refinement shows non-overlapping predicates,
+			// in which case both coexist (matching commit-time semantics).
 			for _, kb := range bind.Keys {
 				if string(kb.Key) == key {
-					for _, ct := range fromPbRefs(kb.ConsumedTips) {
-						if wonTips[ct] {
+					consumed := fromPbRefs(kb.ConsumedTips)
+					newTip := r(kb.NewTip)
+					for _, ct := range consumed {
+						if prev, competing := wonTips[ct]; competing {
+							if e != nil {
+								conflict, bothHadEvidence := e.hasPredicateConflict(
+									prev.txnID, eff.TxnId, key,
+									prev.tips, []Tip{newTip})
+								if bothHadEvidence && !conflict {
+									continue
+								}
+							}
 							return nil
 						}
 					}
-					for _, ct := range fromPbRefs(kb.ConsumedTips) {
-						wonTips[ct] = true
+					wb := wonBind{txnID: eff.TxnId, tips: []Tip{newTip}}
+					for _, ct := range consumed {
+						wonTips[ct] = wb
 					}
 					break
 				}
@@ -439,39 +457,60 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		result = ReduceChain(result, subRootEffects)
 	}
 
-	// Prune stale tips: input tips that were visited but are not the
-	// actual tips of the graph can be removed from the index.
+	// Prune stale tips: any input tip that was collected but is an
+	// ancestor (referenced as a dep by another collected node) can be
+	// removed from the index. Unreadable tips are preserved — they may
+	// be temporarily unavailable. Only prune when at least one real
+	// DAG tip is committed (present in the current index) to avoid
+	// removing tips superseded only by an in-flight transaction.
 	if len(tips) > 1 {
+		inputSet := make(map[Tip]bool, len(tips))
+		for _, t := range tips {
+			inputSet[t] = true
+		}
+		hasChild := make(map[Tip]bool, len(tips))
+		for _, eff := range d.nodes {
+			for _, dep := range eff.Deps {
+				dt := r(dep)
+				if inputSet[dt] {
+					hasChild[dt] = true
+				}
+			}
+		}
 		realTips := make(map[Tip]bool, len(tips))
 		for _, t := range tips {
-			if !d.visited[t] {
+			if _, ok := d.nodes[t]; ok && !hasChild[t] {
 				realTips[t] = true
 			}
 		}
-		currentIndex := e.index.Contains(key)
-		if currentIndex != nil {
-			indexSet := make(map[Tip]bool)
-			for _, t := range currentIndex.Tips() {
-				indexSet[t] = true
-			}
-			hasCommitted := false
-			for t := range realTips {
-				if indexSet[t] {
-					hasCommitted = true
-					break
+		if len(realTips) < len(tips) {
+			currentIndex := e.index.Contains(key)
+			if currentIndex != nil {
+				indexSet := make(map[Tip]bool)
+				for _, t := range currentIndex.Tips() {
+					indexSet[t] = true
 				}
-			}
-			if hasCommitted {
-				var stale []Tip
-				for _, t := range tips {
-					if realTips[t] || !d.visited[t] {
-						continue
+				hasCommitted := false
+				for t := range realTips {
+					if indexSet[t] {
+						hasCommitted = true
+						break
 					}
-					stale = append(stale, t)
 				}
-				if len(stale) > 0 {
-					slog.Debug("reconstruct: pruning stale tips", "key", key, "stale", stale)
-					e.index.RemoveTips(key, stale)
+				if hasCommitted {
+					var stale []Tip
+					for _, t := range tips {
+						if realTips[t] {
+							continue
+						}
+						if _, ok := d.nodes[t]; ok {
+							stale = append(stale, t)
+						}
+					}
+					if len(stale) > 0 {
+						slog.Debug("reconstruct: pruning stale tips", "key", key, "stale", stale)
+						e.index.RemoveTips(key, stale)
+					}
 				}
 			}
 		}
