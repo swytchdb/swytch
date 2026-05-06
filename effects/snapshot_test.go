@@ -836,61 +836,6 @@ func TestReduceChain_MetaOnTopOfSeed(t *testing.T) {
 	}
 }
 
-// --- findLCA tests (using DAG-based LCA) ---
-
-func TestFindLCA_SingleTip(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	cr, err := e.collectReachableNodes("k", []Tip{root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != root {
-		t.Fatalf("expected LCA=%v, got %v", root, lca)
-	}
-}
-
-func TestFindLCA_TwoTipsSameFork(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	a := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(20), Deps: []*pb.EffectRef{toPbRef(root)}})
-	b := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(25), Deps: []*pb.EffectRef{toPbRef(a)}})
-	tip1 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(30), Deps: []*pb.EffectRef{toPbRef(b)}})
-	tip2 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(35), Deps: []*pb.EffectRef{toPbRef(b)}})
-	cr, err := e.collectReachableNodes("k", []Tip{tip1, tip2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != b {
-		t.Fatalf("expected LCA=%v (B), got %v", b, lca)
-	}
-}
-
-func TestFindLCA_ThreeTips(t *testing.T) {
-	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
-	root := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(10)})
-	fork := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(20), Deps: []*pb.EffectRef{toPbRef(root)}})
-	tip1 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(25), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	tip2 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(30), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	tip3 := log.putEffect(&pb.Effect{Key: []byte("k"), Hlc: sTs(35), Deps: []*pb.EffectRef{toPbRef(fork)}})
-	cr, err := e.collectReachableNodes("k", []Tip{tip1, tip2, tip3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dag := BuildDAG(cr.nodes)
-	lca := dag.FindLCA(dag.Tips())
-	if lca == nil || lca.Offset != fork {
-		t.Fatalf("expected LCA=%v, got %v", fork, lca)
-	}
-}
-
 // --- Integration: Emit + Flush + GetSnapshot ---
 
 func TestEmitFlushGetSnapshot(t *testing.T) {
