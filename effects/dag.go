@@ -329,4 +329,3 @@ func (d *dag) encode(tips []Tip) string {
 
 	return b.String()
 }
-
