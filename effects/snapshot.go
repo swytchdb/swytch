@@ -371,9 +371,9 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	d := newDag(e, key, txID)
 
 	var result *pb.ReducedEffect
-	var binds []dagBind
 	var subRootEffects []*pb.Effect
 	count := 0
+	wonTips := make(map[Tip]bool)
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
@@ -400,16 +400,27 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			if _, voided := e.voidedBinds.Load(eff.TxnId); voided {
 				return nil
 			}
-			binds = append(binds, dagBind{eff: eff})
-			winning := resolveBinds(e, binds, key)
-			for _, wb := range winning {
-				bindEffects, fetchErr := e.collectBindEffects(wb.eff, key)
-				if fetchErr != nil {
-					return fetchErr
+			// Check if this bind competes with an already-won bind.
+			// Topo order visits lower fork-choice hash first, so the
+			// first bind for a given set of consumed tips is the winner.
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					for _, ct := range fromPbRefs(kb.ConsumedTips) {
+						if wonTips[ct] {
+							return nil
+						}
+					}
+					for _, ct := range fromPbRefs(kb.ConsumedTips) {
+						wonTips[ct] = true
+					}
+					break
 				}
-				result = ReduceChain(result, bindEffects)
 			}
-			binds = binds[:0]
+			bindEffects, fetchErr := e.collectBindEffects(eff, key)
+			if fetchErr != nil {
+				return fetchErr
+			}
+			result = ReduceChain(result, bindEffects)
 			return nil
 		}
 
@@ -422,18 +433,6 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 
 	if count == 0 {
 		return nil, 0, nil
-	}
-
-	// Resolve any remaining binds not yet processed inline
-	if len(binds) > 0 {
-		winningBinds := resolveBinds(e, binds, key)
-		for _, wb := range winningBinds {
-			bindEffects, fetchErr := e.collectBindEffects(wb.eff, key)
-			if fetchErr != nil {
-				return nil, 0, fetchErr
-			}
-			result = ReduceChain(result, bindEffects)
-		}
 	}
 
 	if len(subRootEffects) > 0 {
@@ -483,79 +482,8 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	return result, count, nil
 }
 
-// dagBind holds a bind effect encountered during the dag walk.
-type dagBind struct {
-	eff *pb.Effect
-}
-
-// resolveBinds resolves fork-choice between competing bind effects.
-// Two binds conflict if they share a consumed tip on ANY key (not just the
-// key being reconstructed) — this must match the commit-time check in
-// evaluateBindForkChoice so read and write paths agree on which transaction
-// won.
-func resolveBinds(e *Engine, binds []dagBind, key string) []dagBind {
-	if len(binds) <= 1 {
-		return binds
-	}
-
-	entries := make([]forkChoiceBindEntry, len(binds))
-	for i, b := range binds {
-		bind := b.eff.GetTxnBind()
-		entries[i] = forkChoiceBindEntry{
-			offset: Tip{b.eff.NodeId, 0},
-			hash:   b.eff.ForkChoiceHash,
-			txnID:  b.eff.TxnId,
-			keys:   make(map[string][]Tip, len(bind.Keys)),
-			tips:   make(map[string]Tip, len(bind.Keys)),
-		}
-		for _, kb := range bind.Keys {
-			k := string(kb.Key)
-			entries[i].keys[k] = fromPbRefs(kb.ConsumedTips)
-			entries[i].tips[k] = r(kb.NewTip)
-		}
-	}
-
-	lost := make(map[int]bool)
-	for i := range entries {
-		if lost[i] {
-			continue
-		}
-		for j := i + 1; j < len(entries); j++ {
-			if lost[j] {
-				continue
-			}
-			if !bindsShareBase(&entries[i], &entries[j]) {
-				continue
-			}
-			if e != nil {
-				conflict, bothHadEvidence := e.hasPredicateConflict(
-					entries[i].txnID, entries[j].txnID, key,
-					[]Tip{entries[i].tips[key]},
-					[]Tip{entries[j].tips[key]})
-				if bothHadEvidence && !conflict {
-					continue
-				}
-			}
-			if ForkChoiceLess(entries[i].hash, entries[j].hash) {
-				lost[j] = true
-			} else {
-				lost[i] = true
-			}
-		}
-	}
-
-	winners := make([]dagBind, 0, len(binds)-len(lost))
-	for i, b := range binds {
-		if !lost[i] {
-			winners = append(winners, b)
-		}
-	}
-	return winners
-}
-
 // forkChoiceBindEntry holds bind metadata for fork-choice resolution.
-// Used by both the commit path (evaluateBindForkChoice) and read path
-// (resolveBinds) so they reach the same verdict.
+// Used by the commit path (evaluateBindForkChoice).
 type forkChoiceBindEntry struct {
 	offset Tip
 	hash   []byte

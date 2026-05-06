@@ -161,10 +161,6 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 		for _, ref := range refs {
 			dt := r(ref)
 			if d.visited[dt] {
-				if existing, ok := d.nodes[dt]; ok && existing.GetSnapshot() != nil {
-					*lcaTip = dt
-					return nil
-				}
 				continue
 			}
 			depEff, err := d.engine.getEffect(dt)

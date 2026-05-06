@@ -515,3 +515,283 @@ func TestCrossTxnDepsMustNotConfirm(t *testing.T) {
 		t.Fatalf("expected [root, from-B], got %v", got)
 	}
 }
+
+// TestLCA_SnapshotOnOneBranchMustNotSkipOtherBranch verifies that a
+// snapshot reachable from multiple paths doesn't prematurely terminate
+// the BFS when another path bypasses it through effects the snapshot
+// doesn't cover.
+//
+// DAG (two tips):
+//
+//	R(+10) → Y(+7) → B(+2) → tip2 (deps=[A, B])
+//	   └──→ S(snap=10) → A(+1) ↗
+//	                  └→ tip1 (+3)
+//
+// S covers only R (state=10). Y is concurrent with S, on the R→B path.
+// The true LCA is R, not S. If S is selected as LCA, Y is lost.
+// Correct: 10 + 7 + 2 + 1 + 3 = 23
+func TestLCA_SnapshotOnOneBranchMustNotSkipOtherBranch(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	root := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 10)},
+	})
+
+	// S(snapshot, state=10, deps=[R])
+	snap := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(20), NodeId: 1, Deps: []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			Collection: pb.CollectionKind_SCALAR,
+			State: &pb.ReducedEffect{
+				Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_ADDITIVE_INT,
+				Collection: pb.CollectionKind_SCALAR, Commutative: true,
+				Hlc: sTs(10), NodeId: 1,
+				Scalar: &pb.DataEffect{
+					Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_ADDITIVE_INT,
+					Value: &pb.DataEffect_IntVal{IntVal: 10},
+				},
+			},
+		}},
+	})
+
+	// tip1(+3, deps=[S])
+	tip1 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(30), NodeId: 1, Deps: []*pb.EffectRef{toPbRef(snap)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 3)},
+	})
+
+	// A(+1, deps=[S])
+	effA := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(31), NodeId: 1, Deps: []*pb.EffectRef{toPbRef(snap)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+	})
+
+	// Y(+7, deps=[R]) — concurrent with S, not covered by S
+	effY := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(25), NodeId: 2, Deps: []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 7)},
+	})
+
+	// B(+2, deps=[Y])
+	effB := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(35), NodeId: 2, Deps: []*pb.EffectRef{toPbRef(effY)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
+	})
+
+	// tip2(+0, deps=[A, B]) — merge node
+	tip2 := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(40), NodeId: 1, Deps: []*pb.EffectRef{toPbRef(effA), toPbRef(effB)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 0)},
+	})
+
+	e.index.Insert("k", nil, keytrie.NewTipSet(tip1, tip2))
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// R(10) + Y(7) + A(1) + B(2) + tip1(3) + tip2(0) = 23
+	if r.Scalar.GetIntVal() != 23 {
+		t.Fatalf("expected 23, got %d (snapshot on one branch skipped Y on the other)", r.Scalar.GetIntVal())
+	}
+}
+
+// TestCompetingBinds_FirstWins verifies that when two transactions compete
+// (share consumed tips on the same key), the first in fork-choice order
+// (lower hash) wins and the loser's effects are not visible.
+//
+// DAG:
+//
+//	root(+10)
+//	├── txA_write(+1, txn=A) ── bindA(txn=A, consumed=[root], newTip=txA_write)
+//	└── txB_write(+2, txn=B) ── bindB(txn=B, consumed=[root], newTip=txB_write)
+//
+// Both transactions consume the same tip (root). Only one should win.
+// The winner's effects should be visible; the loser's should not.
+func TestCompetingBinds_FirstWins(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	root := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(10),
+		NodeId:         1,
+		ForkChoiceHash: ComputeForkChoiceHash(1, sTs(10)),
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 10)},
+	})
+
+	// Transaction A: write +1
+	txAWrite := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(20),
+		NodeId:         2,
+		TxnId:          "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(20)),
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+	})
+	bindA := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(25),
+		NodeId:         2,
+		TxnId:          "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(25)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txAWrite),
+			}},
+			OriginatorNodeId: 2,
+			TxnHlc:           sTs(20),
+		}},
+	})
+
+	// Transaction B: write +2
+	txBWrite := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(30),
+		NodeId:         3,
+		TxnId:          "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(30)),
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
+	})
+	bindB := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(35),
+		NodeId:         3,
+		TxnId:          "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(35)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txBWrite),
+			}},
+			OriginatorNodeId: 3,
+			TxnHlc:           sTs(30),
+		}},
+	})
+
+	e.index.Insert("k", nil, keytrie.NewTipSet(bindA, bindB))
+
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Determine which transaction wins fork-choice (lower hash)
+	hashA := ComputeForkChoiceHash(2, sTs(25))
+	hashB := ComputeForkChoiceHash(3, sTs(35))
+	var expectedVal int64
+	if ForkChoiceLess(hashA, hashB) {
+		expectedVal = 11 // root(10) + txA(1)
+	} else {
+		expectedVal = 12 // root(10) + txB(2)
+	}
+
+	if r.Scalar.GetIntVal() != expectedVal {
+		t.Fatalf("expected %d (only winner visible), got %d (both txns applied = %d)",
+			expectedVal, r.Scalar.GetIntVal(), 10+1+2)
+	}
+}
+
+// TestCompetingBinds_LoserDependentsInvisible verifies that non-txn effects
+// written after the losing transaction are still visible (they depend on the
+// bind structurally but are independent data writes).
+//
+// DAG:
+//
+//	root(+10)
+//	├── txA(+1, txn=A) ── bindA ── afterA(+100, non-txn)
+//	└── txB(+2, txn=B) ── bindB ── afterB(+200, non-txn)
+//
+// Only the winning bind's txn effects should be visible. Both afterA and
+// afterB are non-transactional and should be visible regardless.
+func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	root := log.putEffect(&pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            sTs(10),
+		NodeId:         1,
+		ForkChoiceHash: ComputeForkChoiceHash(1, sTs(10)),
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 10)},
+	})
+
+	// Transaction A: write +1, bind, then non-txn +100 after bind
+	txAWrite := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(20), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(20)),
+		Deps: []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+	})
+	bindA := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(25), NodeId: 2, TxnId: "txn-A",
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(25)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txAWrite),
+			}},
+			OriginatorNodeId: 2, TxnHlc: sTs(20),
+		}},
+	})
+	afterA := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(26), NodeId: 2,
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(26)),
+		Deps: []*pb.EffectRef{toPbRef(bindA)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 100)},
+	})
+
+	// Transaction B: write +2, bind, then non-txn +200 after bind
+	txBWrite := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(30), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(30)),
+		Deps: []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
+	})
+	bindB := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(35), NodeId: 3, TxnId: "txn-B",
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(35)),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			Keys: []*pb.TransactionalBindEffect_KeyBind{{
+				Key:          []byte("k"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(root)},
+				NewTip:       toPbRef(txBWrite),
+			}},
+			OriginatorNodeId: 3, TxnHlc: sTs(30),
+		}},
+	})
+	afterB := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(36), NodeId: 3,
+		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(36)),
+		Deps: []*pb.EffectRef{toPbRef(bindB)},
+		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 200)},
+	})
+
+	e.index.Insert("k", nil, keytrie.NewTipSet(afterA, afterB))
+
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Winner's txn effect + both non-txn effects should be visible
+	hashA := ComputeForkChoiceHash(2, sTs(25))
+	hashB := ComputeForkChoiceHash(3, sTs(35))
+	var expectedVal int64
+	if ForkChoiceLess(hashA, hashB) {
+		expectedVal = 10 + 1 + 100 + 200 // root + txA(winner) + afterA + afterB
+	} else {
+		expectedVal = 10 + 2 + 100 + 200 // root + txB(winner) + afterA + afterB
+	}
+
+	if r.Scalar.GetIntVal() != expectedVal {
+		t.Fatalf("expected %d, got %d", expectedVal, r.Scalar.GetIntVal())
+	}
+}
