@@ -425,6 +425,73 @@ func TestAbort(t *testing.T) {
 	}
 }
 
+func TestAbortClearsWatchedKeys(t *testing.T) {
+	e := newTestEngine(nil)
+
+	ctx := e.NewContext()
+	ctx.Watch("k1")
+	ctx.Watch("k2")
+
+	if len(ctx.watchedKeys) != 2 {
+		t.Fatalf("expected 2 watchedKeys before Abort, got %d", len(ctx.watchedKeys))
+	}
+
+	ctx.BeginTx()
+	ctx.Abort()
+
+	if len(ctx.watchedKeys) != 0 {
+		t.Fatalf("expected 0 watchedKeys after Abort, got %d", len(ctx.watchedKeys))
+	}
+}
+
+func TestAbortClearsWatchedKeysWithoutTx(t *testing.T) {
+	e := newTestEngine(nil)
+
+	ctx := e.NewContext()
+	ctx.Watch("k")
+
+	if len(ctx.watchedKeys) != 1 {
+		t.Fatalf("expected 1 watchedKey before Abort, got %d", len(ctx.watchedKeys))
+	}
+
+	// Abort without BeginTx — still must clear watchedKeys
+	ctx.Abort()
+
+	if len(ctx.watchedKeys) != 0 {
+		t.Fatalf("expected 0 watchedKeys after Abort, got %d", len(ctx.watchedKeys))
+	}
+}
+
+func TestAbortAllowsCleanReuse(t *testing.T) {
+	e := newTestEngine(nil)
+
+	ctx := e.NewContext()
+	ctx.Watch("k")
+	ctx.BeginTx()
+	if err := ctx.Emit(dataEffect("k")); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx.Abort()
+
+	// All state should be reset: keys, watchedKeys, inTx, txnID, txSnapshot
+	if len(ctx.keys) != 0 {
+		t.Fatal("keys should be empty after Abort")
+	}
+	if len(ctx.watchedKeys) != 0 {
+		t.Fatal("watchedKeys should be empty after Abort")
+	}
+	if ctx.inTx {
+		t.Fatal("inTx should be false after Abort")
+	}
+	if ctx.txnID != "" {
+		t.Fatal("txnID should be empty after Abort")
+	}
+	if ctx.txSnapshot != nil {
+		t.Fatal("txSnapshot should be nil after Abort")
+	}
+}
+
 func TestCASRetry(t *testing.T) {
 	e := newTestEngine(nil)
 
