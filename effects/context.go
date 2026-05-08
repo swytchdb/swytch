@@ -414,6 +414,7 @@ func (c *Context) CheckWatches() bool {
 // written to the log remain durable but invisible (index not updated).
 func (c *Context) Abort() {
 	clear(c.keys)
+	clear(c.watchedKeys)
 	c.inTx = false
 	c.txnID = ""
 	c.txSnapshot = nil
