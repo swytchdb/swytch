@@ -397,7 +397,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			if isInvisible != nil && isInvisible(eff.TxnId) {
 				return nil
 			}
-			if _, voided := e.voidedBinds.Load(eff.TxnId); voided {
+			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
 				return nil
 			}
 			// Check if this bind competes with an already-won bind.

@@ -103,7 +103,10 @@ type Engine struct {
 	// Voided binds — txnIDs whose binds lost fork-choice or were
 	// SSI-invalidated. Checked by filterTentativeEffects to skip
 	// these binds without per-read DAG walks.
-	voidedBinds *xsync.Map[string, struct{}]
+	// Backed by a low-capacity CloxCache to bound memory; eviction
+	// is safe because reconstruct's wonTips map independently
+	// resolves competing binds.
+	voidedBinds *clox.CloxCache[string, struct{}]
 
 	// Anti-entropy
 	antiEntropyStop chan struct{}
@@ -231,7 +234,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 			c.CollectStats = true
 			return c
 		}()),
-		voidedBinds: xsync.NewMap[string, struct{}](),
+		voidedBinds: clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
 		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
@@ -742,7 +745,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 				continue
 			}
 			// Skip voided binds (already lost fork-choice)
-			if _, voided := e.voidedBinds.Load(eff.TxnId); voided {
+			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
 				continue
 			}
 			// Check if they share a consumed tip on any overlapping key.
@@ -791,11 +794,12 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 }
 
 // evaluateBindForkChoice checks a newly arrived bind against all existing
-// binds on its keys. Losers are added to voidedBinds. Also checks for
-// concurrent non-transactional data effects (SSI invalidation).
+// binds on its keys. Losers are added to voidedBinds for cross-transaction
+// visibility. Also checks for concurrent non-transactional data effects
+// (SSI invalidation). Returns true if txnID itself was voided.
 // Called at bind arrival time (HandleRemote or flushTx) so the check
 // happens once, not on every read.
-func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOffset Tip, bindHash []byte, txnID string) {
+func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOffset Tip, bindHash []byte, txnID string) bool {
 	newEntry := &forkChoiceBindEntry{
 		offset: bindOffset,
 		hash:   bindHash,
@@ -831,7 +835,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 					continue // same transaction
 				}
 				// Already voided? skip
-				if _, voided := e.voidedBinds.Load(eff.TxnId); voided {
+				if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
 					continue
 				}
 
@@ -866,14 +870,14 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 						slog.Debug("evaluateBindForkChoice: voiding loser",
 							"winner_txn", txnID, "loser_txn", eff.TxnId,
 							"key", k)
-						e.voidedBinds.Store(eff.TxnId, struct{}{})
+						e.voidedBinds.Put(eff.TxnId, struct{}{})
 					} else {
 						// They win, we lose
 						slog.Debug("evaluateBindForkChoice: voiding loser",
 							"winner_txn", eff.TxnId, "loser_txn", txnID,
 							"key", k)
-						e.voidedBinds.Store(txnID, struct{}{})
-						return // we're voided, no need to check more keys
+						e.voidedBinds.Put(txnID, struct{}{})
+						return true
 					}
 				}
 			}
@@ -914,13 +918,14 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 						slog.Debug("evaluateBindForkChoice: SSI invalidation",
 							"txn", txnID, "key", k,
 							"concurrent_offset", tipOff)
-						e.voidedBinds.Store(txnID, struct{}{})
-						return
+						e.voidedBinds.Put(txnID, struct{}{})
+						return true
 					}
 				}
 			}
 		}
 	}
+	return false
 }
 
 // HandleNack processes a NACK from a remote peer.
@@ -1027,6 +1032,9 @@ func (e *Engine) Close() error {
 	if e.antiEntropyStop != nil {
 		close(e.antiEntropyStop)
 		e.antiEntropyWg.Wait()
+	}
+	if e.voidedBinds != nil {
+		e.voidedBinds.Close()
 	}
 	return nil
 }

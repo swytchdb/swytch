@@ -907,20 +907,13 @@ func (c *Context) flushTx() error {
 	}
 
 	// Evaluate fork-choice against existing binds on all keys.
-	c.engine.evaluateBindForkChoice(bind, bindOffset, bindEff.ForkChoiceHash, c.txnID)
-
-	// If a concurrent bind that was emitted between our
-	// checkCompetingBinds pre-flight and our bind's indexing has
-	// won fork-choice over us, we're in voidedBinds now — abort
-	// instead of falsely reporting a commit. Without this check,
-	// two truly-concurrent commits (same ConsumedTips, races past
-	// checkCompetingBinds) would both commit locally while only one
-	// is actually valid per the deterministic fork-choice rule.
-	if _, voided := c.engine.voidedBinds.Load(c.txnID); voided {
+	// Returns true if our bind lost — abort immediately without
+	// re-reading voidedBinds (the cache write is still done for
+	// cross-transaction visibility in reconstruct/checkCompetingBinds).
+	if c.engine.evaluateBindForkChoice(bind, bindOffset, bindEff.ForkChoiceHash, c.txnID) {
 		slog.Debug("flushTx: voided by concurrent bind, aborting",
 			"bind_offset", bindOffset, "txn", c.txnID)
-		for key, ck := range c.keys {
-			_ = key
+		for _, ck := range c.keys {
 			c.engine.pendingTxTips.Delete(ck.lastOffset)
 		}
 		c.reset()

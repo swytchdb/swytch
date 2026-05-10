@@ -121,7 +121,7 @@ func newTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       xsync.NewMap[string, struct{}](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -647,7 +647,7 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       xsync.NewMap[string, struct{}](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1550,5 +1550,93 @@ func TestFlushTx_ConsumesTips_LinearChain(t *testing.T) {
 		if cached.GetTxnBind() == nil {
 			t.Fatalf("iteration %d: tip at offset %d is not a BIND", i, bindOffset)
 		}
+	}
+}
+
+// TestVoidedBinds_BoundedMemory verifies that the voidedBinds cache does not
+// grow without bound. It stores far more entries than the cache capacity and
+// asserts that the entry count stays bounded. This is the regression test
+// for the xsync.Map memory leak where voided txnIDs accumulated forever.
+func TestVoidedBinds_BoundedMemory(t *testing.T) {
+	const capacity = 8192
+	vb := clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(capacity))
+	defer vb.Close()
+
+	// Insert 4x the capacity — with the old xsync.Map this would have
+	// grown to 4*capacity entries; with CloxCache it stays bounded.
+	const insertCount = capacity * 4
+	for i := range insertCount {
+		vb.Put(fmt.Sprintf("txn:%d", i), struct{}{})
+	}
+
+	count := vb.EntryCount()
+	if count > capacity {
+		t.Fatalf("voidedBinds should be bounded at ~%d entries, got %d", capacity, count)
+	}
+	t.Logf("after %d inserts: %d entries (capacity %d)", insertCount, count, capacity)
+}
+
+// TestVoidedBinds_ReadYourWrites verifies that a txnID stored in the
+// voidedBinds cache is immediately visible to a subsequent lookup on
+// the same goroutine (read-your-writes guarantee within capacity).
+// Uses a large capacity with few inserts to stay well within bounds.
+func TestVoidedBinds_ReadYourWrites(t *testing.T) {
+	const capacity = 8192
+	vb := clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(capacity))
+	defer vb.Close()
+
+	// Insert only 100 entries — well within capacity, so no evictions.
+	for i := range 100 {
+		txnID := fmt.Sprintf("txn:%d", i)
+		vb.Put(txnID, struct{}{})
+		if _, ok := vb.Get(txnID, 0); !ok {
+			t.Fatalf("read-your-writes failed: txnID %q not found immediately after Put", txnID)
+		}
+	}
+}
+
+// TestVoidedBinds_EngineIntegration verifies that the Engine's voidedBinds
+// field is properly bounded by inserting entries and checking that the
+// cache does not grow unbounded.
+func TestVoidedBinds_EngineIntegration(t *testing.T) {
+	// Use production-sized capacity for realistic behavior
+	e := &Engine{
+		index:             keytrie.New(),
+		nodeID:            42,
+		clock:             crdt.NewHLC(),
+		subscriptions:     xsync.NewMap[string, *subscriptionState](),
+		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
+		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
+		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
+		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(8192)),
+		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+	}
+	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
+	defer e.voidedBinds.Close()
+	defer e.effectCache.Close()
+
+	cap := e.voidedBinds.Capacity()
+
+	// Insert 3x the capacity to force evictions — with the old
+	// xsync.Map this would have grown to 3*cap; now it's bounded.
+	insertCount := cap * 3
+	for i := range insertCount {
+		e.voidedBinds.Put(fmt.Sprintf("txn:%d:%d", e.nodeID, i), struct{}{})
+	}
+
+	count := e.voidedBinds.EntryCount()
+	if count > cap {
+		t.Fatalf("engine voidedBinds exceeded capacity: %d entries, capacity %d", count, cap)
+	}
+	t.Logf("after %d inserts: %d entries (capacity %d)", insertCount, count, cap)
+
+	// Verify read-your-writes within capacity: insert a fresh entry and
+	// immediately read it back. This is the path flushTx depends on —
+	// the Put and Get happen on the same goroutine within microseconds.
+	freshKey := "txn:fresh:ryw"
+	e.voidedBinds.Put(freshKey, struct{}{})
+	if _, ok := e.voidedBinds.Get(freshKey, 0); !ok {
+		t.Fatal("read-your-writes failed for fresh entry after overflow")
 	}
 }
