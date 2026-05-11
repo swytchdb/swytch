@@ -417,13 +417,16 @@ jobs:
       - name: Copy store/ out
         if: always()
         run: |
-          # Copy via the holder sidecar (the controller container has
-          # already terminated by this point, so `kubectl cp` against it
-          # would fail). Do NOT pre-create ./store: if the destination
-          # already exists, `kubectl cp` nests the source as
-          # ./store/store/<...> and slips past the find -maxdepth below.
-          kubectl -n "$NAMESPACE" cp -c holder \
-            "${RESOURCE_PREFIX}-controller:/workspace/store" ./store || true
+          # `kubectl cp` wraps tar but its wrapper silently truncates
+          # the stream on symlinks (jepsen writes a `current` symlink in
+          # store/) and on certain network hiccups, leaving a partial
+          # tree behind. Pipe tar explicitly via kubectl exec — same
+          # underlying mechanism, no wrapper foot-guns.
+          set -o pipefail
+          kubectl -n "$NAMESPACE" exec -c holder \
+            "${RESOURCE_PREFIX}-controller" -- \
+            tar -C /workspace -cf - store | tar -xf - || \
+            echo "::warning::store/ retrieval failed or partial"
           ls -la store 2>/dev/null || echo "store/ not retrieved"
 
       - name: Parse results.edn
