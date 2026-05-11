@@ -21,10 +21,12 @@ on:
   issue_comment:
     types: [created]
 
+# Workflow-level token is read-only. Jobs that need to comment/react
+# upscope per-job; jobs that handle untrusted PR code (build, run)
+# inherit the read-only minimum so a compromised build can't write
+# back to the repo, PRs, or issues.
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 concurrency:
   group: jepsen
@@ -35,6 +37,10 @@ jobs:
     name: Parse & gate
     if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/jepsen')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     outputs:
       workloads:    ${{ steps.parse.outputs.workloads }}
       time_limit:   ${{ steps.parse.outputs.time_limit }}
@@ -176,11 +182,17 @@ jobs:
     name: Build swytch binary
     needs: prepare
     runs-on: ubuntu-latest
+    # This job checks out and builds untrusted PR code. Permissions are
+    # read-only and no secrets are exposed — `go build` cannot execute
+    # the target's code and CGO is disabled.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.pr_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-go@v6
         with:
@@ -208,6 +220,12 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     environment: jepsen
+    # Read-only on the repo; the kubeconfig (jepsen environment secret)
+    # is scoped to the `jepsen` namespace only. The untrusted swytch
+    # binary built from PR code is `kubectl cp`'d into the controller
+    # pod and never executed on the runner.
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -229,6 +247,7 @@ jobs:
           sparse-checkout: |
             .github/jepsen-k8s
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -429,6 +448,10 @@ jobs:
     if: always() && needs.prepare.result == 'success'
     needs: [prepare, run]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/download-artifact@v4
         with:
