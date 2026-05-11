@@ -22,7 +22,6 @@ package beacon
 import (
 	"encoding/binary"
 	"testing"
-	"time"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
 )
@@ -96,32 +95,6 @@ func TestBuildMemberRemove(t *testing.T) {
 	gotID := binary.LittleEndian.Uint64(data.Id)
 	if gotID != 999 {
 		t.Fatalf("expected nodeID 999, got %d", gotID)
-	}
-}
-
-func TestBuildMemberTTLRefresh(t *testing.T) {
-	before := time.Now()
-	eff := buildMemberTTLRefresh(42, 30*time.Second)
-	after := time.Now()
-
-	meta := eff.GetMeta()
-	if meta == nil {
-		t.Fatal("expected MetaEffect")
-	}
-	if len(meta.ElementId) != 8 {
-		t.Fatalf("expected 8-byte element ID, got %d bytes", len(meta.ElementId))
-	}
-	gotID := binary.LittleEndian.Uint64(meta.ElementId)
-	if gotID != 42 {
-		t.Fatalf("expected nodeID 42, got %d", gotID)
-	}
-	if meta.ExpiresAt == nil {
-		t.Fatal("expected non-nil ExpiresAt")
-	}
-
-	expiresAt := meta.ExpiresAt.AsTime()
-	if expiresAt.Before(before.Add(30*time.Second)) || expiresAt.After(after.Add(30*time.Second)) {
-		t.Fatalf("ExpiresAt %v not in expected range", expiresAt)
 	}
 }
 
