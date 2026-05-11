@@ -1,0 +1,504 @@
+name: Jepsen
+
+# Comment-triggered Jepsen run. A maintainer comments `/jepsen` on a PR
+# to launch the suite against that PR's HEAD. Syntax:
+#
+#   /jepsen                              — all default workloads
+#   /jepsen safe-counter                 — single workload
+#   /jepsen safe-counter time=120        — override --time-limit (seconds)
+#   /jepsen safe-counter ref=my-branch   — override the swytch.jepsen ref
+#   /jepsen time=120 ref=my-branch       — knobs on the full matrix
+#
+# Workloads run as a fan-out matrix against an isolated namespace each
+# in the configured Kubernetes cluster. Only one Jepsen run can be in
+# flight at a time (workflow-level concurrency lock).
+#
+# Required repository secrets:
+#   KUBECONFIG_B64 — base64-encoded kubeconfig with create/delete/exec
+#                    permission on jepsen-* namespaces.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: jepsen
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Parse & gate
+    if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/jepsen')
+    runs-on: ubuntu-latest
+    outputs:
+      workloads:    ${{ steps.parse.outputs.workloads }}
+      time_limit:   ${{ steps.parse.outputs.time_limit }}
+      jepsen_ref:   ${{ steps.parse.outputs.jepsen_ref }}
+      pr_sha:       ${{ steps.pr.outputs.head_sha }}
+      pr_number:    ${{ github.event.issue.number }}
+      run_id:       ${{ github.run_id }}-${{ github.run_attempt }}
+      tracking_comment_id: ${{ steps.track.outputs.comment_id }}
+    steps:
+      - name: Check maintainer association
+        env:
+          ASSOC: ${{ github.event.comment.author_association }}
+        run: |
+          case "$ASSOC" in
+            OWNER|MEMBER|COLLABORATOR) echo "association: $ASSOC, allowed" ;;
+            *) echo "::error::Author association '$ASSOC' is not permitted to trigger /jepsen"; exit 1 ;;
+          esac
+
+      - name: React to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes',
+            });
+
+      - name: Parse comment
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Defaults
+          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","safe-elle-causal","none-counter","none-set","none-sorted-set","none-elle-causal"]'
+          TIME_LIMIT=60
+          JEPSEN_REF=main
+          SINGLE_WORKLOAD=""
+
+          # Strip the leading "/jepsen" and split into tokens
+          line="$(printf '%s' "$COMMENT_BODY" | head -n1)"
+          rest="${line#/jepsen}"
+          # Tokenize on whitespace (no quoting support — we don't need it)
+          read -r -a tokens <<<"$rest"
+
+          valid_workloads='safe-counter safe-set safe-sorted-set safe-elle-causal none-counter none-set none-sorted-set none-elle-causal'
+
+          for tok in "${tokens[@]}"; do
+            case "$tok" in
+              time=*)
+                v="${tok#time=}"
+                if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -lt 10 ] || [ "$v" -gt 3600 ]; then
+                  echo "::error::invalid time=$v (10..3600)"; exit 1
+                fi
+                TIME_LIMIT="$v"
+                ;;
+              ref=*)
+                v="${tok#ref=}"
+                if ! [[ "$v" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                  echo "::error::invalid ref=$v"; exit 1
+                fi
+                JEPSEN_REF="$v"
+                ;;
+              "")
+                ;;
+              *)
+                # Must be a workload name
+                ok=0
+                for w in $valid_workloads; do
+                  if [ "$tok" = "$w" ]; then ok=1; break; fi
+                done
+                if [ "$ok" -ne 1 ]; then
+                  echo "::error::unknown token '$tok' (expected a workload or time=/ref=)"; exit 1
+                fi
+                if [ -n "$SINGLE_WORKLOAD" ]; then
+                  echo "::error::only one workload can be specified per comment"; exit 1
+                fi
+                SINGLE_WORKLOAD="$tok"
+                ;;
+            esac
+          done
+
+          if [ -n "$SINGLE_WORKLOAD" ]; then
+            WORKLOADS_JSON="[\"$SINGLE_WORKLOAD\"]"
+          else
+            WORKLOADS_JSON="$DEFAULT_WORKLOADS"
+          fi
+
+          echo "workloads=$WORKLOADS_JSON" >>"$GITHUB_OUTPUT"
+          echo "time_limit=$TIME_LIMIT"   >>"$GITHUB_OUTPUT"
+          echo "jepsen_ref=$JEPSEN_REF"   >>"$GITHUB_OUTPUT"
+
+      - name: Resolve PR head SHA
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            core.setOutput('head_sha', pr.data.head.sha);
+
+      - name: Post tracking comment
+        id: track
+        uses: actions/github-script@v7
+        env:
+          WORKLOADS:  ${{ steps.parse.outputs.workloads }}
+          TIME_LIMIT: ${{ steps.parse.outputs.time_limit }}
+          JEPSEN_REF: ${{ steps.parse.outputs.jepsen_ref }}
+          PR_SHA:     ${{ steps.pr.outputs.head_sha }}
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const workloads = JSON.parse(process.env.WORKLOADS);
+            const body = [
+              `### Jepsen run started`,
+              ``,
+              `- PR HEAD: \`${process.env.PR_SHA}\``,
+              `- swytch.jepsen ref: \`${process.env.JEPSEN_REF}\``,
+              `- time limit: \`${process.env.TIME_LIMIT}s\` per workload`,
+              `- [workflow run](${runUrl})`,
+              ``,
+              `| workload | result |`,
+              `|---|---|`,
+              ...workloads.map(w => `| \`${w}\` | ⏳ pending |`),
+            ].join('\n');
+            const res = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body,
+            });
+            core.setOutput('comment_id', res.data.id);
+
+  build:
+    name: Build swytch binary
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.pr_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build swytch (linux/amd64)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go build --tags nolicense -o swytch .
+          ls -lh swytch
+          file swytch
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swytch-binary
+          path: swytch
+          retention-days: 7
+
+  run:
+    name: ${{ matrix.workload }}
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: jepsen
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: ${{ fromJSON(needs.prepare.outputs.workloads) }}
+    env:
+      NAMESPACE: jepsen
+      RESOURCE_PREFIX: ${{ matrix.workload }}
+      RUN_ID: ${{ needs.prepare.outputs.run_id }}
+      WORKLOAD: ${{ matrix.workload }}
+      JEPSEN_IMAGE: ghcr.io/swytchdb/swytch-jepsen:${{ needs.prepare.outputs.jepsen_ref == 'main' && 'latest' || needs.prepare.outputs.jepsen_ref }}
+      JEPSEN_REF: ${{ needs.prepare.outputs.jepsen_ref == 'main' && '' || needs.prepare.outputs.jepsen_ref }}
+      JEPSEN_TIME_LIMIT: ${{ needs.prepare.outputs.time_limit }}
+      JEPSEN_JOIN_DNS: jepsen.swytch.local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.pr_sha }}
+          sparse-checkout: |
+            .github/jepsen-k8s
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: swytch-binary
+          path: ./bin
+
+      - name: Configure kubectl
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "$KUBECONFIG_B64" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >>"$GITHUB_ENV"
+          kubectl version --client=true
+          kubectl config current-context
+
+      - name: Determine workload params
+        id: wp
+        run: |
+          case "$WORKLOAD" in
+            safe-counter)     N=safe; W=counter ;;
+            safe-set)         N=safe; W=set ;;
+            safe-sorted-set)  N=safe; W=sorted-set ;;
+            safe-elle-causal) N=safe; W=elle-causal ;;
+            none-counter)     N=none; W=counter ;;
+            none-set)         N=none; W=set ;;
+            none-sorted-set)  N=none; W=sorted-set ;;
+            none-elle-causal) N=none; W=elle-causal ;;
+            *) echo "::error::unknown workload $WORKLOAD"; exit 1 ;;
+          esac
+          echo "nemesis=$N"  >>"$GITHUB_OUTPUT"
+          echo "workload=$W" >>"$GITHUB_OUTPUT"
+
+      - name: Generate ephemeral SSH keypair
+        run: |
+          mkdir -p secrets
+          ssh-keygen -t ed25519 -N '' -f secrets/id_ed25519 -C "jepsen-${RUN_ID}-${WORKLOAD}"
+          echo "SSH_AUTHORIZED_KEYS_B64=$(base64 -w0 < secrets/id_ed25519.pub)" >>"$GITHUB_ENV"
+
+      - name: Clean stale resources for this workload
+        run: |
+          # Belt-and-suspenders: prior runs ought to have torn down, but
+          # if a previous attempt was killed mid-step the labelled pods
+          # and secret may linger and block apply.
+          kubectl -n "$NAMESPACE" delete pod,secret \
+            -l swytch-jepsen/workload="$WORKLOAD" \
+            --ignore-not-found --wait=true --timeout=60s
+
+      - name: Render & apply secret
+        env:
+          # Explicit allowlist; envsubst would otherwise eat any $VAR in
+          # the YAML, including the controller command's shell vars.
+          ENVSUBST_VARS: '$NAMESPACE $RESOURCE_PREFIX $RUN_ID $WORKLOAD $SSH_AUTHORIZED_KEYS_B64'
+        run: |
+          envsubst "$ENVSUBST_VARS" < .github/jepsen-k8s/ssh-secret.yaml | kubectl apply -f -
+
+      - name: Apply node pods
+        env:
+          ENVSUBST_VARS: '$NAMESPACE $RESOURCE_PREFIX $RUN_ID $WORKLOAD $JEPSEN_IMAGE $NODE_INDEX'
+        run: |
+          for i in 0 1 2 3 4; do
+            NODE_INDEX=$i envsubst "$ENVSUBST_VARS" < .github/jepsen-k8s/node-pod.yaml \
+              | kubectl apply -f -
+          done
+
+      - name: Wait for node pods Ready
+        run: |
+          for i in 0 1 2 3 4; do
+            kubectl -n "$NAMESPACE" wait --for=condition=Ready \
+              pod/"${RESOURCE_PREFIX}-node-$i" --timeout=300s
+          done
+
+      - name: Collect node pod IPs
+        id: ips
+        run: |
+          IPS=""
+          for i in 0 1 2 3 4; do
+            pod="${RESOURCE_PREFIX}-node-$i"
+            IP=$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.podIP}')
+            if [ -z "$IP" ]; then echo "::error::no podIP for $pod"; exit 1; fi
+            if [ -z "$IPS" ]; then IPS="$IP"; else IPS="$IPS,$IP"; fi
+          done
+          echo "Node IPs: $IPS"
+          echo "nodes=$IPS" >>"$GITHUB_OUTPUT"
+
+      - name: Apply controller pod
+        env:
+          JEPSEN_NODES:    ${{ steps.ips.outputs.nodes }}
+          JEPSEN_WORKLOAD: ${{ steps.wp.outputs.workload }}
+          JEPSEN_NEMESIS:  ${{ steps.wp.outputs.nemesis }}
+          ENVSUBST_VARS: '$NAMESPACE $RESOURCE_PREFIX $RUN_ID $WORKLOAD $JEPSEN_IMAGE $JEPSEN_REF $JEPSEN_NODES $JEPSEN_WORKLOAD $JEPSEN_NEMESIS $JEPSEN_TIME_LIMIT $JEPSEN_JOIN_DNS'
+        run: |
+          envsubst "$ENVSUBST_VARS" < .github/jepsen-k8s/controller-pod.yaml \
+            | kubectl apply -f -
+          kubectl -n "$NAMESPACE" wait --for=condition=Ready \
+            pod/"${RESOURCE_PREFIX}-controller" --timeout=300s
+
+      - name: Upload inputs to controller workspace
+        run: |
+          ctrl="${RESOURCE_PREFIX}-controller"
+          kubectl -n "$NAMESPACE" cp ./bin/swytch         "$ctrl:/workspace/swytch"
+          kubectl -n "$NAMESPACE" cp ./secrets/id_ed25519 "$ctrl:/workspace/id_ed25519"
+          kubectl -n "$NAMESPACE" exec "$ctrl" -- touch /workspace/.ready
+
+      - name: Stream controller logs
+        run: |
+          # `kubectl logs -f` exits when the container exits.
+          kubectl -n "$NAMESPACE" logs -f "${RESOURCE_PREFIX}-controller"
+
+      - name: Capture exit status
+        id: status
+        run: |
+          ctrl="${RESOURCE_PREFIX}-controller"
+          phase=$(kubectl -n "$NAMESPACE" get pod "$ctrl" -o jsonpath='{.status.phase}')
+          ec=$(kubectl -n "$NAMESPACE" get pod "$ctrl" \
+                -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
+          echo "phase=$phase exit=$ec"
+          echo "exit_code=${ec:-1}" >>"$GITHUB_OUTPUT"
+
+      - name: Copy store/ out
+        if: always()
+        run: |
+          mkdir -p store
+          # The controller symlinks /opt/jepsen/store -> /workspace/store
+          # so all run artifacts land in the emptyDir we can `kubectl cp` out.
+          kubectl -n "$NAMESPACE" cp \
+            "${RESOURCE_PREFIX}-controller:/workspace/store" ./store || true
+          ls -la store || true
+
+      - name: Parse results.edn
+        if: always()
+        id: result
+        run: |
+          # Find the latest run dir (jepsen writes a `latest` symlink, but
+          # `kubectl cp` doesn't follow symlinks reliably; walk by mtime).
+          latest=$(find store -maxdepth 3 -name results.edn -printf '%T@ %p\n' 2>/dev/null \
+                   | sort -n | tail -n1 | awk '{print $2}')
+          if [ -z "$latest" ]; then
+            echo "valid=missing" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "results file: $latest"
+          # Look for `:valid? <value>` in the top-level results map.
+          v=$(grep -oE ':valid\?[[:space:]]+(true|false|:unknown)' "$latest" \
+              | head -n1 | awk '{print $2}')
+          case "$v" in
+            true)     echo "valid=true"     >>"$GITHUB_OUTPUT" ;;
+            false)    echo "valid=false"    >>"$GITHUB_OUTPUT" ;;
+            :unknown) echo "valid=unknown"  >>"$GITHUB_OUTPUT" ;;
+            *)        echo "valid=missing"  >>"$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Write workload result manifest
+        if: always()
+        run: |
+          mkdir -p result
+          jq -n \
+            --arg workload "$WORKLOAD" \
+            --arg valid "${{ steps.result.outputs.valid }}" \
+            --arg exit "${{ steps.status.outputs.exit_code }}" \
+            '{workload: $workload, valid: $valid, exit: ($exit | tonumber? // 1)}' \
+            > "result/${WORKLOAD}.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jepsen-store-${{ matrix.workload }}
+          path: store
+          retention-days: 14
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jepsen-result-${{ matrix.workload }}
+          path: result
+          retention-days: 14
+
+      - name: Teardown workload resources
+        if: always()
+        run: |
+          kubectl -n "$NAMESPACE" delete pod,secret \
+            -l swytch-jepsen/workload="$WORKLOAD" \
+            --ignore-not-found --wait=false
+
+      - name: Fail step if workload invalid
+        if: always()
+        run: |
+          v="${{ steps.result.outputs.valid }}"
+          case "$v" in
+            true) echo "workload passed" ;;
+            *)    echo "::error::workload $WORKLOAD result: $v"; exit 1 ;;
+          esac
+
+  summarize:
+    name: Summarize
+    if: always() && needs.prepare.result == 'success'
+    needs: [prepare, run]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jepsen-result-*
+          path: results
+          merge-multiple: true
+
+      - name: Update tracking comment
+        uses: actions/github-script@v7
+        env:
+          COMMENT_ID:  ${{ needs.prepare.outputs.tracking_comment_id }}
+          WORKLOADS:   ${{ needs.prepare.outputs.workloads }}
+          TIME_LIMIT:  ${{ needs.prepare.outputs.time_limit }}
+          JEPSEN_REF:  ${{ needs.prepare.outputs.jepsen_ref }}
+          PR_SHA:      ${{ needs.prepare.outputs.pr_sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const workloads = JSON.parse(process.env.WORKLOADS);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const results = {};
+            try {
+              for (const f of fs.readdirSync('results')) {
+                const r = JSON.parse(fs.readFileSync(path.join('results', f), 'utf8'));
+                results[r.workload] = r;
+              }
+            } catch (e) {
+              core.warning(`could not read results: ${e.message}`);
+            }
+
+            const icon = (r) => {
+              if (!r) return '⚠️ no result';
+              if (r.valid === 'true')    return '✅ valid';
+              if (r.valid === 'false')   return '❌ invalid';
+              if (r.valid === 'unknown') return '❔ unknown';
+              return '⚠️ missing';
+            };
+
+            const rows = workloads.map(w => {
+              const r = results[w];
+              const art = `[store](${runUrl}#artifacts) · [history](${runUrl}#artifacts)`;
+              return `| \`${w}\` | ${icon(r)} | ${art} |`;
+            });
+
+            const anyInvalid = workloads.some(w => (results[w]?.valid === 'false'));
+            const anyMissing = workloads.some(w => !results[w] || results[w].valid === 'missing');
+            const heading = anyInvalid
+              ? '### Jepsen run: ❌ anomalies detected'
+              : anyMissing
+                ? '### Jepsen run: ⚠️ completed with missing results'
+                : '### Jepsen run: ✅ all workloads valid';
+
+            const body = [
+              heading,
+              ``,
+              `- PR HEAD: \`${process.env.PR_SHA}\``,
+              `- swytch.jepsen ref: \`${process.env.JEPSEN_REF}\``,
+              `- time limit: \`${process.env.TIME_LIMIT}s\` per workload`,
+              `- [workflow run](${runUrl})`,
+              ``,
+              `| workload | result | artifacts |`,
+              `|---|---|---|`,
+              ...rows,
+            ].join('\n');
+
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: Number(process.env.COMMENT_ID),
+              body,
+            });
