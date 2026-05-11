@@ -384,12 +384,14 @@ jobs:
       - name: Copy store/ out
         if: always()
         run: |
-          mkdir -p store
           # The controller symlinks /opt/jepsen/store -> /workspace/store
-          # so all run artifacts land in the emptyDir we can `kubectl cp` out.
+          # so all run artifacts land in the emptyDir we can `kubectl cp`
+          # out. Do NOT pre-create ./store: when the destination already
+          # exists, `kubectl cp` nests the source as ./store/store/<...>
+          # which slips past the find -maxdepth below.
           kubectl -n "$NAMESPACE" cp \
             "${RESOURCE_PREFIX}-controller:/workspace/store" ./store || true
-          ls -la store || true
+          ls -la store 2>/dev/null || echo "store/ not retrieved"
 
       - name: Parse results.edn
         if: always()
@@ -518,7 +520,7 @@ jobs:
 
             const rows = workloads.map(w => {
               const r = results[w];
-              const art = `[store](${runUrl}#artifacts) · [history](${runUrl}#artifacts)`;
+              const art = `[jepsen-store-${w}](${runUrl}#artifacts)`;
               return `| \`${w}\` | ${icon(r)} | ${art} |`;
             });
 
