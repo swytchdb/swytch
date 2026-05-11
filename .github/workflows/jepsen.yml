@@ -226,7 +226,10 @@ jobs:
     # pod and never executed on the runner.
     permissions:
       contents: read
-    timeout-minutes: 30
+    # Parser caps --time-limit at 3600s (60 min). The remaining ~30 min
+    # is buffer for image pull, jepsen-side apt-update, kubectl cp, and
+    # store/ retrieval.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
