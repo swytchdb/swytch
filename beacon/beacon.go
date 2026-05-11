@@ -34,27 +34,19 @@ import (
 
 // Config holds beacon configuration parsed from CLI flags.
 type Config struct {
-	JoinAddr          string        // DNS name to resolve for peer discovery (empty = solo)
-	ClusterPort       int           // QUIC listen port for cluster traffic
-	AdvertiseAddr     string        // host:port this node advertises (empty = auto-detect)
-	NodeID            pb.NodeID     // ephemeral node ID
-	Passphrase        string        // shared mTLS passphrase
-	HeartbeatInterval time.Duration // how often to refresh membership TTL (default 10s)
-	FailureTimeout    time.Duration // TTL on membership entries (default 30s)
+	JoinAddr      string        // DNS name to resolve for peer discovery (empty = solo)
+	ClusterPort   int           // QUIC listen port for cluster traffic
+	AdvertiseAddr string        // host:port this node advertises (empty = auto-detect)
+	NodeID        pb.NodeID     // ephemeral node ID
+	Passphrase    string        // shared mTLS passphrase
+	SyncInterval  time.Duration // how often to reconcile local topology with __swytch:members (default 10s)
 }
 
-func (c *Config) heartbeatInterval() time.Duration {
-	if c.HeartbeatInterval > 0 {
-		return c.HeartbeatInterval
+func (c *Config) syncInterval() time.Duration {
+	if c.SyncInterval > 0 {
+		return c.SyncInterval
 	}
 	return 10 * time.Second
-}
-
-func (c *Config) failureTimeout() time.Duration {
-	if c.FailureTimeout > 0 {
-		return c.FailureTimeout
-	}
-	return 30 * time.Second
 }
 
 // Beacon manages cluster discovery and dynamic membership via effects.
@@ -198,37 +190,62 @@ func (b *Beacon) primeSubscription() {
 	ctx.Flush()
 }
 
-// registerSelf writes this node's INSERT_OP + type tag + initial TTL.
+// registerSelf publishes this node's membership entry. Two processes
+// cannot bind the same host:port, so any pre-existing entry at our
+// advertise address belongs to a dead predecessor — sweep it from the
+// roster in the same flush so peers see the takeover atomically.
 func (b *Beacon) registerSelf() error {
 	ctx := b.engine.NewContext()
+
+	snapshot, _, err := ctx.GetSnapshot(MembershipKey)
+	if err != nil {
+		// Snapshot read failure (no symmetric peers, partition, etc.) —
+		// proceed with just our own insert. If a stale entry shares our
+		// address, a later sync will surface it and we'll re-register
+		// then.
+		slog.Debug("beacon: registerSelf snapshot read failed, skipping collision sweep", "error", err)
+	} else {
+		selfID := uint64(b.cfg.NodeID)
+		for _, m := range parseMembership(snapshot) {
+			if m.Addr == b.cfg.AdvertiseAddr && m.NodeID != selfID {
+				slog.Info("beacon: evicting stale predecessor at our address",
+					"old_node_id", m.NodeID, "addr", m.Addr)
+				if err := ctx.Emit(buildMemberRemove(m.NodeID)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	if err := ctx.Emit(buildMemberInsert(uint64(b.cfg.NodeID), b.cfg.AdvertiseAddr)); err != nil {
 		return err
 	}
 	if err := ctx.Emit(buildMemberTypeTag()); err != nil {
 		return err
 	}
-	if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
-		return err
-	}
 	return ctx.Flush()
 }
 
-// refreshLoop periodically bumps this node's membership TTL and
-// reconciles the local topology with the replicated membership list.
-// Runs in its own goroutine — the membership sync intentionally does
-// not run from engine OnKeyDataAdded callbacks, which fire
-// synchronously inside Flush and would deadlock the first
-// registerSelf write (GetSnapshot → ensureSubscribed blocks until
-// peers ACK, but peers are simultaneously stuck in their own
-// registerSelf).
+// refreshLoop reconciles the local topology with the replicated
+// membership list on a fixed cadence. Membership entries no longer
+// carry a TTL — they live until an explicit REMOVE_OP (graceful
+// departure, or address-collision sweep when a fresh process binds the
+// same host:port). The loop just pulls the latest snapshot so newly-
+// observed joins propagate into the PeerManager topology.
+//
+// Runs in its own goroutine — the sync intentionally does not run from
+// engine OnKeyDataAdded callbacks, which fire synchronously inside
+// Flush and would deadlock the first registerSelf write (GetSnapshot
+// → ensureSubscribed blocks until peers ACK, but peers are
+// simultaneously stuck in their own registerSelf).
 func (b *Beacon) refreshLoop() {
 	defer b.wg.Done()
 
-	// First sync runs as soon as the loop starts rather than after
-	// one heartbeat interval — otherwise the local topology stays
-	// pinned to the DNS-synthetic view until the first tick fires,
-	// which at the 10s default is long enough for an early client
-	// query to route against an incomplete peer set.
+	// First sync runs immediately rather than after one tick —
+	// otherwise the local topology stays pinned to the DNS-synthetic
+	// view until the first tick fires, which at the 10s default is
+	// long enough for an early client query to route against an
+	// incomplete peer set.
 	{
 		ctx := b.engine.NewContext()
 		snapshot, _, err := ctx.GetSnapshot(MembershipKey)
@@ -238,7 +255,7 @@ func (b *Beacon) refreshLoop() {
 		ctx.Flush()
 	}
 
-	ticker := time.NewTicker(b.cfg.heartbeatInterval())
+	ticker := time.NewTicker(b.cfg.syncInterval())
 	defer ticker.Stop()
 
 	for {
@@ -248,21 +265,16 @@ func (b *Beacon) refreshLoop() {
 		case <-ticker.C:
 			ctx := b.engine.NewContext()
 			snapshot, _, err := ctx.GetSnapshot(MembershipKey)
+			ctx.Flush()
 			if err != nil {
-				panic("beacon: membership unreadable: " + err.Error())
+				slog.Debug("beacon: membership snapshot read failed", "error", err)
+				continue
 			}
 			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[string(nodeIDBytes(uint64(b.cfg.NodeID)))] == nil {
 				if err := b.registerSelf(); err != nil {
 					panic("beacon: failed to re-register after membership loss: " + err.Error())
 				}
 				continue
-			}
-			if err := ctx.Emit(buildMemberTTLRefresh(uint64(b.cfg.NodeID), b.cfg.failureTimeout())); err != nil {
-				slog.Warn("beacon: failed to emit TTL refresh", "error", err)
-				continue
-			}
-			if err := ctx.Flush(); err != nil {
-				slog.Warn("beacon: failed to flush TTL refresh", "error", err)
 			}
 			b.syncMembership(snapshot)
 		}

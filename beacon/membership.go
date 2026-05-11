@@ -21,10 +21,8 @@ package beacon
 
 import (
 	"encoding/binary"
-	"time"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // MembershipKey is the reserved effects key for cluster membership.
@@ -72,18 +70,6 @@ func buildMemberTypeTag() *pb.Effect {
 	return &pb.Effect{
 		Key:  []byte(MembershipKey),
 		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_HASH}},
-	}
-}
-
-// buildMemberTTLRefresh creates a MetaEffect to bump the TTL on this node's
-// membership entry. Used as the heartbeat — emitted every HeartbeatInterval.
-func buildMemberTTLRefresh(nodeID uint64, ttl time.Duration) *pb.Effect {
-	return &pb.Effect{
-		Key: []byte(MembershipKey),
-		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
-			ElementId: nodeIDBytes(nodeID),
-			ExpiresAt: timestamppb.New(time.Now().Add(ttl)),
-		}},
 	}
 }
 
