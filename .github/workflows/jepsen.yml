@@ -264,6 +264,10 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      # One workload at a time. The cluster has ~5 CPU truly free
+      # against pods that want to burst, so serialising avoids us
+      # fighting ourselves for CPU at runtime.
+      max-parallel: 1
       matrix:
         workload: ${{ fromJSON(needs.prepare.outputs.workloads) }}
     env:

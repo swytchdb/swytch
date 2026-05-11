@@ -44,12 +44,12 @@ spec:
           value: "${JEPSEN_TIME_LIMIT}"
         - name: JEPSEN_JOIN_DNS
           value: "${JEPSEN_JOIN_DNS}"
+      # Burstable QoS, same rationale as node-pod.yaml.
       resources:
         requests:
-          cpu: "4"
+          cpu: "500m"
           memory: "8Gi"
         limits:
-          cpu: "4"
           memory: "8Gi"
       volumeMounts:
         - name: workspace
