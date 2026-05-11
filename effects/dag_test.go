@@ -727,8 +727,8 @@ func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 	txAWrite := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(20), NodeId: 2, TxnId: "txn-A",
 		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(20)),
-		Deps: []*pb.EffectRef{toPbRef(root)},
-		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 1)},
 	})
 	bindA := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(25), NodeId: 2, TxnId: "txn-A",
@@ -745,16 +745,16 @@ func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 	afterA := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(26), NodeId: 2,
 		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(26)),
-		Deps: []*pb.EffectRef{toPbRef(bindA)},
-		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 100)},
+		Deps:           []*pb.EffectRef{toPbRef(bindA)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 100)},
 	})
 
 	// Transaction B: write +2, bind, then non-txn +200 after bind
 	txBWrite := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(30), NodeId: 3, TxnId: "txn-B",
 		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(30)),
-		Deps: []*pb.EffectRef{toPbRef(root)},
-		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
+		Deps:           []*pb.EffectRef{toPbRef(root)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 2)},
 	})
 	bindB := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(35), NodeId: 3, TxnId: "txn-B",
@@ -771,8 +771,8 @@ func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 	afterB := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(36), NodeId: 3,
 		ForkChoiceHash: ComputeForkChoiceHash(3, sTs(36)),
-		Deps: []*pb.EffectRef{toPbRef(bindB)},
-		Kind: &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 200)},
+		Deps:           []*pb.EffectRef{toPbRef(bindB)},
+		Kind:           &pb.Effect_Data{Data: scalarInsertInt(pb.MergeRule_ADDITIVE_INT, 200)},
 	})
 
 	e.index.Insert("k", nil, keytrie.NewTipSet(afterA, afterB))

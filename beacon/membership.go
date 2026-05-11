@@ -85,6 +85,22 @@ func buildMemberRemove(nodeID uint64) *pb.Effect {
 	}
 }
 
+// hasDuplicateAdvertiseAddr reports whether the snapshot contains any
+// member other than selfID that advertises ourAddr. Used by the refresh
+// loop to catch stale predecessors that registerSelf couldn't sweep
+// because its own snapshot read failed.
+func hasDuplicateAdvertiseAddr(snapshot *pb.ReducedEffect, selfID uint64, ourAddr string) bool {
+	if ourAddr == "" {
+		return false
+	}
+	for _, m := range parseMembership(snapshot) {
+		if m.NodeID != selfID && m.Addr == ourAddr {
+			return true
+		}
+	}
+	return false
+}
+
 // parseMembership extracts the member list from a reduced snapshot of __swytch:members.
 func parseMembership(reduced *pb.ReducedEffect) []Member {
 	if reduced == nil || reduced.NetAdds == nil {

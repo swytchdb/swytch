@@ -276,6 +276,19 @@ func (b *Beacon) refreshLoop() {
 				}
 				continue
 			}
+			// If a prior registerSelf could not read the snapshot (e.g.
+			// partition or no symmetric peers) it skipped the collision
+			// sweep and a stale predecessor at our address may still be
+			// in the roster. Re-register so the sweep runs against the
+			// now-visible snapshot.
+			if hasDuplicateAdvertiseAddr(snapshot, uint64(b.cfg.NodeID), b.cfg.AdvertiseAddr) {
+				slog.Info("beacon: stale predecessor still at our address, re-registering",
+					"addr", b.cfg.AdvertiseAddr)
+				if err := b.registerSelf(); err != nil {
+					panic("beacon: failed to re-register after duplicate-address detection: " + err.Error())
+				}
+				continue
+			}
 			b.syncMembership(snapshot)
 		}
 	}
