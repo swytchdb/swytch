@@ -20,12 +20,6 @@ name: Jepsen
 on:
   issue_comment:
     types: [created]
-  # TODO(jepsen-branch): remove before merging — only here so we can
-  # validate the full workflow end-to-end without first landing it on
-  # main (issue_comment workflows must live on the default branch).
-  push:
-    branches-ignore:
-      - main
 
 # Workflow-level token is read-only. Jobs that need to comment/react
 # upscope per-job; jobs that handle untrusted PR code (build, run)
