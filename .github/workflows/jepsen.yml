@@ -417,16 +417,23 @@ jobs:
       - name: Copy store/ out
         if: always()
         run: |
-          # `kubectl cp` wraps tar but its wrapper silently truncates
-          # the stream on symlinks (jepsen writes a `current` symlink in
-          # store/) and on certain network hiccups, leaving a partial
-          # tree behind. Pipe tar explicitly via kubectl exec — same
-          # underlying mechanism, no wrapper foot-guns.
-          set -o pipefail
-          kubectl -n "$NAMESPACE" exec -c holder \
-            "${RESOURCE_PREFIX}-controller" -- \
-            tar -C /workspace -cf - store | tar -xf - || \
-            echo "::warning::store/ retrieval failed or partial"
+          # Both `kubectl cp` and `kubectl exec | tar` have failed with
+          # "unexpected EOF" on store trees of any real size — the
+          # underlying SPDY stream truncates. Workaround: build a single
+          # compressed tarball inside the pod first, then fetch that
+          # one regular file via `kubectl cp`. A single-file cp is the
+          # simplest case for kubectl's wrapper and supports --retries.
+          pod="${RESOURCE_PREFIX}-controller"
+          kubectl -n "$NAMESPACE" exec -c holder "$pod" -- \
+            bash -c 'cd /workspace && tar -czf store.tar.gz store && ls -lh store.tar.gz' \
+            || echo "::warning::failed to build store.tar.gz in pod"
+          kubectl -n "$NAMESPACE" cp -c holder --retries=3 \
+            "$pod:/workspace/store.tar.gz" ./store.tar.gz \
+            || echo "::warning::failed to fetch store.tar.gz"
+          if [ -s ./store.tar.gz ]; then
+            tar -xzf store.tar.gz
+            rm store.tar.gz
+          fi
           ls -la store 2>/dev/null || echo "store/ not retrieved"
 
       - name: Parse results.edn
