@@ -54,6 +54,25 @@ spec:
       volumeMounts:
         - name: workspace
           mountPath: /workspace
+    # Sidecar that just sits on the workspace volume so the pod stays
+    # Running after the controller container exits. Without this the
+    # pod-phase flips to Succeeded/Failed and `kubectl cp` (which needs
+    # to exec tar inside a Running container) fails, stranding all
+    # store/ output — results.edn, history.{txt,html}, per-node logs,
+    # plots — none of which appear in `kubectl logs`.
+    - name: holder
+      image: ${JEPSEN_IMAGE}
+      imagePullPolicy: Always
+      command: ["/bin/bash", "-c", "trap 'exit 0' TERM; sleep 86400 & wait"]
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          memory: "128Mi"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
   volumes:
     - name: workspace
       emptyDir: {}

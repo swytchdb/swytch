@@ -388,34 +388,41 @@ jobs:
       - name: Upload inputs to controller workspace
         run: |
           ctrl="${RESOURCE_PREFIX}-controller"
-          kubectl -n "$NAMESPACE" cp ./bin/swytch         "$ctrl:/workspace/swytch"
-          kubectl -n "$NAMESPACE" cp ./secrets/id_ed25519 "$ctrl:/workspace/id_ed25519"
-          kubectl -n "$NAMESPACE" exec "$ctrl" -- touch /workspace/.ready
+          # Use the holder sidecar for all cp operations: it shares the
+          # workspace volume and is guaranteed to stay Running even
+          # after the controller container exits.
+          kubectl -n "$NAMESPACE" cp -c holder ./bin/swytch         "$ctrl:/workspace/swytch"
+          kubectl -n "$NAMESPACE" cp -c holder ./secrets/id_ed25519 "$ctrl:/workspace/id_ed25519"
+          kubectl -n "$NAMESPACE" exec "$ctrl" -c holder -- touch /workspace/.ready
 
       - name: Stream controller logs
         run: |
-          # `kubectl logs -f` exits when the container exits.
-          kubectl -n "$NAMESPACE" logs -f "${RESOURCE_PREFIX}-controller"
+          # `kubectl logs -f` follows the controller container's stdout
+          # and exits when that container terminates (the holder sidecar
+          # keeps running, but we're not watching it).
+          kubectl -n "$NAMESPACE" logs -f \
+            "${RESOURCE_PREFIX}-controller" -c controller
 
       - name: Capture exit status
         id: status
         run: |
           ctrl="${RESOURCE_PREFIX}-controller"
-          phase=$(kubectl -n "$NAMESPACE" get pod "$ctrl" -o jsonpath='{.status.phase}')
+          # Pod phase stays Running because the holder sidecar is alive;
+          # we want the controller container's terminated exit code.
           ec=$(kubectl -n "$NAMESPACE" get pod "$ctrl" \
-                -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}')
-          echo "phase=$phase exit=$ec"
+                -o jsonpath='{.status.containerStatuses[?(@.name=="controller")].state.terminated.exitCode}')
+          echo "controller container exit=$ec"
           echo "exit_code=${ec:-1}" >>"$GITHUB_OUTPUT"
 
       - name: Copy store/ out
         if: always()
         run: |
-          # The controller symlinks /opt/jepsen/store -> /workspace/store
-          # so all run artifacts land in the emptyDir we can `kubectl cp`
-          # out. Do NOT pre-create ./store: when the destination already
-          # exists, `kubectl cp` nests the source as ./store/store/<...>
-          # which slips past the find -maxdepth below.
-          kubectl -n "$NAMESPACE" cp \
+          # Copy via the holder sidecar (the controller container has
+          # already terminated by this point, so `kubectl cp` against it
+          # would fail). Do NOT pre-create ./store: if the destination
+          # already exists, `kubectl cp` nests the source as
+          # ./store/store/<...> and slips past the find -maxdepth below.
+          kubectl -n "$NAMESPACE" cp -c holder \
             "${RESOURCE_PREFIX}-controller:/workspace/store" ./store || true
           ls -la store 2>/dev/null || echo "store/ not retrieved"
 
