@@ -15,7 +15,7 @@ spec:
   containers:
     - name: node
       image: ${JEPSEN_IMAGE}
-      imagePullPolicy: IfNotPresent
+      imagePullPolicy: Always
       command: ["/usr/local/bin/run-sshd"]
       ports:
         - name: ssh

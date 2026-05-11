@@ -14,7 +14,7 @@ spec:
   containers:
     - name: controller
       image: ${JEPSEN_IMAGE}
-      imagePullPolicy: IfNotPresent
+      imagePullPolicy: Always
       # Wait for the workflow to drop the swytch binary and ssh key
       # into /workspace, then run jepsen.
       command:
