@@ -45,6 +45,7 @@ jobs:
       workloads:    ${{ steps.parse.outputs.workloads }}
       time_limit:   ${{ steps.parse.outputs.time_limit }}
       jepsen_ref:   ${{ steps.parse.outputs.jepsen_ref }}
+      image_tag:    ${{ steps.parse.outputs.image_tag }}
       pr_sha:       ${{ steps.pr.outputs.head_sha }}
       pr_number:    ${{ github.event.issue.number }}
       run_id:       ${{ github.run_id }}-${{ github.run_attempt }}
@@ -130,9 +131,18 @@ jobs:
             WORKLOADS_JSON="$DEFAULT_WORKLOADS"
           fi
 
+          # Image tag: matches docker/metadata-action's branch-tag
+          # sanitization (slashes -> dashes), and `main` -> `latest`.
+          if [ "$JEPSEN_REF" = "main" ]; then
+            IMAGE_TAG=latest
+          else
+            IMAGE_TAG="${JEPSEN_REF//\//-}"
+          fi
+
           echo "workloads=$WORKLOADS_JSON" >>"$GITHUB_OUTPUT"
           echo "time_limit=$TIME_LIMIT"   >>"$GITHUB_OUTPUT"
           echo "jepsen_ref=$JEPSEN_REF"   >>"$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG"     >>"$GITHUB_OUTPUT"
 
       - name: Resolve PR head SHA
         id: pr
@@ -239,7 +249,7 @@ jobs:
       RESOURCE_PREFIX: ${{ matrix.workload }}
       RUN_ID: ${{ needs.prepare.outputs.run_id }}
       WORKLOAD: ${{ matrix.workload }}
-      JEPSEN_IMAGE: ghcr.io/swytchdb/swytch-jepsen:${{ needs.prepare.outputs.jepsen_ref == 'main' && 'latest' || needs.prepare.outputs.jepsen_ref }}
+      JEPSEN_IMAGE: ghcr.io/swytchdb/swytch-jepsen:${{ needs.prepare.outputs.image_tag }}
       JEPSEN_REF: ${{ needs.prepare.outputs.jepsen_ref == 'main' && '' || needs.prepare.outputs.jepsen_ref }}
       JEPSEN_TIME_LIMIT: ${{ needs.prepare.outputs.time_limit }}
       JEPSEN_JOIN_DNS: jepsen.swytch.local
