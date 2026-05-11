@@ -20,6 +20,12 @@ name: Jepsen
 on:
   issue_comment:
     types: [created]
+  # TODO(jepsen-branch): remove before merging — only here so we can
+  # validate the full workflow end-to-end without first landing it on
+  # main (issue_comment workflows must live on the default branch).
+  push:
+    branches-ignore:
+      - main
 
 # Workflow-level token is read-only. Jobs that need to comment/react
 # upscope per-job; jobs that handle untrusted PR code (build, run)
@@ -35,7 +41,11 @@ concurrency:
 jobs:
   prepare:
     name: Parse & gate
-    if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/jepsen')
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/jepsen'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,6 +62,7 @@ jobs:
       tracking_comment_id: ${{ steps.track.outputs.comment_id }}
     steps:
       - name: Check maintainer association
+        if: github.event_name == 'issue_comment'
         env:
           ASSOC: ${{ github.event.comment.author_association }}
         run: |
@@ -61,6 +72,7 @@ jobs:
           esac
 
       - name: React to comment
+        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -74,6 +86,7 @@ jobs:
       - name: Parse comment
         id: parse
         env:
+          EVENT: ${{ github.event_name }}
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Defaults
@@ -82,9 +95,13 @@ jobs:
           JEPSEN_REF=main
           SINGLE_WORKLOAD=""
 
-          # Strip the leading "/jepsen" and split into tokens
-          line="$(printf '%s' "$COMMENT_BODY" | head -n1)"
-          rest="${line#/jepsen}"
+          # Push events have no comment body; defaults apply unchanged.
+          if [ "$EVENT" = "issue_comment" ]; then
+            line="$(printf '%s' "$COMMENT_BODY" | head -n1)"
+            rest="${line#/jepsen}"
+          else
+            rest=""
+          fi
           # Tokenize on whitespace (no quoting support — we don't need it)
           read -r -a tokens <<<"$rest"
 
@@ -149,6 +166,10 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            if (context.eventName === 'push') {
+              core.setOutput('head_sha', context.sha);
+              return;
+            }
             const pr = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -158,6 +179,7 @@ jobs:
 
       - name: Post tracking comment
         id: track
+        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         env:
           WORKLOADS:  ${{ steps.parse.outputs.workloads }}
@@ -475,6 +497,7 @@ jobs:
           merge-multiple: true
 
       - name: Update tracking comment
+        if: needs.prepare.outputs.tracking_comment_id != ''
         uses: actions/github-script@v7
         env:
           COMMENT_ID:  ${{ needs.prepare.outputs.tracking_comment_id }}
