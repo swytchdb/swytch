@@ -21,10 +21,8 @@ package beacon
 
 import (
 	"encoding/binary"
-	"time"
 
 	pb "github.com/swytchdb/cache/cluster/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // MembershipKey is the reserved effects key for cluster membership.
@@ -75,18 +73,6 @@ func buildMemberTypeTag() *pb.Effect {
 	}
 }
 
-// buildMemberTTLRefresh creates a MetaEffect to bump the TTL on this node's
-// membership entry. Used as the heartbeat — emitted every HeartbeatInterval.
-func buildMemberTTLRefresh(nodeID uint64, ttl time.Duration) *pb.Effect {
-	return &pb.Effect{
-		Key: []byte(MembershipKey),
-		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
-			ElementId: nodeIDBytes(nodeID),
-			ExpiresAt: timestamppb.New(time.Now().Add(ttl)),
-		}},
-	}
-}
-
 // buildMemberRemove creates a REMOVE_OP DataEffect for graceful departure.
 func buildMemberRemove(nodeID uint64) *pb.Effect {
 	return &pb.Effect{
@@ -97,6 +83,22 @@ func buildMemberRemove(nodeID uint64) *pb.Effect {
 			Id:         nodeIDBytes(nodeID),
 		}},
 	}
+}
+
+// hasDuplicateAdvertiseAddr reports whether the snapshot contains any
+// member other than selfID that advertises ourAddr. Used by the refresh
+// loop to catch stale predecessors that registerSelf couldn't sweep
+// because its own snapshot read failed.
+func hasDuplicateAdvertiseAddr(snapshot *pb.ReducedEffect, selfID uint64, ourAddr string) bool {
+	if ourAddr == "" {
+		return false
+	}
+	for _, m := range parseMembership(snapshot) {
+		if m.NodeID != selfID && m.Addr == ourAddr {
+			return true
+		}
+	}
+	return false
 }
 
 // parseMembership extracts the member list from a reduced snapshot of __swytch:members.

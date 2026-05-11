@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${RESOURCE_PREFIX}-node-${NODE_INDEX}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: swytch-jepsen
+    swytch-jepsen/role: node
+    swytch-jepsen/run-id: "${RUN_ID}"
+    swytch-jepsen/workload: "${WORKLOAD}"
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+  automountServiceAccountToken: false
+  containers:
+    - name: node
+      image: ${JEPSEN_IMAGE}
+      imagePullPolicy: Always
+      command: ["/usr/local/bin/run-sshd"]
+      ports:
+        - name: ssh
+          containerPort: 22
+      # Burstable QoS: low CPU request so the scheduler can place us
+      # on any node with headroom, no CPU limit so we can burn all
+      # idle cores on whichever node we land on. Memory is
+      # non-compressible so request==limit.
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "8Gi"
+        limits:
+          memory: "8Gi"
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN", "NET_RAW"]
+      volumeMounts:
+        - name: ssh-keys
+          mountPath: /etc/jepsen/keys
+          readOnly: true
+      readinessProbe:
+        tcpSocket:
+          port: 22
+        periodSeconds: 2
+  volumes:
+    - name: ssh-keys
+      secret:
+        secretName: ${RESOURCE_PREFIX}-ssh
+        defaultMode: 0400
