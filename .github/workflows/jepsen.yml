@@ -487,11 +487,22 @@ jobs:
             const workloads = JSON.parse(process.env.WORKLOADS);
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
+            // download-artifact preserves the `result/` parent dir each
+            // workload uploaded with, so the JSONs land under
+            // results/result/<workload>.json. Walk recursively to stay
+            // robust against either layout.
             const results = {};
             try {
-              for (const f of fs.readdirSync('results')) {
-                const r = JSON.parse(fs.readFileSync(path.join('results', f), 'utf8'));
-                results[r.workload] = r;
+              const entries = fs.readdirSync('results', { recursive: true, withFileTypes: true });
+              for (const e of entries) {
+                if (!e.isFile() || !e.name.endsWith('.json')) continue;
+                const full = path.join(e.parentPath || e.path, e.name);
+                try {
+                  const r = JSON.parse(fs.readFileSync(full, 'utf8'));
+                  if (r && r.workload) results[r.workload] = r;
+                } catch (err) {
+                  core.warning(`bad result file ${full}: ${err.message}`);
+                }
               }
             } catch (e) {
               core.warning(`could not read results: ${e.message}`);
