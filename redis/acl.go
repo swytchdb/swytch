@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 	"golang.org/x/crypto/bcrypt"
 )
 

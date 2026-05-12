@@ -23,8 +23,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/keytrie"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/keytrie"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

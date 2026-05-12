@@ -26,7 +26,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/swytchdb/cache/effects"
+	"github.com/swytchdb/swytch/effects"
 	"zombiezen.com/go/sqlite"
 )
 

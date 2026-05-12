@@ -26,8 +26,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/swytchdb/cache/cluster"
-	"github.com/swytchdb/cache/effects"
+	"github.com/swytchdb/swytch/cluster"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // bootstrap performs DNS discovery, installs a temporary topology, and

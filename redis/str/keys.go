@@ -23,9 +23,9 @@ import (
 	"bytes"
 	"log/slog"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/zeebo/xxh3"
 )
 

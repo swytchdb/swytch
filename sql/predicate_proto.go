@@ -20,7 +20,7 @@
 package sql
 
 import (
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	"zombiezen.com/go/sqlite"
 )
 

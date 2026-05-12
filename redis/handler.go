@@ -28,26 +28,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swytchdb/cache/cache"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/pubsub"
-	"github.com/swytchdb/cache/redis/scripting"
-	"github.com/swytchdb/cache/redis/shared"
-	"github.com/swytchdb/cache/tracing"
+	"github.com/swytchdb/swytch/cache"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/pubsub"
+	"github.com/swytchdb/swytch/redis/scripting"
+	"github.com/swytchdb/swytch/redis/shared"
+	"github.com/swytchdb/swytch/tracing"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	_ "github.com/swytchdb/cache/redis/bitmap" // Register bitmap module commands via init()
-	_ "github.com/swytchdb/cache/redis/geo"    // Register geo module commands via init()
-	_ "github.com/swytchdb/cache/redis/hash"   // Register hash module commands via init()
-	_ "github.com/swytchdb/cache/redis/hll"    // Register hll module commands via init()
-	_ "github.com/swytchdb/cache/redis/list"   // Register list module commands via init()
-	_ "github.com/swytchdb/cache/redis/set"    // Register set module commands via init()
-	_ "github.com/swytchdb/cache/redis/str"    // Register string/key/expiry module commands via init()
-	_ "github.com/swytchdb/cache/redis/stream" // Register stream module commands via init()
-	_ "github.com/swytchdb/cache/redis/zset"   // Register zset module commands via init()
+	_ "github.com/swytchdb/swytch/redis/bitmap" // Register bitmap module commands via init()
+	_ "github.com/swytchdb/swytch/redis/geo"    // Register geo module commands via init()
+	_ "github.com/swytchdb/swytch/redis/hash"   // Register hash module commands via init()
+	_ "github.com/swytchdb/swytch/redis/hll"    // Register hll module commands via init()
+	_ "github.com/swytchdb/swytch/redis/list"   // Register list module commands via init()
+	_ "github.com/swytchdb/swytch/redis/set"    // Register set module commands via init()
+	_ "github.com/swytchdb/swytch/redis/str"    // Register string/key/expiry module commands via init()
+	_ "github.com/swytchdb/swytch/redis/stream" // Register stream module commands via init()
+	_ "github.com/swytchdb/swytch/redis/zset"   // Register zset module commands via init()
 )
 
 const (

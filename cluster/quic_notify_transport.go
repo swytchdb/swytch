@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/tracing"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 )

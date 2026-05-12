@@ -34,7 +34,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swytchdb/cache/effects"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // redisClient wraps a connection for test convenience

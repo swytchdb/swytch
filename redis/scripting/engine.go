@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 const (

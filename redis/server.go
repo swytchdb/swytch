@@ -34,9 +34,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swytchdb/cache/redis/pubsub"
-	"github.com/swytchdb/cache/redis/shared"
-	"github.com/swytchdb/cache/tracing"
+	"github.com/swytchdb/swytch/redis/pubsub"
+	"github.com/swytchdb/swytch/redis/shared"
+	"github.com/swytchdb/swytch/tracing"
 )
 
 // ServerConfig holds configuration for the Redis server

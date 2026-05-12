@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func TestACLManager_DefaultUser(t *testing.T) {

@@ -19,7 +19,7 @@
 
 package shared
 
-import "github.com/swytchdb/cache/effects"
+import "github.com/swytchdb/swytch/effects"
 
 // CommandType represents the type of Redis command
 type CommandType int

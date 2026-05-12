@@ -20,8 +20,8 @@
 package redis
 
 import (
-	"github.com/swytchdb/cache/metrics"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/metrics"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // MetricsAdapter adapts Redis Stats and Handler to the metrics.StatsProvider interface.

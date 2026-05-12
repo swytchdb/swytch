@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func TestManager_SubscribeUnsubscribe(t *testing.T) {

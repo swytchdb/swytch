@@ -23,7 +23,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // seedZSet adds members a-e with scores 1-5 to "myzset" via ZADD.

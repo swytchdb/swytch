@@ -30,10 +30,10 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	clox "github.com/swytchdb/cache/cache"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/crdt"
-	"github.com/swytchdb/cache/keytrie"
+	clox "github.com/swytchdb/swytch/cache"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/crdt"
+	"github.com/swytchdb/swytch/keytrie"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

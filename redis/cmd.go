@@ -32,11 +32,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/swytchdb/cache/beacon"
-	"github.com/swytchdb/cache/metrics"
-	"github.com/swytchdb/cache/redis/shared"
-	"github.com/swytchdb/cache/telemetry"
-	"github.com/swytchdb/cache/tracing"
+	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/swytch/metrics"
+	"github.com/swytchdb/swytch/redis/shared"
+	"github.com/swytchdb/swytch/telemetry"
+	"github.com/swytchdb/swytch/tracing"
 	"github.com/zeebo/xxh3"
 )
 

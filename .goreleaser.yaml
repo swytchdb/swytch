@@ -87,8 +87,8 @@ dockers_v2:
     labels:
       org.opencontainers.image.title: '{{ .ProjectName }}'
       org.opencontainers.image.description: 'Swytch distributed cache and database'
-      org.opencontainers.image.url: 'https://github.com/swytchdb/cache'
-      org.opencontainers.image.source: 'https://github.com/swytchdb/cache'
+      org.opencontainers.image.url: 'https://github.com/swytchdb/swytch'
+      org.opencontainers.image.source: 'https://github.com/swytchdb/swytch'
       org.opencontainers.image.version: '{{ .Version }}'
       org.opencontainers.image.revision: '{{ .FullCommit }}'
       org.opencontainers.image.licenses: 'AGPL-3.0-or-later'
@@ -120,7 +120,7 @@ brews:
       name: homebrew-tap
       token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
     directory: Formula
-    homepage: 'https://github.com/swytchdb/cache'
+    homepage: 'https://github.com/swytchdb/swytch'
     description: 'Distributed cache and database with Redis, Memcached, and SQL frontends'
     license: 'AGPL-3.0-or-later'
     commit_msg_template: 'Update swytch to {{ .Tag }}'

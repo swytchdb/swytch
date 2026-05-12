@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // Packet type prefixes for the UDP fast-path protocol.

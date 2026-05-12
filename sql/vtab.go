@@ -30,8 +30,8 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"github.com/zeebo/xxh3"
 	"zombiezen.com/go/sqlite"
 )

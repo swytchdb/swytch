@@ -24,7 +24,7 @@ import (
 	"sort"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

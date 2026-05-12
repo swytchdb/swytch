@@ -3,7 +3,7 @@
     Install swytch on Windows.
 
 .DESCRIPTION
-    iwr -useb https://raw.githubusercontent.com/swytchdb/cache/main/scripts/install.ps1 | iex
+    iwr -useb https://raw.githubusercontent.com/swytchdb/swytch/main/scripts/install.ps1 | iex
 
 .PARAMETER Version
     Release tag to install (e.g. v0.1.0). Defaults to latest.
@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo = 'swytchdb/cache'
+$Repo = 'swytchdb/swytch'
 $Bin  = 'swytch'
 
 function Info($msg) { Write-Host "install: $msg" }

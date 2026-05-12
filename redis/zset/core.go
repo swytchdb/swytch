@@ -24,9 +24,9 @@ import (
 	"sort"
 	"strconv"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // getZSetSnapshot returns the snapshot for a zset key.

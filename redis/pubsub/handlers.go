@@ -22,7 +22,7 @@ package pubsub
 import (
 	"strings"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // handleSubscribe handles the SUBSCRIBE command

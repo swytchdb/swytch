@@ -26,10 +26,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/swytchdb/cache/cluster"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/keytrie"
+	"github.com/swytchdb/swytch/cluster"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/keytrie"
 )
 
 // RuntimeConfig describes what a swytch process needs to join a

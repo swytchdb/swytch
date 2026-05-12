@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // ==== String Command Benchmarks ====

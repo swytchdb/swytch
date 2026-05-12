@@ -22,8 +22,8 @@ package zset
 import (
 	"strconv"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {

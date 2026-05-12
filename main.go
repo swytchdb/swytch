@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/swytchdb/cache/cluster"
-	"github.com/swytchdb/cache/redis"
-	"github.com/swytchdb/cache/sql"
+	"github.com/swytchdb/swytch/cluster"
+	"github.com/swytchdb/swytch/redis"
+	"github.com/swytchdb/swytch/sql"
 )
 
 // Version is set at build time via ldflags:

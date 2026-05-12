@@ -20,7 +20,7 @@
 package redis
 
 import (
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // testUser is a default user with all permissions for testing

@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // xgroupCreate is a convenience to create a consumer group via the dispatcher and reset buf.

@@ -25,7 +25,7 @@ import (
 	"sort"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // Manager manages pub/sub subscriptions

@@ -20,7 +20,7 @@
 package redis
 
 import (
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // parseExpireOptions parses NX/XX/GT/LT options for EXPIRE commands

@@ -24,7 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 
-	"github.com/swytchdb/cache/cluster/proto"
+	"github.com/swytchdb/swytch/cluster/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

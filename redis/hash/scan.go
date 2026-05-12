@@ -25,8 +25,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/swytchdb/cache/crdt"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/crdt"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {

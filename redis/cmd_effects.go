@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/swytchdb/cache/beacon"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // EffectsConfig holds effects-specific configuration for the redis

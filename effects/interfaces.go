@@ -23,7 +23,7 @@ import (
 	"context"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // Broadcaster sends effect notifications to cluster peers.

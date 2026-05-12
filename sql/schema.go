@@ -31,8 +31,8 @@ import (
 	"github.com/zeebo/xxh3"
 	"zombiezen.com/go/sqlite"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // columnSchema describes a single column in a swytch-backed table.

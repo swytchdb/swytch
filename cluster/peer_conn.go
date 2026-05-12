@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	"google.golang.org/protobuf/proto"
 )
 

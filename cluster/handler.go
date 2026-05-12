@@ -20,7 +20,7 @@
 package cluster
 
 import (
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // EffectHandler is called when a remote notification or data arrives.

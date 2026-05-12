@@ -32,8 +32,8 @@ import (
 	wire "github.com/jeroenrinzema/psql-wire"
 	"zombiezen.com/go/sqlite"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // maybeInterceptDDL peeks at the query's leading keywords and, if

@@ -25,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/swytchdb/cache/cache"
-	"github.com/swytchdb/cache/effects"
+	"github.com/swytchdb/swytch/cache"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // ProtocolVersion represents the RESP protocol version

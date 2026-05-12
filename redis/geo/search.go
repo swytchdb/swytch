@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // handleGeoSearch handles the GEOSEARCH command

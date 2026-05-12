@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // testEnv holds the test environment with effects engine.

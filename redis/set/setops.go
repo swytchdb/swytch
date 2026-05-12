@@ -20,8 +20,8 @@
 package set
 
 import (
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // getSetMembers extracts the member set from a snapshot as a map.

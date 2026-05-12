@@ -23,7 +23,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 func TestNodeIDBytes_Roundtrip(t *testing.T) {

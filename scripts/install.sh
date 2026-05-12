@@ -1,7 +1,7 @@
 #!/bin/sh
 # install swytch
 #
-#   curl -fsSL https://raw.githubusercontent.com/swytchdb/cache/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/swytchdb/swytch/main/scripts/install.sh | sh
 #
 # environment:
 #   SWYTCH_VERSION   release tag to install (default: latest)
@@ -10,7 +10,7 @@
 
 set -eu
 
-REPO="swytchdb/cache"
+REPO="swytchdb/swytch"
 BIN="swytch"
 
 err() { printf 'install: %s\n' "$*" >&2; exit 1; }

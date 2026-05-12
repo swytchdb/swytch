@@ -20,7 +20,7 @@
 package set
 
 import (
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func init() {

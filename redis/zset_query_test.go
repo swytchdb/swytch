@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // seedQueryZSet seeds ZADD myzset 1 a 2 b 3 c (3 members only, for query tests)

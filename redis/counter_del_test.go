@@ -23,7 +23,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // TestInMemoryHandler_DeleteAfterIncr tests that DEL works correctly on keys
