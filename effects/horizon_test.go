@@ -44,7 +44,7 @@ func newHorizonTestEngine() *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       xsync.NewMap[string, struct{}](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	e.horizon = newHorizonSet(e, 500*time.Millisecond)
