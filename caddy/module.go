@@ -66,9 +66,10 @@ const (
 //
 // No external KV storage required.
 //
-// Point your Caddy instances at the same `join` DNS name (which
-// must resolve to at least one peer's `cluster_advertise` address), and they'll
-// form a cluster. `cluster_passphrase` must match across every node.
+// Point your Caddy instances at the same `join` DNS name and they'll
+// form a cluster. `join` should resolve to reachable peer addresses:
+// SRV records are preferred, otherwise A/AAAA records are used with
+// `cluster_port`. `cluster_passphrase` must match across every node.
 type SwytchStorage struct {
 	// ClusterPassphrase enables cluster mode. Empty = single-node, no
 	// replication. Must match across every peer.
