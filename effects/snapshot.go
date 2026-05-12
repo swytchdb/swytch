@@ -64,10 +64,12 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 		result.TypeTag != pb.ValueType_TYPE_STREAM {
 		return nil
 	}
-	// Metadata-only snapshot (subscription/serialization effects only, no actual data)
-	// should be treated as non-existent from the data perspective.
+	// Empty snapshot — either a metadata-only effect (subscription /
+	// serialization, Op=UNKNOWN_OP) or a SCALAR DEL tombstone produced
+	// by ReduceChain (Op=REMOVE_OP with no data fields, kept around for
+	// causal continuity). Both are non-existent from the data perspective.
 	if result.Scalar == nil && len(result.NetAdds) == 0 && len(result.OrderedElements) == 0 &&
-		result.Op == pb.EffectOp_UNKNOWN_OP {
+		(result.Op == pb.EffectOp_UNKNOWN_OP || result.Op == pb.EffectOp_REMOVE_OP) {
 		return nil
 	}
 	return result
