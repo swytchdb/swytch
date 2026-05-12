@@ -1282,7 +1282,7 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 		}},
 	}
 	subData, _ := proto.Marshal(subEff)
-	notify := buildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
+	notify := BuildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
 
 	nacks, err := e.HandleRemote(notify)
 	if err != nil {
@@ -1329,7 +1329,7 @@ func TestHandleRemote_SubscriptionEffect_EmptyKey_SendsEmptyNack(t *testing.T) {
 		}},
 	}
 	subData, _ := proto.Marshal(subEff)
-	notify := buildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
+	notify := BuildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
 
 	nacks, err := e.HandleRemote(notify)
 	if err != nil {

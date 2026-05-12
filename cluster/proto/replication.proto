@@ -250,6 +250,17 @@ message SubscriptionEffect {
   uint64 subscriber_node_id = 1;
   bool unsubscribe = 2;  // false = subscribe, true = unsubscribe
   bool discovery = 3;    // true = anti-entropy probe, just NACK back with tips, don't store
+  // true = pub/sub ephemeral announce: receiver registers subscriber in
+  // per-peer table, does not store, does not NACK, does not index.
+  bool ephemeral = 4;
+}
+
+// PubSubMessage carries a fire-and-forget Redis PUBLISH payload to peers
+// that have previously announced interest via an ephemeral SubscriptionEffect.
+// Wire-only; never persisted, never indexed, never re-broadcast on receive.
+message PubSubMessage {
+  bytes channel = 1;  // raw channel name (not the __swytch-prefixed routing key)
+  bytes payload = 2;
 }
 
 // SerializationEffect requests or releases per-key serialized coordination.
@@ -281,6 +292,7 @@ message Effect {
     NoopEffect noop = 17;
     ObservationEffect observation = 18;
     RowWriteEffect row_write = 19;
+    PubSubMessage pubsub_message = 20;
   }
 }
 

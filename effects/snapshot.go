@@ -191,7 +191,7 @@ func (e *Engine) ensureSubscribed(key string) error {
 		return nil
 	}
 
-	notify := buildOffsetNotify(e.nodeID, offset, eff, data, nil)
+	notify := BuildOffsetNotify(e.nodeID, offset, eff, data, nil)
 
 	// Register bootstrap collector before broadcasting so NACKs aren't missed
 	collector := &bootstrapCollector{

@@ -541,7 +541,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		c.engine.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
 	}
 
-	notify := buildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
+	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
 }
 
@@ -1237,10 +1237,10 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 	}
 }
 
-// buildOffsetNotify constructs a single-effect notification.
+// BuildOffsetNotify constructs a single-effect notification.
 // EffectData is wire format: [4-byte LE keyLen][key][protoData].
 // traceCtx is optional; when non-nil, OTel trace context is injected into the notification.
-func buildOffsetNotify(nodeID pb.NodeID, offset Tip, eff *pb.Effect, data []byte, traceCtx context.Context) *pb.OffsetNotify {
+func BuildOffsetNotify(nodeID pb.NodeID, offset Tip, eff *pb.Effect, data []byte, traceCtx context.Context) *pb.OffsetNotify {
 	// Wire format: [4-byte LE keyLen][key][protoData]
 	keyBytes := eff.Key
 	wireData := make([]byte, 4+len(keyBytes)+len(data))

@@ -69,6 +69,9 @@ type PeerManager struct {
 	// Forward handler for adaptive serialization (§5)
 	forwardHandler ForwardHandler
 
+	onPeerAdded   func(NodeId)
+	onPeerRemoved func(NodeId)
+
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
 	// sender prefix on the first uni-stream they open). We keep these
@@ -213,9 +216,12 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Connect to all peers
+	// Connect to all peers. registerPeer fires lifecycle hooks that
+	// may re-enter PeerManager via the QUIC connFunc (which RLocks
+	// pm.mu), so it runs outside the critical section.
+	peers := pm.config.Peers()
 	pm.mu.Lock()
-	for _, peer := range pm.config.Peers() {
+	for _, peer := range peers {
 		peerID := peer.ID
 		pc := newPeerConn(peer.ID, peer.Address, peer.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
@@ -225,10 +231,12 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 		})
 		pm.peers[peer.ID] = pc
 		pc.Start(pm.ctx)
-
-		pm.registerPeer(peer)
 	}
 	pm.mu.Unlock()
+
+	for _, peer := range peers {
+		pm.registerPeer(peer)
+	}
 
 	slog.Info("peer manager started", "node_id", pm.config.NodeID, "peers", len(pm.config.Peers()))
 	return nil
@@ -266,6 +274,9 @@ func (pm *PeerManager) registerPeer(peer NodeConfig) {
 	if pm.replicator != nil {
 		pm.replicator.AddPeer(peer.ID, peer.Region)
 	}
+	if pm.onPeerAdded != nil {
+		pm.onPeerAdded(peer.ID)
+	}
 }
 
 // unregisterPeer removes a peer from the heartbeat manager and replicator.
@@ -276,6 +287,18 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 	if pm.replicator != nil {
 		pm.replicator.RemovePeer(peerID)
 	}
+	if pm.onPeerRemoved != nil {
+		pm.onPeerRemoved(peerID)
+	}
+}
+
+// SetPeerLifecycleHooks registers callbacks fired when a peer is
+// added or removed from the live peer set. Either may be nil. The
+// pub/sub router uses these to re-announce subscriptions to new
+// peers and to purge entries when peers leave.
+func (pm *PeerManager) SetPeerLifecycleHooks(onAdded, onRemoved func(NodeId)) {
+	pm.onPeerAdded = onAdded
+	pm.onPeerRemoved = onRemoved
 }
 
 // Stop shuts down all components.
@@ -294,12 +317,27 @@ func (pm *PeerManager) Stop() {
 		pm.quicTransport.Stop()
 	}
 
+	// Detach under the lock; run pc.Stop() (QUIC close) and fire
+	// onPeerRemoved hooks outside it — both can block / re-enter
+	// PeerManager via pm.mu.RLock.
 	pm.mu.Lock()
+	conns := make([]*PeerConn, 0, len(pm.peers))
+	departing := make([]NodeId, 0, len(pm.peers))
 	for id, pc := range pm.peers {
-		pc.Stop()
+		conns = append(conns, pc)
+		departing = append(departing, id)
 		delete(pm.peers, id)
 	}
 	pm.mu.Unlock()
+
+	for _, pc := range conns {
+		pc.Stop()
+	}
+	if pm.onPeerRemoved != nil {
+		for _, id := range departing {
+			pm.onPeerRemoved(id)
+		}
+	}
 
 	if pm.listener != nil {
 		if err := pm.listener.Close(); err != nil {
@@ -314,6 +352,16 @@ func (pm *PeerManager) Stop() {
 // HealthTable returns the peer health table, or nil if UDP/Noise is not configured.
 func (pm *PeerManager) HealthTable() *PeerHealthTable {
 	return pm.healthTable
+}
+
+// SendOneWayTo dispatches a single OffsetNotify to one peer without
+// retransmits or ACK tracking. Used by the pub/sub router for fire-
+// and-forget ephemeral effects.
+func (pm *PeerManager) SendOneWayTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID NodeId) error {
+	if pm.replicator == nil {
+		return fmt.Errorf("replicator not initialized")
+	}
+	return pm.replicator.SendOneWay(notify, wireData, targetNodeID)
 }
 
 func (pm *PeerManager) Broadcast(notify *pb.OffsetNotify) {
@@ -536,57 +584,54 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 
 	diff := DiffTopology(pm.config, newCfg)
 
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	// Disconnect removed peers
-	for _, removed := range diff.Removed {
-		if pc, ok := pm.peers[removed.ID]; ok {
-			slog.Info("disconnecting removed peer", "peer", removed.ID, "address", removed.Address)
-			pc.Stop()
-			delete(pm.peers, removed.ID)
-		}
-		pm.unregisterPeer(removed.ID)
-	}
-
 	selfRegion := ""
 	if self := newCfg.Self(); self != nil {
 		selfRegion = self.Region
 	}
 
-	// Connect new peers
-	for _, added := range diff.Added {
-		slog.Info("connecting to new peer", "peer", added.ID, "address", added.Address, "region", added.Region)
-		peerID := added.ID
-		pc := newPeerConn(added.ID, added.Address, added.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
+	connect := func(n NodeConfig) *PeerConn {
+		peerID := n.ID
+		return newPeerConn(n.ID, n.Address, n.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendHeartbeatTo(peerID)
 			}
 		})
-		pm.peers[added.ID] = pc
-		pc.Start(pm.ctx)
-		pm.registerPeer(added)
 	}
 
-	// Reconnect changed peers (address or region changed)
+	// pm.mu only protects pm.peers and pm.config. Detach departing
+	// PeerConns under the lock; Stop() them (which closes QUIC
+	// connections and can block) after Unlock. register/unregister
+	// also run after Unlock — they fire lifecycle hooks that re-enter
+	// PeerManager via the QUIC connFunc (which RLocks pm.mu).
+	pm.mu.Lock()
+
+	stops := make([]*PeerConn, 0, len(diff.Removed)+len(diff.Changed))
+
+	for _, removed := range diff.Removed {
+		if pc, ok := pm.peers[removed.ID]; ok {
+			slog.Info("disconnecting removed peer", "peer", removed.ID, "address", removed.Address)
+			stops = append(stops, pc)
+			delete(pm.peers, removed.ID)
+		}
+	}
+
+	for _, added := range diff.Added {
+		slog.Info("connecting to new peer", "peer", added.ID, "address", added.Address, "region", added.Region)
+		pc := connect(added)
+		pm.peers[added.ID] = pc
+		pc.Start(pm.ctx)
+	}
+
 	for _, changed := range diff.Changed {
 		if pc, ok := pm.peers[changed.ID]; ok {
 			slog.Info("reconnecting peer with new config", "peer", changed.ID, "old_address", pc.addr, "new_address", changed.Address)
-			pc.Stop()
+			stops = append(stops, pc)
 			delete(pm.peers, changed.ID)
 		}
-		pm.unregisterPeer(changed.ID)
-		peerID := changed.ID
-		pc := newPeerConn(changed.ID, changed.Address, changed.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
-			pm.acceptOutboundStreams(conn)
-			if pm.heartbeat != nil {
-				pm.heartbeat.SendHeartbeatTo(peerID)
-			}
-		})
+		pc := connect(changed)
 		pm.peers[changed.ID] = pc
 		pc.Start(pm.ctx)
-		pm.registerPeer(changed)
 	}
 
 	pm.config = newCfg
@@ -597,6 +642,23 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 			known[n.ID] = struct{}{}
 		}
 		pm.healthTable.PruneUnknownPeers(known)
+	}
+
+	pm.mu.Unlock()
+
+	for _, pc := range stops {
+		pc.Stop()
+	}
+
+	for _, removed := range diff.Removed {
+		pm.unregisterPeer(removed.ID)
+	}
+	for _, added := range diff.Added {
+		pm.registerPeer(added)
+	}
+	for _, changed := range diff.Changed {
+		pm.unregisterPeer(changed.ID)
+		pm.registerPeer(changed)
 	}
 }
 
