@@ -41,7 +41,7 @@ import (
 // in-process. Returns a cleanup that releases the runtime singleton.
 func newTestStore(t *testing.T, lockTTL time.Duration) (*swytchStore, func()) {
 	t.Helper()
-	resetRuntimeForTest()
+	resetRuntimeForTest(t)
 	eng := effects.NewTestEngine()
 	installTestRuntime(eng, defaultKeyPrefix)
 	rt := singletonRuntime()
@@ -60,7 +60,7 @@ func newTestStore(t *testing.T, lockTTL time.Duration) (*swytchStore, func()) {
 			delete(store.heldLocks, k)
 		}
 		store.heldMu.Unlock()
-		resetRuntimeForTest()
+		resetRuntimeForTest(t)
 	}
 }
 
@@ -328,8 +328,8 @@ func TestCaddyfile_InvalidLockTTL(t *testing.T) {
 // beacon.NewRuntime requires either ClusterPassphrase="" (single-node,
 // no listener) — which we use here — or a real port bind.
 func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
-	resetRuntimeForTest()
-	defer resetRuntimeForTest()
+	resetRuntimeForTest(t)
+	defer resetRuntimeForTest(t)
 
 	base := beacon.RuntimeConfig{} // single-node, no listener
 	if err := claimRuntime(base, "__swytch:caddy:"); err != nil {

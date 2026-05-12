@@ -20,18 +20,27 @@
 package caddy
 
 import (
+	"testing"
+
 	"github.com/swytchdb/swytch/beacon"
 	"github.com/swytchdb/swytch/effects"
 )
 
 // resetRuntimeForTest tears the singleton down so a test can reinitialise
-// it with different config.
-func resetRuntimeForTest() {
+// it with different config. A Stop failure is reported via t.Errorf so
+// teardown problems surface as test failures rather than being lost —
+// we don't t.Fatalf because cleanup paths must continue regardless.
+func resetRuntimeForTest(t testing.TB) {
+	t.Helper()
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
-	if currentRuntime != nil {
-		_ = currentRuntime.rt.Stop()
-		currentRuntime = nil
+	if currentRuntime == nil {
+		return
+	}
+	rt := currentRuntime.rt
+	currentRuntime = nil
+	if err := rt.Stop(); err != nil {
+		t.Errorf("resetRuntimeForTest: runtime.Stop: %v", err)
 	}
 }
 
