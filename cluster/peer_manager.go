@@ -216,9 +216,12 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Connect to all peers
+	// Connect to all peers. registerPeer fires lifecycle hooks that
+	// may re-enter PeerManager via the QUIC connFunc (which RLocks
+	// pm.mu), so it runs outside the critical section.
+	peers := pm.config.Peers()
 	pm.mu.Lock()
-	for _, peer := range pm.config.Peers() {
+	for _, peer := range peers {
 		peerID := peer.ID
 		pc := newPeerConn(peer.ID, peer.Address, peer.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
@@ -228,10 +231,12 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 		})
 		pm.peers[peer.ID] = pc
 		pc.Start(pm.ctx)
-
-		pm.registerPeer(peer)
 	}
 	pm.mu.Unlock()
+
+	for _, peer := range peers {
+		pm.registerPeer(peer)
+	}
 
 	slog.Info("peer manager started", "node_id", pm.config.NodeID, "peers", len(pm.config.Peers()))
 	return nil
@@ -574,57 +579,54 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 
 	diff := DiffTopology(pm.config, newCfg)
 
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	// Disconnect removed peers
-	for _, removed := range diff.Removed {
-		if pc, ok := pm.peers[removed.ID]; ok {
-			slog.Info("disconnecting removed peer", "peer", removed.ID, "address", removed.Address)
-			pc.Stop()
-			delete(pm.peers, removed.ID)
-		}
-		pm.unregisterPeer(removed.ID)
-	}
-
 	selfRegion := ""
 	if self := newCfg.Self(); self != nil {
 		selfRegion = self.Region
 	}
 
-	// Connect new peers
-	for _, added := range diff.Added {
-		slog.Info("connecting to new peer", "peer", added.ID, "address", added.Address, "region", added.Region)
-		peerID := added.ID
-		pc := newPeerConn(added.ID, added.Address, added.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
+	connect := func(n NodeConfig) *PeerConn {
+		peerID := n.ID
+		return newPeerConn(n.ID, n.Address, n.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendHeartbeatTo(peerID)
 			}
 		})
-		pm.peers[added.ID] = pc
-		pc.Start(pm.ctx)
-		pm.registerPeer(added)
 	}
 
-	// Reconnect changed peers (address or region changed)
+	// pm.mu only protects pm.peers and pm.config. Detach departing
+	// PeerConns under the lock; Stop() them (which closes QUIC
+	// connections and can block) after Unlock. register/unregister
+	// also run after Unlock — they fire lifecycle hooks that re-enter
+	// PeerManager via the QUIC connFunc (which RLocks pm.mu).
+	pm.mu.Lock()
+
+	stops := make([]*PeerConn, 0, len(diff.Removed)+len(diff.Changed))
+
+	for _, removed := range diff.Removed {
+		if pc, ok := pm.peers[removed.ID]; ok {
+			slog.Info("disconnecting removed peer", "peer", removed.ID, "address", removed.Address)
+			stops = append(stops, pc)
+			delete(pm.peers, removed.ID)
+		}
+	}
+
+	for _, added := range diff.Added {
+		slog.Info("connecting to new peer", "peer", added.ID, "address", added.Address, "region", added.Region)
+		pc := connect(added)
+		pm.peers[added.ID] = pc
+		pc.Start(pm.ctx)
+	}
+
 	for _, changed := range diff.Changed {
 		if pc, ok := pm.peers[changed.ID]; ok {
 			slog.Info("reconnecting peer with new config", "peer", changed.ID, "old_address", pc.addr, "new_address", changed.Address)
-			pc.Stop()
+			stops = append(stops, pc)
 			delete(pm.peers, changed.ID)
 		}
-		pm.unregisterPeer(changed.ID)
-		peerID := changed.ID
-		pc := newPeerConn(changed.ID, changed.Address, changed.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
-			pm.acceptOutboundStreams(conn)
-			if pm.heartbeat != nil {
-				pm.heartbeat.SendHeartbeatTo(peerID)
-			}
-		})
+		pc := connect(changed)
 		pm.peers[changed.ID] = pc
 		pc.Start(pm.ctx)
-		pm.registerPeer(changed)
 	}
 
 	pm.config = newCfg
@@ -635,6 +637,23 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 			known[n.ID] = struct{}{}
 		}
 		pm.healthTable.PruneUnknownPeers(known)
+	}
+
+	pm.mu.Unlock()
+
+	for _, pc := range stops {
+		pc.Stop()
+	}
+
+	for _, removed := range diff.Removed {
+		pm.unregisterPeer(removed.ID)
+	}
+	for _, added := range diff.Added {
+		pm.registerPeer(added)
+	}
+	for _, changed := range diff.Changed {
+		pm.unregisterPeer(changed.ID)
+		pm.registerPeer(changed)
 	}
 }
 

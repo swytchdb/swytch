@@ -488,9 +488,16 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// Ephemeral pub/sub subscription announce — wire-only, never stored.
 	// Receiver records the announcing peer's interest in a per-peer table
 	// owned by the cluster router. No NACK, no index, no log.
+	//
+	// Identity is taken from notify.Origin.NodeId (the engine-wide origin
+	// field) rather than the payload's redundant SubscriberNodeId. Neither
+	// is authenticated against the QUIC peer ID at this boundary — the
+	// engine trusts payload origin everywhere — but using Origin keeps
+	// one source of truth and prevents a malformed payload from claiming
+	// a different subscriber than its own origin.
 	if sub := eff.GetSubscription(); sub != nil && sub.Ephemeral {
 		if e.OnEphemeralSubscribe != nil {
-			e.OnEphemeralSubscribe(sub.SubscriberNodeId, eff.Key, sub.Unsubscribe)
+			e.OnEphemeralSubscribe(notify.Origin.NodeId, eff.Key, sub.Unsubscribe)
 		}
 		return nil, nil
 	}
