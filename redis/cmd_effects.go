@@ -25,6 +25,7 @@ import (
 	"log/slog"
 
 	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/swytch/cluster"
 	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
@@ -147,6 +148,19 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 	// forwarded commands locally.
 	activeRuntime.SetForwardHandler(h)
 
+	// Cross-cluster pub/sub: no-op in standalone (no PeerManager).
+	if pm := activeRuntime.PeerManager; pm != nil && h.pubsubManager != nil {
+		router := cluster.NewPubSubRouter(
+			cluster.NodeId(engine.NodeID()),
+			pm,
+			h.pubsubManager,
+		)
+		engine.OnPubSubMessage = router.HandleInboundMessage
+		engine.OnEphemeralSubscribe = router.HandleEphemeralSubscribe
+		pm.SetPeerLifecycleHooks(router.OnPeerAdded, router.OnPeerRemoved)
+		shared.SetPubSubClusterRouter(router)
+	}
+
 	if cfg.ClusterPassphrase == "" {
 		slog.Debug("no cluster passphrase, running in single-node mode")
 		return nil
@@ -164,6 +178,10 @@ func StopCluster() {
 	if activeRuntime == nil {
 		return
 	}
+	// Drop the cluster pub/sub router before we tear down the runtime
+	// it points at — otherwise any in-flight Publish/Subscribe would
+	// reach a dead PeerManager via stale pointers.
+	shared.SetPubSubClusterRouter(nil)
 	if err := activeRuntime.Stop(); err != nil {
 		slog.Error("cluster runtime shutdown", "error", err)
 	}

@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swytchdb/swytch/keytrie"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
@@ -370,9 +371,9 @@ func TestGlobPattern(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := matchGlob(tt.pattern, tt.str)
+		result := keytrie.MatchGlob(tt.str, tt.pattern)
 		if result != tt.match {
-			t.Errorf("matchGlob(%q, %q) = %v, want %v", tt.pattern, tt.str, result, tt.match)
+			t.Errorf("MatchGlob(%q, %q) = %v, want %v", tt.str, tt.pattern, result, tt.match)
 		}
 	}
 }

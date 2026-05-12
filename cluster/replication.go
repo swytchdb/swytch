@@ -547,6 +547,28 @@ func (r *Replicator) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targe
 	return future.Nacks(), nil
 }
 
+// SendOneWay sends a notify packet to a single peer without registering
+// a tracked request. Used for ephemeral pub/sub effects that are fire-
+// and-forget: no retransmits (which would violate at-most-once), no
+// future to wait on, the ACK that comes back is silently discarded by
+// HandleNotifyACK's missing-entry path.
+func (r *Replicator) SendOneWay(notify *pb.OffsetNotify, wireData []byte, targetPeerID NodeId) error {
+	fullNotify := proto.Clone(notify).(*pb.OffsetNotify)
+	fullNotify.EffectData = wireData
+
+	notifyPkt, err := MarshalNotifyPacket(0, fullNotify)
+	if err != nil {
+		return fmt.Errorf("marshal notify packet: %w", err)
+	}
+
+	if _, err := r.transport.Send(targetPeerID, notifyPkt); err != nil {
+		return fmt.Errorf("send to peer %d: %w", targetPeerID, err)
+	}
+
+	RecordNotificationSent()
+	return nil
+}
+
 // SendNack sends an enriched NACK to a specific peer.
 func (r *Replicator) SendNack(nack *pb.NackNotify, targetPeerID NodeId) {
 	pkt, err := MarshalNackPacket(nack)

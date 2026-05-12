@@ -97,6 +97,16 @@ type Engine struct {
 	OnKeyDeleted   func(key string) // wake all waiters (key removed)
 	OnFlushAll     func()           // wake all waiters across all keys
 
+	// Ephemeral pub/sub callbacks — fired from HandleRemote on
+	// receive of wire-only effects that are never stored or indexed.
+	// OnPubSubMessage delivers an inbound PUBLISH to local subscribers.
+	OnPubSubMessage func(channel, payload []byte)
+	// OnEphemeralSubscribe records / removes a remote peer's interest
+	// in a routing key. unsubscribe=false means register, true means
+	// drop. The routing key is the raw Effect.Key bytes — encoding is
+	// the cluster router's concern, not the engine's.
+	OnEphemeralSubscribe func(subscriberNodeID uint64, routingKey []byte, unsubscribe bool)
+
 	// Horizon wait for bind visibility
 	horizon *HorizonSet
 
@@ -471,6 +481,26 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 			}
 			nack := e.buildEnrichedNack(key, notify.Origin, tipOffsets)
 			e.broadcaster.SendNack(nack, pb.NodeID(notify.Origin.NodeId))
+		}
+		return nil, nil
+	}
+
+	// Ephemeral pub/sub subscription announce — wire-only, never stored.
+	// Receiver records the announcing peer's interest in a per-peer table
+	// owned by the cluster router. No NACK, no index, no log.
+	if sub := eff.GetSubscription(); sub != nil && sub.Ephemeral {
+		if e.OnEphemeralSubscribe != nil {
+			e.OnEphemeralSubscribe(sub.SubscriberNodeId, eff.Key, sub.Unsubscribe)
+		}
+		return nil, nil
+	}
+
+	// Ephemeral pub/sub message — wire-only PUBLISH payload, delivered
+	// directly to local subscribers. Never stored, never indexed, never
+	// re-broadcast.
+	if msg := eff.GetPubsubMessage(); msg != nil {
+		if e.OnPubSubMessage != nil {
+			e.OnPubSubMessage(msg.Channel, msg.Payload)
 		}
 		return nil, nil
 	}
@@ -1178,7 +1208,7 @@ func (e *Engine) probeAndFetchKey(key string) {
 		return
 	}
 
-	notify := buildOffsetNotify(e.nodeID, Tip{0, uint64(hlc.Seconds)}, eff, data, nil)
+	notify := BuildOffsetNotify(e.nodeID, Tip{0, uint64(hlc.Seconds)}, eff, data, nil)
 
 	collector := &bootstrapCollector{
 		nacks: make(chan *pb.NackNotify, 64),

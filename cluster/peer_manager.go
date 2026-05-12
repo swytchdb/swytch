@@ -69,6 +69,9 @@ type PeerManager struct {
 	// Forward handler for adaptive serialization (§5)
 	forwardHandler ForwardHandler
 
+	onPeerAdded   func(NodeId)
+	onPeerRemoved func(NodeId)
+
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
 	// sender prefix on the first uni-stream they open). We keep these
@@ -266,6 +269,9 @@ func (pm *PeerManager) registerPeer(peer NodeConfig) {
 	if pm.replicator != nil {
 		pm.replicator.AddPeer(peer.ID, peer.Region)
 	}
+	if pm.onPeerAdded != nil {
+		pm.onPeerAdded(peer.ID)
+	}
 }
 
 // unregisterPeer removes a peer from the heartbeat manager and replicator.
@@ -276,6 +282,18 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 	if pm.replicator != nil {
 		pm.replicator.RemovePeer(peerID)
 	}
+	if pm.onPeerRemoved != nil {
+		pm.onPeerRemoved(peerID)
+	}
+}
+
+// SetPeerLifecycleHooks registers callbacks fired when a peer is
+// added or removed from the live peer set. Either may be nil. The
+// pub/sub router uses these to re-announce subscriptions to new
+// peers and to purge entries when peers leave.
+func (pm *PeerManager) SetPeerLifecycleHooks(onAdded, onRemoved func(NodeId)) {
+	pm.onPeerAdded = onAdded
+	pm.onPeerRemoved = onRemoved
 }
 
 // Stop shuts down all components.
@@ -294,12 +312,22 @@ func (pm *PeerManager) Stop() {
 		pm.quicTransport.Stop()
 	}
 
+	// Fire onPeerRemoved outside the lock — the hook reaches into the
+	// pub/sub router which takes its own locks.
 	pm.mu.Lock()
+	departing := make([]NodeId, 0, len(pm.peers))
 	for id, pc := range pm.peers {
 		pc.Stop()
+		departing = append(departing, id)
 		delete(pm.peers, id)
 	}
 	pm.mu.Unlock()
+
+	if pm.onPeerRemoved != nil {
+		for _, id := range departing {
+			pm.onPeerRemoved(id)
+		}
+	}
 
 	if pm.listener != nil {
 		if err := pm.listener.Close(); err != nil {
@@ -314,6 +342,16 @@ func (pm *PeerManager) Stop() {
 // HealthTable returns the peer health table, or nil if UDP/Noise is not configured.
 func (pm *PeerManager) HealthTable() *PeerHealthTable {
 	return pm.healthTable
+}
+
+// SendOneWayTo dispatches a single OffsetNotify to one peer without
+// retransmits or ACK tracking. Used by the pub/sub router for fire-
+// and-forget ephemeral effects.
+func (pm *PeerManager) SendOneWayTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID NodeId) error {
+	if pm.replicator == nil {
+		return fmt.Errorf("replicator not initialized")
+	}
+	return pm.replicator.SendOneWay(notify, wireData, targetNodeID)
 }
 
 func (pm *PeerManager) Broadcast(notify *pb.OffsetNotify) {

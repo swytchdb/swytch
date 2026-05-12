@@ -105,6 +105,8 @@ type Handler struct {
 
 	// engine is the effects engine for migrated modules (nil if not configured)
 	engine *effects.Engine
+
+	pubsubManager *pubsub.Manager
 }
 
 // NewHandler creates a new Redis command handler
@@ -159,7 +161,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 
 	// Set up the pub/sub broker via shared accessor
-	shared.SetPubSubBroker(pubsub.NewManager())
+	h.pubsubManager = pubsub.NewManager()
+	shared.SetPubSubBroker(h.pubsubManager)
 
 	// Now set the executor that closes over h
 	h.scriptEngine.SetExecutor(h.ExecuteInto)
