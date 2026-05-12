@@ -59,17 +59,23 @@ const (
 	defaultLockTTL     = 30 * time.Second
 )
 
-// SwytchStorage is the Caddy storage module. Each Caddy reload produces a
-// fresh instance of this struct from the parsed config; Provision is the
-// only entry point allowed to start goroutines or bind ports. A
-// process-wide singleton engine is reference-counted so that reloads
-// don't churn the cluster connection.
+// SwytchStorage is a pool of Caddy instances configured with this module that becomes a Swytch
+// cluster: TLS certificates, ACME account state, and OCSP staples replicate
+// peer-to-peer, and ACME issuance locks are coordinated through Swytch's
+// serializable transactional path.
+//
+// No external KV storage required.
+//
+// Point your Caddy instances at the same `join` DNS name and they'll
+// form a cluster. `join` should resolve to reachable peer addresses:
+// SRV records are preferred, otherwise A/AAAA records are used with
+// `cluster_port`. `cluster_passphrase` must match across every node.
 type SwytchStorage struct {
 	// ClusterPassphrase enables cluster mode. Empty = single-node, no
 	// replication. Must match across every peer.
 	ClusterPassphrase string `json:"cluster_passphrase,omitempty"`
 
-	// Join is the DNS name resolved by the beacon to discover peers.
+	// Join is the DNS name to discover peers.
 	// Empty is fine for single-node deployments.
 	Join string `json:"join,omitempty"`
 
