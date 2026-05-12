@@ -85,6 +85,12 @@ func (s *swytchStore) Lock(ctx context.Context, name string) error {
 // attemptAcquire runs a single non-blocking acquire attempt. Returns
 // (true, nil) on success (refresh goroutine started); (false, nil) if
 // the lock is held or the tx aborted; or an engine error.
+//
+// The caller's ctx is passed to startRefresh so that a cancellation
+// stops the auto-refresh loop without requiring Unlock — otherwise a
+// caller that gets ctx-cancelled without calling Unlock would keep
+// extending the lease forever, blocking TTL-based steal recovery and
+// leaking a goroutine across Caddy reloads.
 func (s *swytchStore) attemptAcquire(ctx context.Context, lockKey string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -115,7 +121,7 @@ func (s *swytchStore) attemptAcquire(ctx context.Context, lockKey string) (bool,
 		}
 		return false, err
 	}
-	s.startRefresh(lockKey)
+	s.startRefresh(ctx, lockKey)
 	return true, nil
 }
 
@@ -227,8 +233,12 @@ func (s *swytchStore) Unlock(_ context.Context, name string) error {
 
 // startRefresh launches a goroutine that re-emits the ExpiresAt meta at
 // lockTTL/3 cadence so a long-running ACME issuance doesn't lose the
-// lock to a steal.
-func (s *swytchStore) startRefresh(lockKey string) {
+// lock to a steal. The goroutine exits on any of:
+//   - explicit Unlock (stopRefresh closes the stop chan)
+//   - the caller's Lock ctx being cancelled (the work was abandoned;
+//     let TTL take over so other peers can recover)
+//   - the lock being lost mid-refresh (owner mismatch or snapshot gone)
+func (s *swytchStore) startRefresh(lockCtx context.Context, lockKey string) {
 	stop := make(chan struct{})
 	s.heldMu.Lock()
 	if s.heldLocks == nil {
@@ -243,7 +253,7 @@ func (s *swytchStore) startRefresh(lockKey string) {
 	s.heldLocks[lockKey] = stop
 	s.heldMu.Unlock()
 
-	go s.refreshLoop(lockKey, stop)
+	go s.refreshLoop(lockCtx, lockKey, stop)
 }
 
 // stopRefresh signals the refresh goroutine to exit and removes the
@@ -260,7 +270,7 @@ func (s *swytchStore) stopRefresh(lockKey string) {
 	}
 }
 
-func (s *swytchStore) refreshLoop(lockKey string, stop <-chan struct{}) {
+func (s *swytchStore) refreshLoop(lockCtx context.Context, lockKey string, stop <-chan struct{}) {
 	interval := max(s.lockTTL/3, 100*time.Millisecond)
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -268,8 +278,17 @@ func (s *swytchStore) refreshLoop(lockKey string, stop <-chan struct{}) {
 		select {
 		case <-stop:
 			return
+		case <-lockCtx.Done():
+			slog.Debug("swytch caddy lock: refresh stopped on ctx cancel", "key", lockKey)
+			s.heldMu.Lock()
+			delete(s.heldLocks, lockKey)
+			s.heldMu.Unlock()
+			return
 		case <-t.C:
 			if !s.refreshOnce(lockKey) {
+				s.heldMu.Lock()
+				delete(s.heldLocks, lockKey)
+				s.heldMu.Unlock()
 				return
 			}
 		}
@@ -306,7 +325,15 @@ func (s *swytchStore) renewLease(lockKey string, ttl time.Duration) error {
 		cctx.Abort()
 		return err
 	}
-	if err := cctx.Flush(); err != nil && !errors.Is(err, effects.ErrTxnAborted) {
+	if err := cctx.Flush(); err != nil {
+		// ErrTxnAborted means a concurrent write to the watched key
+		// raced our commit — same semantics as the CheckWatches=false
+		// branch above. Only the lock owner should write while we hold
+		// the lock, so any concurrent write IS a steal: surface it as
+		// lock loss rather than silently reporting a successful renew.
+		if errors.Is(err, effects.ErrTxnAborted) {
+			return errLockLost
+		}
 		return err
 	}
 	return nil

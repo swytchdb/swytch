@@ -256,6 +256,57 @@ func TestRenewLockLease(t *testing.T) {
 	}
 }
 
+// TestLock_RefreshStopsOnCtxCancel verifies that cancelling the caller's
+// Lock context shuts down the refresh goroutine even without an Unlock
+// call. Without this, a Caddy reload that abandons a held lock would
+// leak the refresh goroutine and keep extending ExpiresAt forever.
+func TestLock_RefreshStopsOnCtxCancel(t *testing.T) {
+	ttl := 300 * time.Millisecond
+	store, cleanup := newTestStore(t, ttl)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := store.Lock(ctx, "abandoned"); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	// Cancel the context — refresh goroutine should exit and stop
+	// extending ExpiresAt.
+	cancel()
+
+	// Give the refresh loop a tick to observe the cancel.
+	time.Sleep(50 * time.Millisecond)
+
+	// heldLocks should no longer track this key.
+	store.heldMu.Lock()
+	_, stillTracked := store.heldLocks[store.lockKey("abandoned")]
+	store.heldMu.Unlock()
+	if stillTracked {
+		t.Errorf("heldLocks still tracks lock after ctx cancel")
+	}
+
+	// Another acquirer must succeed within ttl + slack — refresh is dead.
+	start := time.Now()
+	acquired := make(chan error, 1)
+	go func() {
+		acquired <- store.Lock(context.Background(), "abandoned")
+	}()
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("re-Lock: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*ttl {
+			t.Errorf("re-Lock took %s; refresh may still be running", elapsed)
+		}
+	case <-time.After(ttl + 2*time.Second):
+		t.Fatalf("re-Lock did not acquire — refresh goroutine still extending lease")
+	}
+	if err := store.Unlock(context.Background(), "abandoned"); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+}
+
 func TestLock_SingleNode_TTLSteal(t *testing.T) {
 	// Short TTL so the test runs quickly.
 	ttl := 300 * time.Millisecond
@@ -427,6 +478,12 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 	wrong := beacon.RuntimeConfig{ClusterPassphrase: "x"}
 	if err := claimRuntime(wrong, "__swytch:caddy:"); err == nil {
 		t.Fatalf("expected error for incompatible passphrase")
+	}
+
+	// Conflicting advertise on reclaim must error too — the QUIC listener
+	// is already bound and the TLS cert SAN baked in.
+	if err := claimRuntime(beacon.RuntimeConfig{AdvertiseAddr: "10.0.0.1:7380"}, "__swytch:caddy:"); err == nil {
+		t.Fatalf("expected error for incompatible advertise")
 	}
 
 	// Release back to zero — runtime stops.

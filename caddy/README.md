@@ -80,9 +80,10 @@ JSON-encoded equivalents of the Caddyfile keywords:
 ## Lifecycle notes
 
 - The embedded engine is a process-wide singleton. Caddy reloads reuse it;
-  changing `cluster_passphrase`, `join`, `cluster_port`, or `key_prefix`
-  at reload time is rejected — restart the process instead.
-- `lock_ttl` and `cluster_advertise` can change across reloads (the engine
-  doesn't care).
+  changing `cluster_passphrase`, `join`, `cluster_port`, `cluster_advertise`,
+  or `key_prefix` at reload time is rejected — these are all baked into
+  the QUIC listener, TLS cert SAN, or peer-discovery state at startup and
+  there is no live-update path. Restart the process instead.
+- `lock_ttl` is per-storage and DOES take effect on the next reload.
 - Single-node mode (`cluster_passphrase` empty) is supported and useful
   for local development. No QUIC port is bound, no peer discovery runs.

@@ -253,24 +253,28 @@ func singletonRuntime() *sharedRuntime {
 }
 
 // claimRuntime starts the runtime if it isn't running, otherwise checks
-// that the requested config is compatible and bumps the refcount. The
-// cluster-defining fields (passphrase / join / port) and the key_prefix
-// can't change mid-process — the QUIC listener is bound once, and
-// changing the prefix mid-process would orphan every cert written under
-// the previous prefix.
+// that the requested config is compatible and bumps the refcount.
+//
+// Everything beacon-level is bound at NewRuntime time and has no live
+// update path: the QUIC listener takes the port and advertise address,
+// the TLS cert SAN bakes in the advertise address, and the cluster
+// passphrase / join name configure peer discovery once. So any change
+// to those fields across a Caddy reload is rejected — the operator
+// must restart the process. The `lock_ttl` field is per-storage (lives
+// on swytchStore, not on the shared runtime) and DOES take effect on
+// the next reload.
 func claimRuntime(cfg beacon.RuntimeConfig, keyPrefix string) error {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
 
 	if currentRuntime != nil {
-		// Everything else (advertise, logger, lock_ttl) may be tweaked
-		// without restarting the engine.
 		prev := currentRuntime.cfg
 		if prev.ClusterPassphrase != cfg.ClusterPassphrase ||
 			prev.JoinAddr != cfg.JoinAddr ||
-			prev.ClusterPort != cfg.ClusterPort {
+			prev.ClusterPort != cfg.ClusterPort ||
+			prev.AdvertiseAddr != cfg.AdvertiseAddr {
 			return fmt.Errorf("cluster configuration cannot change without restarting the process " +
-				"(passphrase/join/port differ from running instance)")
+				"(passphrase/join/port/advertise differ from running instance)")
 		}
 		if currentRuntime.keyPrefix != keyPrefix {
 			return fmt.Errorf("key_prefix cannot change without restarting the process "+
