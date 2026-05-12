@@ -192,6 +192,70 @@ func TestLock_SingleNode_AcquireRelease(t *testing.T) {
 	}
 }
 
+func TestTryLock(t *testing.T) {
+	store, cleanup := newTestStore(t, 30*time.Second)
+	defer cleanup()
+	ctx := context.Background()
+
+	got, err := store.TryLock(ctx, "free")
+	if err != nil {
+		t.Fatalf("TryLock free: %v", err)
+	}
+	if !got {
+		t.Fatalf("TryLock on a free lock: got false, want true")
+	}
+
+	got, err = store.TryLock(ctx, "free")
+	if err != nil {
+		t.Fatalf("TryLock held: %v", err)
+	}
+	if got {
+		t.Fatalf("TryLock on a held lock: got true, want false")
+	}
+
+	if err := store.Unlock(ctx, "free"); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+}
+
+func TestRenewLockLease(t *testing.T) {
+	// Short base TTL so we can observe an extension.
+	store, cleanup := newTestStore(t, 500*time.Millisecond)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := store.Lock(ctx, "long-issue"); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	// Extend by 2s — far past the base TTL.
+	if err := store.RenewLockLease(ctx, "long-issue", 2*time.Second); err != nil {
+		t.Fatalf("RenewLockLease: %v", err)
+	}
+
+	// Read the lock back and confirm ExpiresAt is at least 1.5s out.
+	snap, _, err := store.engine().NewContext().GetSnapshot(store.lockKey("long-issue"))
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	if snap == nil || snap.ExpiresAt == nil {
+		t.Fatalf("expected held lock with ExpiresAt")
+	}
+	if remaining := time.Until(snap.ExpiresAt.AsTime()); remaining < 1500*time.Millisecond {
+		t.Errorf("RenewLockLease didn't extend: remaining=%s, want >= 1.5s", remaining)
+	}
+
+	if err := store.Unlock(ctx, "long-issue"); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	// After Unlock, renewing should report lock lost.
+	err = store.RenewLockLease(ctx, "long-issue", time.Second)
+	if !errors.Is(err, errLockLost) {
+		t.Errorf("RenewLockLease on released lock: got %v, want errLockLost", err)
+	}
+}
+
 func TestLock_SingleNode_TTLSteal(t *testing.T) {
 	// Short TTL so the test runs quickly.
 	ttl := 300 * time.Millisecond

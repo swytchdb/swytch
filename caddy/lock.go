@@ -36,7 +36,8 @@ import (
 // stored in the lock value. NodeID is regenerated on each process start
 // (see cluster/proto.NewNodeID) so it uniquely identifies the live
 // engine for the lifetime of the process. Little-endian matches the
-// rest of the repo's NodeID encoders.
+// rest of the repo's NodeID encoders. Computed once at swytchStore
+// construction and cached on the struct.
 func ownerToken(engine *effects.Engine) [8]byte {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], uint64(engine.NodeID()))
@@ -51,65 +52,50 @@ func snapIsHeld(snap *pb.ReducedEffect) bool {
 	return snap != nil && snap.Scalar != nil
 }
 
-// Lock blocks until the named lock can be acquired. The acquire/wait
-// loop:
-//
-//  1. Subscribe to wake events on lockKey BEFORE reading state — closes
-//     the lost-wake window between read and select.
-//  2. Plain read (no tx open): SSI would abort us at commit if any
-//     concurrent write touched a watched key, and the write we're
-//     waiting for is precisely that kind of write.
-//  3. Held → wait for (release | TTL expiry | ctx cancel) then retry.
-//  4. Free → open a tx, Watch + BeginTx + CheckWatches, re-check inside
-//     the SSI snapshot to close the read/tx-open race, emit the acquire
-//     pair, Flush. ErrTxnAborted → retry.
+// errLockLost signals that a held lock is no longer ours (TTL stolen,
+// owned by another process, or a concurrent write rejected our refresh).
+// Returned by renewLease; surfaced through RenewLockLease to certmagic
+// and used by refreshOnce to stop the auto-refresh goroutine.
+var errLockLost = errors.New("swytch caddy lock: lock lost")
+
+// Lock blocks until the named lock can be acquired. Read the snap
+// first; only register a wake subscription if the lock is currently
+// held (the subscription closes the lost-wake window between read and
+// select). The acquire branch relies on SSI/CheckWatches to catch any
+// race rather than on the subscription.
 func (s *swytchStore) Lock(ctx context.Context, name string) error {
 	lockKey := s.lockKey(name)
-	owner := ownerToken(s.engine())
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		acquired, err := s.tryAcquire(ctx, lockKey, owner)
+		acquired, err := s.attemptAcquire(ctx, lockKey)
 		if err != nil {
 			return err
 		}
 		if acquired {
 			return nil
 		}
+		if err := s.waitHeld(ctx, lockKey); err != nil {
+			return err
+		}
 	}
 }
 
-// tryAcquire runs one iteration of the Lock loop. Returns (true, nil)
-// once the lock is held and a refresh goroutine is running. (false, nil)
-// means "keep retrying"; an error short-circuits the caller.
-//
-// Wrapping a loop iteration in its own function lets us defer the
-// unsubscribe and stop worrying about which early-return path forgot
-// to clean up.
-func (s *swytchStore) tryAcquire(ctx context.Context, lockKey string, owner [8]byte) (bool, error) {
-	ch := s.waiters.subscribe(lockKey)
-	defer s.waiters.unsubscribe(lockKey, ch)
-
-	// Context.GetSnapshot applies filterSnapshot, which nullifies
-	// expired locks — an expired lock looks free without any sweep
-	// job. Raw Engine.GetSnapshot would return the unfiltered tip.
-	snap, _, err := s.engine().NewContext().GetSnapshot(lockKey)
-	if err != nil {
+// attemptAcquire runs a single non-blocking acquire attempt. Returns
+// (true, nil) on success (refresh goroutine started); (false, nil) if
+// the lock is held or the tx aborted; or an engine error.
+func (s *swytchStore) attemptAcquire(ctx context.Context, lockKey string) (bool, error) {
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if snapIsHeld(snap) {
-		return false, s.waitForChange(ctx, lockKey, snap, ch)
-	}
-
-	// Believed free — attempt transactional acquire.
 	cctx := s.engine().NewContext()
 	cctx.Watch(lockKey)
 	cctx.BeginTx()
 	if !cctx.CheckWatches() {
 		return false, nil
 	}
-	snap, _, err = cctx.GetSnapshot(lockKey)
+	snap, _, err := cctx.GetSnapshot(lockKey)
 	if err != nil {
 		cctx.Abort()
 		return false, err
@@ -119,7 +105,7 @@ func (s *swytchStore) tryAcquire(ctx context.Context, lockKey string, owner [8]b
 		return false, nil
 	}
 	expiresAt := timestamppb.New(time.Now().Add(s.lockTTL))
-	if err := emitLockAcquire(cctx, lockKey, owner, expiresAt); err != nil {
+	if err := emitLockAcquire(cctx, lockKey, s.owner, expiresAt); err != nil {
 		cctx.Abort()
 		return false, err
 	}
@@ -129,14 +115,31 @@ func (s *swytchStore) tryAcquire(ctx context.Context, lockKey string, owner [8]b
 		}
 		return false, err
 	}
-	s.startRefresh(lockKey, owner)
+	s.startRefresh(lockKey)
 	return true, nil
 }
 
-// waitForChange blocks until the lock is released, its TTL elapses, or
-// the caller's context is cancelled. Returns ctx.Err() on cancellation,
-// nil otherwise (caller retries).
-func (s *swytchStore) waitForChange(ctx context.Context, lockKey string, snap *pb.ReducedEffect, ch <-chan struct{}) error {
+// waitHeld subscribes to wake events on a held lock, reads the
+// snapshot to learn the lock's TTL, then waits for either a release
+// (subscription closed) or the TTL deadline. Subscribing BEFORE the
+// snapshot read closes the lost-wake window: any release between the
+// read and the select fires the channel.
+//
+// Returns ctx.Err() on cancel; nil otherwise (caller retries). If the
+// snapshot turns out to no longer be held by the time we read it, we
+// return nil immediately so the caller tries the acquire path.
+func (s *swytchStore) waitHeld(ctx context.Context, lockKey string) error {
+	ch := s.waiters.subscribe(lockKey)
+	defer s.waiters.unsubscribe(lockKey, ch)
+
+	snap, _, err := s.engine().NewContext().GetSnapshot(lockKey)
+	if err != nil {
+		return err
+	}
+	if !snapIsHeld(snap) {
+		// Released between attemptAcquire and now — retry immediately.
+		return nil
+	}
 	// A held lock always carries an ExpiresAt (acquire emits one).
 	// Missing ExpiresAt indicates upstream corruption — log and fall
 	// back to a short retry so we don't loop hot.
@@ -163,11 +166,31 @@ func (s *swytchStore) waitForChange(ctx context.Context, lockKey string, snap *p
 	}
 }
 
+// TryLock implements certmagic.TryLocker — a single non-blocking
+// acquire. certmagic uses this to skip optional maintenance when the
+// lock is contended, instead of serialising on the blocking Lock.
+func (s *swytchStore) TryLock(ctx context.Context, name string) (bool, error) {
+	return s.attemptAcquire(ctx, s.lockKey(name))
+}
+
+// RenewLockLease implements certmagic.LockLeaseRenewer. certmagic calls
+// this between ACME retries to extend a held lock past the next
+// expected wait, so the refresh-goroutine cadence (lockTTL/3) doesn't
+// have to be the upper bound on a single retry window.
+//
+// Returns nil on success, errLockLost if the lock is no longer ours
+// (TTL stolen, owner mismatch, or a concurrent write preempted us).
+func (s *swytchStore) RenewLockLease(ctx context.Context, name string, leaseDuration time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.renewLease(s.lockKey(name), leaseDuration)
+}
+
 // Unlock releases the named lock if (and only if) this process still
 // owns it. Stale ownership (TTL stole the lock) is a silent no-op.
 func (s *swytchStore) Unlock(_ context.Context, name string) error {
 	lockKey := s.lockKey(name)
-	owner := ownerToken(s.engine())
 
 	// Stop the refresh goroutine first so it can't race against our
 	// REMOVE with a fresh ExpiresAt emit.
@@ -188,7 +211,7 @@ func (s *swytchStore) Unlock(_ context.Context, name string) error {
 		cctx.Abort()
 		return err
 	}
-	if !snapIsHeld(snap) || !ownerMatches(snap, owner) {
+	if !snapIsHeld(snap) || !ownerMatches(snap, s.owner) {
 		cctx.Abort()
 		return nil
 	}
@@ -205,7 +228,7 @@ func (s *swytchStore) Unlock(_ context.Context, name string) error {
 // startRefresh launches a goroutine that re-emits the ExpiresAt meta at
 // lockTTL/3 cadence so a long-running ACME issuance doesn't lose the
 // lock to a steal.
-func (s *swytchStore) startRefresh(lockKey string, owner [8]byte) {
+func (s *swytchStore) startRefresh(lockKey string) {
 	stop := make(chan struct{})
 	s.heldMu.Lock()
 	if s.heldLocks == nil {
@@ -220,7 +243,7 @@ func (s *swytchStore) startRefresh(lockKey string, owner [8]byte) {
 	s.heldLocks[lockKey] = stop
 	s.heldMu.Unlock()
 
-	go s.refreshLoop(lockKey, owner, stop)
+	go s.refreshLoop(lockKey, stop)
 }
 
 // stopRefresh signals the refresh goroutine to exit and removes the
@@ -237,7 +260,7 @@ func (s *swytchStore) stopRefresh(lockKey string) {
 	}
 }
 
-func (s *swytchStore) refreshLoop(lockKey string, owner [8]byte, stop <-chan struct{}) {
+func (s *swytchStore) refreshLoop(lockKey string, stop <-chan struct{}) {
 	interval := max(s.lockTTL/3, 100*time.Millisecond)
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -246,45 +269,59 @@ func (s *swytchStore) refreshLoop(lockKey string, owner [8]byte, stop <-chan str
 		case <-stop:
 			return
 		case <-t.C:
-			if !s.refreshOnce(lockKey, owner) {
+			if !s.refreshOnce(lockKey) {
 				return
 			}
 		}
 	}
 }
 
-// refreshOnce extends ExpiresAt by lockTTL. Returns false when the lock
-// has been lost (owner mismatch or snapshot gone) — caller stops refreshing.
-func (s *swytchStore) refreshOnce(lockKey string, owner [8]byte) bool {
+// renewLease emits a new ExpiresAt for the held lock, extending the
+// lease by ttl. Returns errLockLost when ownership is gone (snapshot
+// missing/foreign, or a concurrent write preempted our watch — only
+// the owner should write while we hold the lock, so any concurrent
+// write IS a steal). Other errors come from the engine.
+func (s *swytchStore) renewLease(lockKey string, ttl time.Duration) error {
 	cctx := s.engine().NewContext()
 	cctx.Watch(lockKey)
 	cctx.BeginTx()
 	if !cctx.CheckWatches() {
 		cctx.Abort()
-		return true // a write happened — retry on next tick
+		return errLockLost
 	}
 	snap, _, err := cctx.GetSnapshot(lockKey)
 	if err != nil {
 		cctx.Abort()
-		slog.Debug("swytch caddy lock: refresh read failed", "key", lockKey, "error", err)
-		return true
+		return err
 	}
-	if !snapIsHeld(snap) || !ownerMatches(snap, owner) {
+	if !snapIsHeld(snap) || !ownerMatches(snap, s.owner) {
 		cctx.Abort()
-		slog.Warn("swytch caddy lock: lock lost during refresh", "key", lockKey)
-		return false
+		return errLockLost
 	}
-	expiresAt := timestamppb.New(time.Now().Add(s.lockTTL))
+	expiresAt := timestamppb.New(time.Now().Add(ttl))
 	if err := cctx.Emit(&pb.Effect{
 		Key:  []byte(lockKey),
 		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{ExpiresAt: expiresAt}},
 	}); err != nil {
 		cctx.Abort()
-		slog.Debug("swytch caddy lock: refresh emit failed", "key", lockKey, "error", err)
-		return true
+		return err
 	}
 	if err := cctx.Flush(); err != nil && !errors.Is(err, effects.ErrTxnAborted) {
-		slog.Debug("swytch caddy lock: refresh flush failed", "key", lockKey, "error", err)
+		return err
+	}
+	return nil
+}
+
+// refreshOnce extends ExpiresAt by lockTTL on the auto-refresh schedule.
+// Returns false when the lock has been lost (caller stops refreshing).
+func (s *swytchStore) refreshOnce(lockKey string) bool {
+	err := s.renewLease(lockKey, s.lockTTL)
+	if errors.Is(err, errLockLost) {
+		slog.Warn("swytch caddy lock: lock lost during refresh", "key", lockKey)
+		return false
+	}
+	if err != nil {
+		slog.Debug("swytch caddy lock: refresh failed", "key", lockKey, "error", err)
 	}
 	return true
 }

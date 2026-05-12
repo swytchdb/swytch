@@ -27,6 +27,7 @@ package caddy
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,13 +110,24 @@ func (s *SwytchStorage) CertMagicStorage() (certmagic.Storage, error) {
 		waiters:    rt.waiters,
 		dataPrefix: s.KeyPrefix + dataSubspace,
 		lockPrefix: s.KeyPrefix + lockSubspace,
+		owner:      ownerToken(rt.rt.Engine),
 		lockTTL:    time.Duration(s.LockTTL),
 	}, nil
 }
 
 // Provision is called once per Caddy reload. It claims a reference on
 // the process-wide swytch runtime, starting it on the first call.
-func (s *SwytchStorage) Provision(_ caddycore.Context) error {
+//
+// String fields (passphrase / join / advertise / prefix) are expanded
+// through Caddy's Replacer so users can write `{env.SWYTCH_PASS}` or
+// `{file./run/secrets/swytch}` in the Caddyfile.
+func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
+	repl := caddycore.NewReplacer()
+	s.ClusterPassphrase = repl.ReplaceAll(s.ClusterPassphrase, "")
+	s.Join = repl.ReplaceAll(s.Join, "")
+	s.ClusterAdvertise = repl.ReplaceAll(s.ClusterAdvertise, "")
+	s.KeyPrefix = repl.ReplaceAll(s.KeyPrefix, "")
+
 	if s.ClusterPort == 0 {
 		s.ClusterPort = defaultClusterPort
 	}
@@ -132,14 +144,12 @@ func (s *SwytchStorage) Provision(_ caddycore.Context) error {
 		return fmt.Errorf("swytch storage: lock_ttl must be at least 1s, got %s", time.Duration(s.LockTTL))
 	}
 
-	// beacon takes a *slog.Logger; Caddy hands out *zap.Logger and
-	// bridging is non-trivial. Leave Logger nil so beacon falls back to
-	// slog.Default().
 	cfg := beacon.RuntimeConfig{
 		ClusterPassphrase: s.ClusterPassphrase,
 		JoinAddr:          s.Join,
 		ClusterPort:       s.ClusterPort,
 		AdvertiseAddr:     s.ClusterAdvertise,
+		Logger:            ctx.Slogger(),
 	}
 	if err := claimRuntime(cfg, s.KeyPrefix); err != nil {
 		return fmt.Errorf("swytch storage: %w", err)
@@ -185,8 +195,8 @@ func (s *SwytchStorage) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			var port int
-			if _, err := fmt.Sscanf(d.Val(), "%d", &port); err != nil {
+			port, err := strconv.Atoi(d.Val())
+			if err != nil {
 				return d.Errf("invalid cluster_port %q: %v", d.Val(), err)
 			}
 			s.ClusterPort = port
@@ -346,4 +356,9 @@ var (
 	_ caddycore.CleanerUpper     = (*SwytchStorage)(nil)
 	_ caddycore.StorageConverter = (*SwytchStorage)(nil)
 	_ caddyfile.Unmarshaler      = (*SwytchStorage)(nil)
+
+	// Storage-side optional interfaces.
+	_ certmagic.Storage          = (*swytchStore)(nil)
+	_ certmagic.TryLocker        = (*swytchStore)(nil)
+	_ certmagic.LockLeaseRenewer = (*swytchStore)(nil)
 )

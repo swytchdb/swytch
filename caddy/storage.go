@@ -39,8 +39,9 @@ import (
 type swytchStore struct {
 	runtime    *beacon.Runtime
 	waiters    *waiters
-	dataPrefix string // "<key_prefix>d:" — guards user keys from colliding with locks
-	lockPrefix string // "<key_prefix>l:" — lock subspace
+	dataPrefix string  // "<key_prefix>d:" — guards user keys from colliding with locks
+	lockPrefix string  // "<key_prefix>l:" — lock subspace
+	owner      [8]byte // NodeID encoded once at construction; lock-ownership tag
 	lockTTL    time.Duration
 
 	// heldLocks maps lockKey → stop chan for the per-lock refresh
@@ -281,5 +282,4 @@ func emitScalarRemove(c *effects.Context, fullKey string) error {
 	})
 }
 
-// Interface guard.
-var _ certmagic.Storage = (*swytchStore)(nil)
+// Interface guards live in module.go alongside the SwytchStorage ones.
