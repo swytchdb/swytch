@@ -317,17 +317,22 @@ func (pm *PeerManager) Stop() {
 		pm.quicTransport.Stop()
 	}
 
-	// Fire onPeerRemoved outside the lock — the hook reaches into the
-	// pub/sub router which takes its own locks.
+	// Detach under the lock; run pc.Stop() (QUIC close) and fire
+	// onPeerRemoved hooks outside it — both can block / re-enter
+	// PeerManager via pm.mu.RLock.
 	pm.mu.Lock()
+	conns := make([]*PeerConn, 0, len(pm.peers))
 	departing := make([]NodeId, 0, len(pm.peers))
 	for id, pc := range pm.peers {
-		pc.Stop()
+		conns = append(conns, pc)
 		departing = append(departing, id)
 		delete(pm.peers, id)
 	}
 	pm.mu.Unlock()
 
+	for _, pc := range conns {
+		pc.Stop()
+	}
 	if pm.onPeerRemoved != nil {
 		for _, id := range departing {
 			pm.onPeerRemoved(id)
