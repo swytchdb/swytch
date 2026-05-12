@@ -699,12 +699,17 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer, db *shared
 		}
 		key := string(cmd.Args[1])
 
-		if h.engine == nil {
+		if h.engine == nil || cmd.Context == nil {
 			w.WriteNullBulkString()
 			return
 		}
-		snap, _, _, err := h.engine.GetSnapshot(key)
-		if err != nil || snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+		// Route through Context.GetSnapshot so filterSnapshot drops
+		// expired keys + empty-collection tombstones uniformly —
+		// direct Engine.GetSnapshot returns the unfiltered
+		// ReducedEffect and would report nonzero size for a TTL-
+		// expired key.
+		snap, _, err := cmd.Context.GetSnapshot(key)
+		if err != nil || snap == nil {
 			w.WriteNullBulkString()
 			return
 		}

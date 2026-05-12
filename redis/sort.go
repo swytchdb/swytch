@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
@@ -196,7 +197,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build sort items with weights
-	items := h.buildSortItems(db, elements, opts)
+	items := h.buildSortItems(cmd.Context, db, elements, opts)
 
 	// Sort unless BY nosort
 	if !opts.noSort {
@@ -209,7 +210,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build results (applies GET patterns if any)
-	results := h.buildResults(db, items, opts)
+	results := h.buildResults(cmd.Context, db, items, opts)
 
 	// STORE or return
 	if opts.store != "" {
@@ -230,15 +231,19 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 }
 
-// getExternalValue retrieves a value from an external key, optionally a hash field
-func (h *Handler) getExternalValue(db *shared.Database, pattern string, element []byte) ([]byte, bool) {
+// getExternalValue retrieves a value from an external key, optionally a hash field.
+// Reads through the command's Context so filterSnapshot drops TTL-expired
+// entries and empty-collection tombstones — direct Engine.GetSnapshot would
+// return stale data here, since BY/GET patterns commonly hit ephemeral hash
+// fields whose parent key may already be past its TTL.
+func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, pattern string, element []byte) ([]byte, bool) {
 	key, field, isHash := substitutePattern(pattern, element)
 
-	if h.engine == nil {
+	if h.engine == nil || ectx == nil {
 		return nil, false
 	}
-	snap, _, _, err := h.engine.GetSnapshot(key)
-	if err != nil || snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+	snap, _, err := ectx.GetSnapshot(key)
+	if err != nil || snap == nil {
 		return nil, false
 	}
 
@@ -261,7 +266,7 @@ func (h *Handler) getExternalValue(db *shared.Database, pattern string, element 
 }
 
 // buildSortItems creates sortItems from elements with computed weights
-func (h *Handler) buildSortItems(db *shared.Database, elements [][]byte, opts *sortOptions) []sortItem {
+func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, elements [][]byte, opts *sortOptions) []sortItem {
 	items := make([]sortItem, 0, len(elements))
 
 	for _, elem := range elements {
@@ -269,7 +274,7 @@ func (h *Handler) buildSortItems(db *shared.Database, elements [][]byte, opts *s
 
 		if opts.byPattern != "" && !opts.noSort {
 			// Get weight from external key
-			weightData, ok := h.getExternalValue(db, opts.byPattern, elem)
+			weightData, ok := h.getExternalValue(ectx, db, opts.byPattern, elem)
 			if ok {
 				if opts.alpha {
 					item.strWeight = string(weightData)
@@ -328,7 +333,7 @@ func applyLimit(items []sortItem, offset, count int) []sortItem {
 }
 
 // buildResults builds the result slice, applying GET patterns if specified
-func (h *Handler) buildResults(db *shared.Database, items []sortItem, opts *sortOptions) [][]byte {
+func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items []sortItem, opts *sortOptions) [][]byte {
 	if len(opts.getPatterns) == 0 {
 		// No GET patterns - return elements
 		results := make([][]byte, len(items))
@@ -346,7 +351,7 @@ func (h *Handler) buildResults(db *shared.Database, items []sortItem, opts *sort
 				// Special pattern # returns the element itself
 				results = append(results, item.element)
 			} else {
-				val, _ := h.getExternalValue(db, pattern, item.element)
+				val, _ := h.getExternalValue(ectx, db, pattern, item.element)
 				results = append(results, val) // nil if not found
 			}
 		}
