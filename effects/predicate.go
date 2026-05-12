@@ -22,7 +22,7 @@ package effects
 import (
 	"bytes"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // Engine-side predicate evaluator — mirrors sql/predicate.go but

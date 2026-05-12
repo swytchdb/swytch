@@ -40,7 +40,7 @@ curl -fsSL https://getswytch.com/scripts/install.sh | SWYTCH_VERSION=v0.1.0 sh
 & ([scriptblock]::Create((iwr -useb https://getswytch.com/scripts/install.ps1))) -Version v0.1.0 -AddToPath
 ```
 
-Prebuilt binaries, checksums, and cosign signatures for every release are at <https://github.com/swytchdb/cache/releases>.
+Prebuilt binaries, checksums, and cosign signatures for every release are at <https://github.com/swytchdb/swytch/releases>.
 
 ## Quick start
 

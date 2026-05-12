@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	clox "github.com/swytchdb/cache/cache"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	clox "github.com/swytchdb/swytch/cache"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // EngineEffectHandler adapts an *effects.Engine to the EffectHandler

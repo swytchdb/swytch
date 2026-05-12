@@ -29,8 +29,8 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/tracing"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"

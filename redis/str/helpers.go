@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

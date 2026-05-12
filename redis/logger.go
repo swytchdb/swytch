@@ -25,7 +25,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // Logger wraps slog.Logger and provides debug mode control

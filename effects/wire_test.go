@@ -23,7 +23,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // TestMarshalEffect_BinaryNetAddsKey is the regression test for the bug where

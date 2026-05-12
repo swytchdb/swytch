@@ -29,10 +29,10 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	_ "github.com/swytchdb/cache/redis/bitmap"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	_ "github.com/swytchdb/swytch/redis/bitmap"
+	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/zeebo/xxh3"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

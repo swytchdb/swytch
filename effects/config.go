@@ -22,8 +22,8 @@ package effects
 import (
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/keytrie"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/keytrie"
 )
 
 // SafetyMode determines write behavior during network partitions.

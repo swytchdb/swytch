@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // horizonEntry tracks a single Bind that is in its horizon wait period.

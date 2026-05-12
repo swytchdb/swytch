@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // generateTestTLSConfig creates a self-signed TLS config for tests.

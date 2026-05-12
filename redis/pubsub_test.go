@@ -24,7 +24,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 func TestHandler_PubSubCommands(t *testing.T) {

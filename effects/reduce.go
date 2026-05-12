@@ -24,7 +24,7 @@ import (
 	"maps"
 	"slices"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // ReduceBranch reduces a linear chain of effects (oldest-first) into a single ReducedEffect.

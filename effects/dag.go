@@ -26,7 +26,7 @@ import (
 	"sort"
 	"strings"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // allDeps copies the effect's Deps and appends any KeyBind.NewTip offsets

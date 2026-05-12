@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // adaptiveSerializationEnabled gates every entry point into the

@@ -25,9 +25,9 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // runHandler calls a handler with a fresh effects engine, runs validation,

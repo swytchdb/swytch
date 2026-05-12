@@ -25,7 +25,7 @@ import (
 	"log/slog"
 
 	"github.com/quic-go/quic-go"
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // handleStream dispatches an incoming QUIC bidirectional stream based on its type prefix.

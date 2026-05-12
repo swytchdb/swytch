@@ -20,7 +20,7 @@
 package shared
 
 import (
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // BytesReconstructor converts a non-SCALAR snapshot into raw bytes.

@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 func TestIntegration_TwoNodeNotification(t *testing.T) {

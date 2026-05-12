@@ -1,4 +1,4 @@
-module github.com/swytchdb/cache
+module github.com/swytchdb/swytch
 
 go 1.26
 

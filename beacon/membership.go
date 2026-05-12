@@ -22,7 +22,7 @@ package beacon
 import (
 	"encoding/binary"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
 // MembershipKey is the reserved effects key for cluster membership.

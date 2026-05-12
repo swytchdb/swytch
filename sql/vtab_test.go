@@ -25,8 +25,8 @@ import (
 	"strconv"
 	"testing"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"zombiezen.com/go/sqlite"
 )
 

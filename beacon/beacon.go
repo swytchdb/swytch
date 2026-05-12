@@ -27,9 +27,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swytchdb/cache/cluster"
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/effects"
+	"github.com/swytchdb/swytch/cluster"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 )
 
 // Config holds beacon configuration parsed from CLI flags.

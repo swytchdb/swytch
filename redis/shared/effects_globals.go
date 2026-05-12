@@ -23,8 +23,8 @@ import (
 	"encoding/binary"
 	"time"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/crdt"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/crdt"
 )
 
 var (

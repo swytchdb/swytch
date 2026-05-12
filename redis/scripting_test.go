@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // execCmd is a helper that executes a command through h.ExecuteInto and returns the response string.

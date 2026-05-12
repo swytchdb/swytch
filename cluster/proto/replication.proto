@@ -1,7 +1,7 @@
 syntax = "proto3";
 package swytch.cluster.v1;
 
-option go_package = "github.com/swytchdb/cache/cluster/proto";
+option go_package = "github.com/swytchdb/swytch/cluster/proto";
 
 import "google/protobuf/timestamp.proto";
 

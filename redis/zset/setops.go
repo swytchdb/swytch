@@ -26,8 +26,8 @@ import (
 	"sort"
 	"strconv"
 
-	pb "github.com/swytchdb/cache/cluster/proto"
-	"github.com/swytchdb/cache/redis/shared"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // getMembersWithScoresFromSnapshot gets a snapshot and returns member->score map.

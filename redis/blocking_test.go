@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swytchdb/cache/effects"
-	"github.com/swytchdb/cache/redis/shared"
+	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/swytch/redis/shared"
 )
 
 // newHandlerWithEffects creates a handler with a minimal in-memory effects engine.

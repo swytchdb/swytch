@@ -26,8 +26,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/swytchdb/cache/cache"
-	"github.com/swytchdb/cache/keytrie"
+	"github.com/swytchdb/swytch/cache"
+	"github.com/swytchdb/swytch/keytrie"
 )
 
 // DefaultNumDatabases is the default number of Redis databases
