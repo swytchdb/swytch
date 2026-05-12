@@ -2,6 +2,14 @@ version: 2
 
 project_name: swytch
 
+# The caddy submodule is published on its own version line (caddy/vX.Y.Z),
+# but those tags share the same git history as the main module. Without
+# this filter goreleaser's `git describe` picks up the most-recent caddy/*
+# tag and tries to cut a swytch release against it.
+git:
+  ignore_tags:
+    - 'caddy/*'
+
 before:
   hooks:
     - go mod tidy
