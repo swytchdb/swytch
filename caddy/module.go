@@ -59,7 +59,7 @@ const (
 	defaultLockTTL     = 30 * time.Second
 )
 
-// SwytchStorage A pool of Caddy instances configured with this module becomes a Swytch
+// SwytchStorage is a pool of Caddy instances configured with this module that becomes a Swytch
 // cluster: TLS certificates, ACME account state, and OCSP staples replicate
 // peer-to-peer, and ACME issuance locks are coordinated through Swytch's
 // serializable transactional path.
