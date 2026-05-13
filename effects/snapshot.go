@@ -308,42 +308,87 @@ done:
 		}
 	}
 
-	// Update local index with remote tips — add alongside existing, don't consume
+	// Per-tip validation: install a tip only if we can fully walk its
+	// causal chain. Installing tips before validation was the root
+	// cause of "ghost tip" pollution — a NACK from a peer would seed
+	// our index with a tip whose bytes were unreachable, and we'd
+	// then advertise that ghost tip in our own NACKs to future
+	// joiners.
+	//
+	// Walks share work through effectCache: once a deep ancestor is
+	// fetched, subsequent walks hit it locally.
+	installed := 0
+	var unreachable []Tip
 	for _, tipOff := range unique {
+		rd := newDag(e, key, "")
+		if walkErr := rd.walk([]Tip{tipOff}, func(*pb.Effect) error { return nil }); walkErr != nil {
+			slog.Debug("ensureSubscribed: skipping unreachable tip",
+				"key", key, "tip", tipOff, "error", walkErr)
+			unreachable = append(unreachable, tipOff)
+			continue
+		}
 		e.updateIndex(key, nil, tipOff)
+		installed++
 	}
 
-	// Verify the full causal chain is reachable by walking with a no-op
-	// processor. If any effect is unreachable, the walk returns an error
-	// and reads would return wrong results.
-	rd := newDag(e, key, "")
-	if walkErr := rd.walk(unique, func(*pb.Effect) error { return nil }); walkErr != nil {
-		slog.Debug("ensureSubscribed: incomplete bootstrap, retrying in background",
-			"key", key, "error", walkErr)
-		state.incomplete.Store(true)
-		bootstrapComplete = false
-		go e.retryBootstrap(key, state, unique)
-		return ErrBootstrapIncomplete
+	if installed > 0 {
+		// At least one tip from this bootstrap is fetchable — we have
+		// authority for the reachable subset. Unreachable tips are
+		// ghosts; leaving them out of the index is the desired
+		// behavior (they'll never reach the cluster again via us).
+		if len(unreachable) > 0 {
+			slog.Debug("ensureSubscribed: bootstrap completed with partial reachability",
+				"key", key, "installed", installed, "skipped", len(unreachable))
+		}
+		return nil
 	}
-	return nil
+
+	// No tips reachable, but peers did NACK with state. This is a
+	// real cluster issue (full partition, every peer is in the same
+	// ghost-tip trap, etc.). Mark incomplete and let retryBootstrap
+	// keep probing in the background. The NACK filter in
+	// buildEnrichedNack ensures we never propagate the broken state
+	// outward even while incomplete.
+	slog.Debug("ensureSubscribed: incomplete bootstrap, retrying in background",
+		"key", key, "unreachable_tips", len(unreachable))
+	state.incomplete.Store(true)
+	bootstrapComplete = false
+	go e.retryBootstrap(key, state, unique)
+	return ErrBootstrapIncomplete
 }
 
-// retryBootstrap periodically re-checks whether the full causal chain for a
-// key is reachable. Uses the original NACK'd tips from the initial bootstrap
-// (what peers reported as their state), not the current index tips — the
-// index may only contain the node's own subscription effects.
+// retryBootstrap periodically re-checks whether any of the original
+// NACK'd tips are now reachable. ensureSubscribed leaves the index
+// empty on full-bootstrap-failure, so retry both validates and
+// installs: per-tip walks identify which tips have become
+// fetchable (via anti-entropy fill-in, peer recovery, etc.), and we
+// install those before marking state ready.
+//
+// Uses the original NACK'd tips, not the current index tips — the
+// index reflects only what we already accepted, while nackTips is
+// what peers reported at bootstrap time.
 func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips []Tip) {
 	for !e.closed.Load() {
 		time.Sleep(500 * time.Millisecond)
 
-		rd := newDag(e, key, "")
-		if walkErr := rd.walk(nackTips, func(*pb.Effect) error { return nil }); walkErr != nil {
+		installed := 0
+		for _, tipOff := range nackTips {
+			rd := newDag(e, key, "")
+			if walkErr := rd.walk([]Tip{tipOff}, func(*pb.Effect) error { return nil }); walkErr != nil {
+				continue
+			}
+			e.updateIndex(key, nil, tipOff)
+			installed++
+		}
+
+		if installed == 0 {
 			slog.Debug("retryBootstrap: still incomplete",
-				"key", key, "error", walkErr)
+				"key", key, "tips", len(nackTips))
 			continue
 		}
 
-		slog.Debug("retryBootstrap: complete", "key", key)
+		slog.Debug("retryBootstrap: complete",
+			"key", key, "installed", installed, "of", len(nackTips))
 		state.incomplete.Store(false)
 		close(state.ready)
 		return

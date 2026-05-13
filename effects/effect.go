@@ -1064,44 +1064,61 @@ func (e *Engine) HandleNack(nack *pb.NackNotify) error {
 
 // buildEnrichedNack constructs a NackNotify with Tip details for smart
 // conflict detection.
+//
+// A NACK is a cluster-scale authority claim: the receiver will adopt
+// these tips into its own index and walk them, expecting the cluster
+// (us, in particular) to be able to serve the bytes. So we only
+// advertise tips whose effects we hold in the local effectCache.
+// Tips we don't hold are silently dropped from the NACK — they may
+// have been evicted, or installed via a prior bootstrap whose walk
+// never completed. Either way, advertising them would propagate a
+// ghost tip the next joiner can't resolve.
+//
+// Lookup is local-only by design: falling back to FetchFromAny here
+// would synchronously block the receive path while we hit the
+// network for every tip in every NACK.
 func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips []keytrie.EffectRef) *pb.NackNotify {
 	nack := &pb.NackNotify{
 		Key:         []byte(key),
 		Conflicting: conflicting,
 	}
 
+	if e.effectCache == nil {
+		return nack
+	}
+
 	for _, tp := range tips {
+		eff, ok := e.effectCache.Get(tp, 0)
+		if !ok {
+			// We don't hold the bytes; do not advertise authority we
+			// can't back up.
+			continue
+		}
+
 		nack.Tips = append(nack.Tips, toPbRef(tp))
 
-		// Read the effect for metadata via getEffect (uses effect cache
-		// first, then log, then remote fetch). Using the effect cache is
-		// critical — binds written via rawEmit are cached there but may
-		// not be readable from the log directly.
 		detail := &pb.NackTipDetail{
-			Ref: toPbRef(tp),
+			Ref:             toPbRef(tp),
+			Hlc:             eff.Hlc,
+			IsTransactional: eff.TxnId != "",
+			Deps:            eff.Deps,
 		}
-		if eff, err := e.getEffect(tp); err == nil {
-			detail.Hlc = eff.Hlc
-			detail.IsTransactional = eff.TxnId != ""
-			detail.Deps = eff.Deps
-
-			if data := eff.GetData(); data != nil {
-				detail.IsData = true
-				detail.Collection = data.Collection
-				detail.ElementId = data.Id
-				detail.Op = data.Op
-			}
-			if bind := eff.GetTxnBind(); bind != nil {
-				detail.IsBind = true
-				detail.BindHlc = bind.TxnHlc
-				detail.BindNodeId = bind.OriginatorNodeId
-				detail.BindForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc)
-				for _, kb := range bind.Keys {
-					detail.BindConsumedTips = append(detail.BindConsumedTips, &pb.KeyConsumedTips{
-						Key:          kb.Key,
-						ConsumedTips: kb.ConsumedTips,
-					})
-				}
+		if data := eff.GetData(); data != nil {
+			detail.IsData = true
+			detail.Collection = data.Collection
+			detail.ElementId = data.Id
+			detail.Op = data.Op
+		}
+		if bind := eff.GetTxnBind(); bind != nil {
+			detail.IsBind = true
+			detail.BindHlc = bind.TxnHlc
+			detail.BindNodeId = bind.OriginatorNodeId
+			detail.BindForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc)
+			for _, kb := range bind.Keys {
+				detail.BindConsumedTips = append(detail.BindConsumedTips, &pb.KeyConsumedTips{
+					Key:          kb.Key,
+					ConsumedTips: kb.ConsumedTips,
+				})
 			}
 		}
 		nack.TipDetails = append(nack.TipDetails, detail)
