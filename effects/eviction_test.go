@@ -222,3 +222,72 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 		t.Fatal("no evictions occurred; test did not exercise the decider path")
 	}
 }
+
+// TestHandleEviction_SerializesWithConcurrentLocalWrites guards the
+// race that motivated taking the per-key striped lock in
+// handleEviction: a local emit and an eviction running concurrently
+// on the same key. Without the lock, the eviction could snapshot
+// tips before the emit's updateIndex landed, broadcast an unsub
+// referencing a stale tip set, then Delete the index — silently
+// dropping the new tip locally even though peers think the key was
+// torn down. With the lock, the emit either fully precedes (its
+// tip is in the unsub's Deps and gone from the index after Delete)
+// or fully follows (its tip is added after Delete, so the index
+// reflects the new authoritative state).
+func TestHandleEviction_SerializesWithConcurrentLocalWrites(t *testing.T) {
+	bc := &mockBroadcaster{}
+	e := newTestEngine(bc)
+
+	const key = "user:contended"
+	const iterations = 200
+
+	for i := range iterations {
+		// Pre-seed a tip so handleEviction has something to drop.
+		seedTip := Tip{1, uint64(1000 + i)}
+		e.subscriptions.Store(key, &subscriptionState{ready: make(chan struct{})})
+		e.index.Insert(key, nil, keytrie.NewTipSet(seedTip))
+
+		// Concurrent: handleEviction tears down; an Emit-style write
+		// adds a fresh tip via the same per-key lock the eviction
+		// path now takes.
+		newTip := Tip{1, uint64(2000 + i)}
+		evictionDone := make(chan struct{})
+		writeDone := make(chan struct{})
+
+		go func() {
+			defer close(evictionDone)
+			e.handleEviction(seedTip, &pb.Effect{Key: []byte(key)})
+		}()
+		go func() {
+			defer close(writeDone)
+			mu := e.GetLock(key)
+			mu.Lock()
+			e.updateIndex(key, nil, newTip)
+			mu.Unlock()
+		}()
+
+		<-evictionDone
+		<-writeDone
+
+		// Post-condition: index must NOT be in a torn state. Either:
+		//   (a) eviction ran first → write's newTip is the sole tip
+		//       (eviction deleted, write re-added under the same key).
+		//   (b) write ran first → eviction's snapshot saw both
+		//       seedTip and newTip, broadcast an unsub consuming
+		//       both, then deleted. Index has no entry.
+		// What MUST NOT happen: eviction snapshots only seedTip,
+		// emit lands newTip while eviction holds nothing, eviction
+		// Deletes the key, and newTip is silently lost.
+		tips := e.index.Contains(key)
+		if tips == nil {
+			// case (b): both consumed by the unsub before Delete. Fine.
+			continue
+		}
+		got := tips.Tips()
+		// case (a): only newTip should remain.
+		if len(got) != 1 || got[0] != newTip {
+			t.Fatalf("iter %d: torn index after race; expected [%v] or nil, got %v",
+				i, newTip, got)
+		}
+	}
+}

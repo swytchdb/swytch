@@ -1179,6 +1179,17 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	}
 	defer e.unsubInFlight.Delete(key)
 
+	// Take the per-key striped lock for the whole critical section
+	// (read tips → build unsub → broadcast → drop index). Every other
+	// index writer for the key (HandleRemote, flushNonTx/flushTx via
+	// updateIndex) serializes on this same lock, so a concurrent
+	// local Emit can't insert a tip between our snapshot and our
+	// Delete — which would otherwise leave the new tip in our index
+	// after we've already told peers we're unsubscribing.
+	mu := e.GetLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+
 	tipSet := e.index.Contains(key)
 	if tipSet == nil {
 		// Already torn down or never installed.
@@ -1189,11 +1200,14 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
 		offset := e.nextOffset()
+		// Substitute pre-tx deps for any in-progress txn tips so the
+		// unsub doesn't reference uncommitted state.
+		deps := e.resolveTipDeps(tipSet.Tips())
 		unsub := &pb.Effect{
 			Key:            []byte(key),
 			Hlc:            hlc,
 			NodeId:         uint64(e.nodeID),
-			Deps:           toPbRefs(tipSet.Tips()),
+			Deps:           toPbRefs(deps),
 			ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
 			Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
 				SubscriberNodeId: uint64(e.nodeID),
