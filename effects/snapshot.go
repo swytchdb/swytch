@@ -156,20 +156,24 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 func (e *Engine) ensureSubscribed(key string) error {
 	state := &subscriptionState{ready: make(chan struct{})}
 	if existing, loaded := e.subscriptions.LoadOrStore(key, state); loaded {
-		// Bootstrap still running with unreachable effects — return error
-		// immediately so the client retries rather than blocking.
 		if existing.incomplete.Load() {
 			return ErrBootstrapIncomplete
 		}
-		// Already subscribed or bootstrapping — wait for completion
 		<-existing.ready
+		// Re-check after wait: ready may have been closed by a failure
+		// path (markFailed) rather than a successful bootstrap. The
+		// closeOnce + Store-before-close in markFailed ensures this
+		// load sees the up-to-date value.
+		if existing.incomplete.Load() {
+			return ErrBootstrapIncomplete
+		}
 		return nil
 	}
 	slog.Debug("ensureSubscribed: bootstrapping", "key", key)
-	bootstrapComplete := true
+	succeeded := false
 	defer func() {
-		if bootstrapComplete {
-			close(state.ready)
+		if succeeded {
+			state.markReady()
 		}
 	}()
 
@@ -185,11 +189,16 @@ func (e *Engine) ensureSubscribed(key string) error {
 	}
 	data, err := MarshalEffect(eff)
 	if err != nil {
+		// Marshal failure is a code bug; remove state so a fresh call
+		// retries from scratch and concurrent waiters re-bootstrap.
+		e.subscriptions.Delete(key)
+		state.markFailed()
 		return err
 	}
 	offset := e.nextOffset()
 
 	if e.broadcaster == nil {
+		succeeded = true
 		return nil
 	}
 
@@ -206,6 +215,7 @@ func (e *Engine) ensureSubscribed(key string) error {
 	// responded (e.g. noise sessions not yet established after restart).
 	peerIDs := e.broadcaster.PeerIDs()
 	if len(peerIDs) == 0 {
+		succeeded = true
 		return nil
 	}
 
@@ -259,8 +269,13 @@ done:
 
 	// Minority partition check: if we couldn't reach a majority of peers,
 	// the subscription wasn't announced cluster-wide. Transactions on
-	// this key must not proceed.
+	// this key must not proceed. Delete the state so a later call
+	// re-bootstraps once the partition resolves; mark failed so any
+	// concurrent waiters re-check incomplete after their <-ready and
+	// also surface ErrBootstrapIncomplete.
 	if !e.broadcaster.InMajorityPartition() {
+		e.subscriptions.Delete(key)
+		state.markFailed()
 		return ErrRegionPartitioned
 	}
 
@@ -295,6 +310,7 @@ done:
 	}
 
 	if len(allTipOffsets) == 0 {
+		succeeded = true
 		return nil
 	}
 
@@ -315,6 +331,7 @@ done:
 			slog.Debug("ensureSubscribed: bootstrap completed with partial reachability",
 				"key", key, "installed", installed, "skipped", skipped)
 		}
+		succeeded = true
 		return nil
 	}
 
@@ -322,11 +339,11 @@ done:
 	// real partition or peers all stuck on the same unfetchable
 	// chain; retry in the background. The NACK filter in
 	// buildEnrichedNack prevents propagating the broken state
-	// outward while incomplete.
+	// outward while incomplete. Leaves state in place (incomplete=true)
+	// so retryBootstrap can install tips and markReady when reachable.
 	slog.Debug("ensureSubscribed: incomplete bootstrap, retrying in background",
 		"key", key, "unreachable_tips", skipped)
 	state.incomplete.Store(true)
-	bootstrapComplete = false
 	go e.retryBootstrap(key, state, unique)
 	return ErrBootstrapIncomplete
 }
@@ -354,11 +371,17 @@ func (e *Engine) walkAndInstall(key string, tips []Tip) (installed, skipped int)
 
 // retryBootstrap re-attempts an incomplete bootstrap on a fixed
 // cadence until at least one of the original NACK'd tips becomes
-// reachable. Uses the original tips rather than current index tips
-// because the index is empty after a full bootstrap failure.
+// reachable or the engine closes. On engine shutdown, fails the
+// subscription state so any caller parked on <-state.ready unblocks
+// and re-checks incomplete (returning ErrBootstrapIncomplete) rather
+// than waiting until process exit.
 func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips []Tip) {
 	for !e.closed.Load() {
 		time.Sleep(500 * time.Millisecond)
+
+		if e.closed.Load() {
+			break
+		}
 
 		installed, _ := e.walkAndInstall(key, nackTips)
 		if installed == 0 {
@@ -370,9 +393,13 @@ func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips [
 		slog.Debug("retryBootstrap: complete",
 			"key", key, "installed", installed, "of", len(nackTips))
 		state.incomplete.Store(false)
-		close(state.ready)
+		state.markReady()
 		return
 	}
+
+	slog.Debug("retryBootstrap: aborted by engine shutdown", "key", key)
+	e.subscriptions.Delete(key)
+	state.markFailed()
 }
 
 // reconstruct rebuilds the materialized state for a key from its effect DAG.

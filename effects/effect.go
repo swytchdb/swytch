@@ -147,6 +147,22 @@ type Engine struct {
 type subscriptionState struct {
 	ready      chan struct{}
 	incomplete atomic.Bool // true if bootstrap saw unreachable effects
+	closeOnce  sync.Once   // guards close(ready)
+}
+
+// markReady unblocks any waiters on this subscription state. Safe to
+// call multiple times; subsequent calls are no-ops.
+func (s *subscriptionState) markReady() {
+	s.closeOnce.Do(func() { close(s.ready) })
+}
+
+// markFailed flips the state to incomplete and unblocks waiters. They
+// re-check incomplete after the wait and return ErrBootstrapIncomplete
+// rather than incorrectly interpreting a closed ready channel as
+// success.
+func (s *subscriptionState) markFailed() {
+	s.incomplete.Store(true)
+	s.markReady()
 }
 
 // NewTestEngine creates a minimal Engine for use in tests outside this package.
@@ -555,13 +571,18 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// touching subscriptions). System keys bypass the gate — they're
 	// load-bearing for cluster bootstrap and may arrive before a
 	// joiner has subscribed.
+	//
+	// Drops return ErrAuthorityDropped, which the transport
+	// interprets as "do not respond." First-ACK replication then
+	// flows from authoritative peers rather than counting our drop
+	// as a successful replica.
 	if !isSystemKey(eff.Key) {
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		if !subscribed && e.index.Contains(key) == nil {
-			slog.Debug("HandleRemote: dropping notify for key with no local authority",
+			slog.Info("HandleRemote: dropping notify for key with no local authority",
 				"key", key, "offset", notify.Origin)
-			return nil, nil
+			return nil, ErrAuthorityDropped
 		}
 	}
 

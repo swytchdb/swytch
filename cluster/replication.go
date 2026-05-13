@@ -30,6 +30,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -413,6 +414,15 @@ func (r *Replicator) HandleNotify(peerID NodeId, requestID uint64, notify *pb.Of
 				"peer", peerID, "requestID", requestID,
 				"error", err,
 			)
+			// AuthorityDropped means "we deliberately did not store
+			// this." Suppress the wire response entirely so the
+			// sender's first-ACK isn't satisfied by this peer; their
+			// other (authoritative) peers will ACK if anyone does.
+			// If no peer does, the sender's tracked replication
+			// times out — which is the correct signal.
+			if errors.Is(err, effects.ErrAuthorityDropped) {
+				return
+			}
 		}
 	}
 

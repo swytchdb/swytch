@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
@@ -285,5 +286,85 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 		t.Fatal("state.ready was closed despite full failure")
 	default:
 		// expected
+	}
+}
+
+// TestEnsureSubscribed_Partition_FailsCleanly verifies the partition
+// error path: an ErrRegionPartitioned return must delete the
+// subscription state (so a later call re-bootstraps when the
+// partition resolves) and mark the state failed (so any concurrent
+// waiter that already passed the incomplete-check now re-checks
+// after <-ready and surfaces ErrBootstrapIncomplete instead of
+// interpreting the closed channel as success).
+func TestEnsureSubscribed_Partition_FailsCleanly(t *testing.T) {
+	const key = "membership"
+	bc := &selectiveBroadcaster{
+		mockBroadcaster: mockBroadcaster{
+			peerIDs:                 []pb.NodeID{7},
+			allRegionPeersReachable: false, // simulate minority partition
+		},
+		nackTips:  nil,
+		fetchable: map[Tip][]byte{},
+	}
+
+	e := newTestEngine(bc)
+
+	err := e.ensureSubscribed(key)
+	if !errors.Is(err, ErrRegionPartitioned) {
+		t.Fatalf("expected ErrRegionPartitioned, got %v", err)
+	}
+	if _, ok := e.subscriptions.Load(key); ok {
+		t.Fatal("subscription state not deleted after partition failure; future calls won't re-bootstrap")
+	}
+}
+
+// TestRetryBootstrap_ShutdownUnblocksWaiters asserts that an engine
+// closed mid-retry transitions any parked subscription state to
+// markFailed: waiters unblock and re-check incomplete rather than
+// blocking until process exit.
+func TestRetryBootstrap_ShutdownUnblocksWaiters(t *testing.T) {
+	const key = "membership"
+	const peerNode pb.NodeID = 7
+
+	bc := &selectiveBroadcaster{
+		mockBroadcaster: mockBroadcaster{
+			peerIDs:                 []pb.NodeID{peerNode},
+			allRegionPeersReachable: true,
+		},
+		nackTips:  []*pb.EffectRef{toPbRef(Tip{500, 1})},
+		fetchable: map[Tip][]byte{},
+	}
+
+	e := newTestEngine(bc)
+
+	if err := e.ensureSubscribed(key); !errors.Is(err, ErrBootstrapIncomplete) {
+		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
+	}
+
+	state, ok := e.subscriptions.Load(key)
+	if !ok {
+		t.Fatal("no subscription state after incomplete bootstrap")
+	}
+
+	// Simulate a waiter that has already passed the incomplete check
+	// and is now parked on <-state.ready. Engine.Close should release
+	// it via markFailed (closes ready + sets incomplete=true).
+	released := make(chan struct{})
+	go func() {
+		<-state.ready
+		close(released)
+	}()
+
+	e.closed.Store(true)
+
+	select {
+	case <-released:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter did not unblock after engine close; retryBootstrap leak")
+	}
+
+	if !state.incomplete.Load() {
+		t.Fatal("state.incomplete should be true after shutdown so re-check returns ErrBootstrapIncomplete")
 	}
 }

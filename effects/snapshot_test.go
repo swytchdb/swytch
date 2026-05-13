@@ -21,6 +21,7 @@ package effects
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -1344,10 +1345,9 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_Drops(t *testing.T) {
 	notify := BuildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
 
 	nacks, err := e.HandleRemote(notify)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrAuthorityDropped) {
+		t.Fatalf("expected ErrAuthorityDropped, got %v", err)
 	}
-
 	if len(nacks) != 0 {
 		t.Fatalf("expected 0 NACKs from a no-authority key; got %d", len(nacks))
 	}

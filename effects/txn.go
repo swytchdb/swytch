@@ -42,6 +42,15 @@ var ErrRegionPartitioned = errors.New("region partitioned: not all same-region p
 // A background retry continues until the chain is complete.
 var ErrBootstrapIncomplete = errors.New("bootstrap incomplete: some peers unreachable")
 
+// ErrAuthorityDropped signals that HandleRemote rejected the inbound
+// effect because this node has no authority over the key. The
+// transport layer interprets this as "do not respond" — neither ACK
+// nor NACK is sent — so the sender's tracked replication times out
+// rather than counting us as a successful first-ACK replica. The
+// sender's other peers (those with authority) still get the chance
+// to accept the write.
+var ErrAuthorityDropped = errors.New("authority dropped: not subscribed to this key")
+
 // DefaultSerializationThreshold is the number of consecutive aborts on a
 // key before escalating to serialized coordination.
 const DefaultSerializationThreshold = 3
