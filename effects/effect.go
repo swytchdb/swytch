@@ -87,6 +87,11 @@ type Engine struct {
 	// Subscription bootstrapping: key → *bootstrapCollector
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
 
+	// Per-key dedupe for handleEviction. Multiple effects on the
+	// same key can evict in close succession; only one goroutine
+	// should run the broadcast + teardown for any given key.
+	unsubInFlight *xsync.Map[string, struct{}]
+
 	// Deserialized effect cache — effects are immutable once written
 	effectCache *clox.CloxCache[keytrie.EffectRef, *pb.Effect]
 
@@ -249,6 +254,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:      xsync.NewMap[string, struct{}](),
 		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
 			c := clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))
 			c.CollectStats = true
@@ -1117,18 +1123,22 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 }
 
 // handleEviction restores the "tip ⇒ fetchable bytes" invariant when
-// the cache loses the bytes behind a tip: drop the key locally and
-// broadcast a fire-and-forget unsubscribe so peers stop pushing
-// writes. Future reads re-subscribe and bootstrap fresh; if nobody
-// holds the bytes the key reads as non-existent.
+// the cache loses the bytes behind a tip. Emits an unsubscribe
+// SubscriptionEffect as a proper DAG element — real offset from
+// nextOffset, Deps consuming the current tips so peers reduce us out
+// of the subscribers map — then drops local state. Future reads
+// re-subscribe and bootstrap fresh.
 //
-// Multiple effects on the same key trigger one callback each, so the
-// keytrie's atomic Delete acts as the per-key idempotency guard:
-// only the call that observes a non-empty tip set does the broadcast
-// and subscription teardown. The rest fast-fail.
+// The broadcast goes out BEFORE local teardown so this node remains
+// authoritative for any still-cached effects on the key (other tips
+// in the same chain) during the round-trip. We deliberately do NOT
+// add the unsub to our own effectCache; we're giving up authority,
+// not retaining its trail.
 //
-// Invoked on a fresh goroutine because evictNotify runs under
-// shard.mu and this function takes other locks + does network I/O.
+// Per-key idempotency via unsubInFlight: multiple effects on the
+// same key can evict in close succession, but only one goroutine
+// runs the broadcast + teardown. Invoked on a fresh goroutine
+// because evictNotify runs under cache shard.mu.
 func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	if e.closed.Load() || evictedEffect == nil {
 		return
@@ -1143,20 +1153,26 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	key := string(evictedEffect.Key)
 
-	// Atomic claim: a concurrent eviction for another effect on the
-	// same key sees Delete return false and exits early.
-	if !e.index.Delete(key) {
+	if _, claimed := e.unsubInFlight.LoadOrStore(key, struct{}{}); claimed {
+		return
+	}
+	defer e.unsubInFlight.Delete(key)
+
+	tipSet := e.index.Contains(key)
+	if tipSet == nil {
+		// Already torn down or never installed.
 		e.subscriptions.Delete(key)
 		return
 	}
-	e.subscriptions.Delete(key)
 
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
+		offset := e.nextOffset()
 		unsub := &pb.Effect{
 			Key:            []byte(key),
 			Hlc:            hlc,
 			NodeId:         uint64(e.nodeID),
+			Deps:           toPbRefs(tipSet.Tips()),
 			ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
 			Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
 				SubscriberNodeId: uint64(e.nodeID),
@@ -1164,12 +1180,15 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 			}},
 		}
 		if data, err := MarshalEffect(unsub); err == nil {
-			notify := BuildOffsetNotify(e.nodeID, Tip{uint64(e.nodeID), uint64(hlc.Seconds)}, unsub, data, nil)
+			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
 			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		} else {
-			slog.Debug("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
+			slog.Error("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
 		}
 	}
+
+	e.index.Delete(key)
+	e.subscriptions.Delete(key)
 
 	slog.Debug("handleEviction: dropped key and unsubscribed",
 		"key", key, "ref", evictedRef)

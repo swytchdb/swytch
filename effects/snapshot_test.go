@@ -116,6 +116,7 @@ func newSnapshotEngine(log *snapshotLog, cache StateCache) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1136,6 +1137,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	remoteEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1178,6 +1180,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	localEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1262,6 +1265,7 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1323,6 +1327,7 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_Drops(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})

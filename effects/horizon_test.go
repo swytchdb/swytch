@@ -44,6 +44,7 @@ func newHorizonTestEngine() *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -84,6 +85,7 @@ func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	if e.horizon != nil {

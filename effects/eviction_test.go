@@ -92,7 +92,6 @@ func TestHandleEviction_UserKey_DropsAndUnsubs(t *testing.T) {
 		t.Fatalf("broadcast key = %q, want %q", got.Key, key)
 	}
 	// The notify's EffectData is wire-format [keyLen][key][protoData].
-	// Re-parse the proto and check the subscription flags.
 	protoStart := 4 + len(got.Key)
 	if len(got.EffectData) <= protoStart {
 		t.Fatal("broadcast EffectData truncated")
@@ -107,6 +106,22 @@ func TestHandleEviction_UserKey_DropsAndUnsubs(t *testing.T) {
 	}
 	if !sub.Unsubscribe {
 		t.Fatal("SubscriptionEffect.Unsubscribe = false; expected true")
+	}
+	// DAG correctness: the unsub references the prior tip as a Dep so
+	// peers reduce us out of the subscribers map. Without this the
+	// effect is an orphan leaf that never overrides the prior
+	// subscription.
+	if len(parsed.Deps) != 1 || r(parsed.Deps[0]) != tip {
+		t.Fatalf("unsub Deps = %v; want [%v] to causally consume the prior subscription tip", parsed.Deps, tip)
+	}
+	// Offset comes from nextOffset (monotonic sequence in our nodeID
+	// namespace), not a synthetic hlc-derived value.
+	gotOff := r(got.Origin)
+	if gotOff[0] != uint64(e.nodeID) {
+		t.Fatalf("unsub offset NodeID = %d; want %d (this engine's nodeID)", gotOff[0], e.nodeID)
+	}
+	if gotOff[1] == 0 {
+		t.Fatal("unsub offset sequence is 0; expected nextOffset to have produced a non-zero seq")
 	}
 }
 
