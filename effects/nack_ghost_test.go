@@ -22,7 +22,6 @@ package effects
 import (
 	"encoding/binary"
 	"errors"
-	"sync"
 	"testing"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -30,18 +29,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// selectiveBroadcaster lets a test return a fixed set of NACK tips
-// from ReplicateTo and selectively serve FetchFromAny — fetchable
-// offsets get their bytes, unfetchable ones get errFetchNotFound.
-// Used to drive ensureSubscribed through ghost-tip scenarios.
+// selectiveBroadcaster returns a fixed set of NACK tips from
+// ReplicateTo and selectively serves FetchFromAny based on the
+// fetchable map. Used to drive ensureSubscribed through ghost-tip
+// scenarios.
 type selectiveBroadcaster struct {
 	mockBroadcaster
-
-	nackTips []*pb.EffectRef // tips returned on every ReplicateTo
-
-	mu           sync.Mutex
-	fetchable    map[Tip][]byte // offset → wire bytes (nil = NACK only, not fetchable)
-	fetchedRefs  []*pb.EffectRef
+	nackTips  []*pb.EffectRef
+	fetchable map[Tip][]byte // offset → wire bytes; absence = NACK only, not fetchable
 }
 
 func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
@@ -53,9 +48,6 @@ func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, ta
 }
 
 func (b *selectiveBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.fetchedRefs = append(b.fetchedRefs, ref)
 	if data, ok := b.fetchable[Tip{ref.NodeId, ref.Offset}]; ok && data != nil {
 		return data, nil
 	}
@@ -295,4 +287,3 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 		// expected
 	}
 }
-

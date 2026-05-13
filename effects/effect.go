@@ -41,6 +41,16 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// systemKeyPrefix is the reserved namespace for cluster-operational
+// keys (membership, pubsub routing, etc.). Effects on these keys are
+// pinned in the effect cache and bypass the inbound authority gate
+// because they're load-bearing for protocol operation, not user data.
+var systemKeyPrefix = []byte("__swytch:")
+
+func isSystemKey(key []byte) bool {
+	return bytes.HasPrefix(key, systemKeyPrefix)
+}
+
 // bootstrapCollector collects NACKs during subscription bootstrapping.
 // ensureSubscribed registers one per key and waits for NACKs from peers.
 type bootstrapCollector struct {
@@ -259,7 +269,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		if eff == nil {
 			return true
 		}
-		return !bytes.HasPrefix(eff.Key, []byte("__swytch:"))
+		return !isSystemKey(eff.Key)
 	})
 	// After-eviction hook: the cache lost the bytes for an effect, so
 	// the local index can no longer honestly claim authority over its
@@ -532,27 +542,14 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
-	// Authority gate: drop inbound effects for keys this node has no
-	// authority over. Without this, a peer that hasn't received our
-	// local handleEviction-driven unsubscribe (or a peer that pushed
-	// pre-emptively) would resurrect the dropped key — the effect
-	// would land in the cache, the index would re-form, and the
-	// invariant (tip ⇒ fetchable bytes cluster-wide) could break
-	// again on the next eviction round.
-	//
-	// Authority means either:
-	//   - subscriptions has the key (we declared interest via
-	//     ensureSubscribed), or
-	//   - the index already has tips for the key (we've emitted
-	//     non-tx writes locally; Flush updates the index without
-	//     touching subscriptions).
-	//
-	// handleEviction clears both, so post-eviction the gate stays
-	// honest. "__swytch:" keys bypass the gate: cluster-operational
-	// and may arrive before the local node has subscribed (e.g. a
-	// joiner receiving __swytch:members before its own
-	// ensureSubscribed runs).
-	if !bytes.HasPrefix(eff.Key, []byte("__swytch:")) {
+	// Authority gate: a node accepts inbound effects only for keys it
+	// claims authority over. Authority means subscriptions has the
+	// key (declared interest) OR the index already has tips for it
+	// (locally emitted non-tx writes; Flush updates the index without
+	// touching subscriptions). System keys bypass the gate — they're
+	// load-bearing for cluster bootstrap and may arrive before a
+	// joiner has subscribed.
+	if !isSystemKey(eff.Key) {
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		if !subscribed && e.index.Contains(key) == nil {
@@ -1062,21 +1059,15 @@ func (e *Engine) HandleNack(nack *pb.NackNotify) error {
 	return nil
 }
 
-// buildEnrichedNack constructs a NackNotify with Tip details for smart
-// conflict detection.
+// buildEnrichedNack constructs a NackNotify advertising the subset
+// of `tips` for which this node holds the bytes locally. A NACK is
+// an authority claim that the receiver will walk, so tips whose
+// bytes we don't hold are dropped — advertising them would propagate
+// an unresolvable reference.
 //
-// A NACK is a cluster-scale authority claim: the receiver will adopt
-// these tips into its own index and walk them, expecting the cluster
-// (us, in particular) to be able to serve the bytes. So we only
-// advertise tips whose effects we hold in the local effectCache.
-// Tips we don't hold are silently dropped from the NACK — they may
-// have been evicted, or installed via a prior bootstrap whose walk
-// never completed. Either way, advertising them would propagate a
-// ghost tip the next joiner can't resolve.
-//
-// Lookup is local-only by design: falling back to FetchFromAny here
-// would synchronously block the receive path while we hit the
-// network for every tip in every NACK.
+// Lookup is local-only: a remote fetch fallback would synchronously
+// block the receive path with network I/O for every tip in every
+// NACK.
 func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips []keytrie.EffectRef) *pb.NackNotify {
 	nack := &pb.NackNotify{
 		Key:         []byte(key),
@@ -1090,8 +1081,6 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	for _, tp := range tips {
 		eff, ok := e.effectCache.Get(tp, 0)
 		if !ok {
-			// We don't hold the bytes; do not advertise authority we
-			// can't back up.
 			continue
 		}
 
@@ -1127,38 +1116,41 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	return nack
 }
 
-// handleEviction is invoked once per cache eviction (ghost-conversion
-// or full unlink) on a fresh goroutine. The cache lost the bytes
-// behind the evicted Tip, so the local index can no longer honestly
-// claim authority over it. Drop the key locally and send a
-// fire-and-forget unsubscribe so peers stop pushing writes for it.
-// Future reads of the key will re-subscribe and bootstrap fresh; if
-// nobody holds the bytes the key reads as non-existent — eventually
-// consistent self-cleanup.
+// handleEviction restores the "tip ⇒ fetchable bytes" invariant when
+// the cache loses the bytes behind a tip: drop the key locally and
+// broadcast a fire-and-forget unsubscribe so peers stop pushing
+// writes. Future reads re-subscribe and bootstrap fresh; if nobody
+// holds the bytes the key reads as non-existent.
 //
-// Keys with the "__swytch:" prefix should never reach this path
-// (evictDecider pins them); a warning is logged if it happens since
-// it indicates a broken pin invariant.
+// Multiple effects on the same key trigger one callback each, so the
+// keytrie's atomic Delete acts as the per-key idempotency guard:
+// only the call that observes a non-empty tip set does the broadcast
+// and subscription teardown. The rest fast-fail.
+//
+// Invoked on a fresh goroutine because evictNotify runs under
+// shard.mu and this function takes other locks + does network I/O.
 func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
-	if e.closed.Load() {
+	if e.closed.Load() || evictedEffect == nil {
 		return
 	}
-	if evictedEffect == nil {
-		return
-	}
-	if bytes.HasPrefix(evictedEffect.Key, []byte("__swytch:")) {
-		slog.Warn("handleEviction: __swytch: key evicted; pin invariant violated",
+	if isSystemKey(evictedEffect.Key) {
+		// evictDecider should have pinned these; reaching here means
+		// the pin invariant was bypassed.
+		slog.Warn("handleEviction: system key evicted; pin invariant violated",
 			"key", string(evictedEffect.Key), "ref", evictedRef)
 		return
 	}
 
 	key := string(evictedEffect.Key)
 
-	// Wire-level unsubscribe so peers stop sending notifies for this
-	// key. Pure control message — no causal anchoring, no Flush. If
-	// it gets dropped, peers' notifies will still be rejected by the
-	// inbound subscription gate (HandleRemote) until something
-	// re-subscribes locally.
+	// Atomic claim: a concurrent eviction for another effect on the
+	// same key sees Delete return false and exits early.
+	if !e.index.Delete(key) {
+		e.subscriptions.Delete(key)
+		return
+	}
+	e.subscriptions.Delete(key)
+
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
 		unsub := &pb.Effect{
@@ -1178,16 +1170,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 			slog.Debug("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
 		}
 	}
-
-	// Drop local subscription state. Future ensureSubscribed for this
-	// key will re-bootstrap from peers; a later Emit re-asserts
-	// subscription naturally.
-	e.subscriptions.Delete(key)
-
-	// Drop the key from the local index entirely. Remaining cached
-	// effects for this key become unreferenced and will be evicted
-	// under future pressure.
-	e.index.Delete(key)
 
 	slog.Debug("handleEviction: dropped key and unsubscribed",
 		"key", key, "ref", evictedRef)
