@@ -139,6 +139,8 @@ type CloxCache[K Key, V any] struct {
 	collectStats bool
 	sweepPercent int                        // Percentage of shard to scan during eviction (1-100)
 	sizeFunc     func(key K, value V) int64 // optional byte size calculator
+	evictDecider func(key K, value V) bool  // optional eviction veto (true = may evict, false = pinned)
+	evictNotify  func(key K, value V)       // optional post-eviction notification (ghost-conversion or full unlink)
 
 	// Metrics (only updated when collectStats is true)
 	hits        atomic.Uint64
@@ -668,6 +670,17 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 				continue
 			}
 
+			// Pin check: skip live entries the decider rejects so they
+			// never become an eviction candidate. If every live entry in
+			// the sweep is pinned, victim stays nil and the eviction
+			// returns 0 (no-op); the Put caller's existing "couldn't
+			// evict" path then aborts the retry loop.
+			if c.evictDecider != nil && !c.evictDecider(node.key, node.value.Load().(V)) {
+				prev = node
+				node = node.next.Load()
+				continue
+			}
+
 			// Track LRU among low-freq items (freq <= k, unprotected)
 			if freq <= k && access < lowFreqAccess {
 				lowFreqVictim = node
@@ -735,6 +748,15 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 		c.bytes.Add(-c.sizeFunc(victim.key, victimValue))
 	}
 
+	// Capture the value before mutation so evictNotify sees the
+	// effect as it was when the cache held it. After ghost conversion
+	// the value is still in the node but Get treats it as absent;
+	// after full unlink the node is gone.
+	var notifyValue V
+	if c.evictNotify != nil {
+		notifyValue = victim.value.Load().(V)
+	}
+
 	if canGhost {
 		// Convert to ghost: atomically negate freq to claim victim and preserve frequency.
 		// CAS ensures we capture the correct freq even if concurrent Gets bump it.
@@ -759,6 +781,10 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 		} else {
 			victimPrev.next.Store(next)
 		}
+	}
+
+	if c.evictNotify != nil {
+		c.evictNotify(victim.key, notifyValue)
 	}
 
 	// Periodically adapt k based on graduation rate
@@ -881,6 +907,27 @@ func (c *CloxCache[K, V]) Stats() (hits, misses, evictions uint64) {
 // Must be called before any Put operations for accurate tracking.
 func (c *CloxCache[K, V]) SetSizeFunc(fn func(key K, value V) int64) {
 	c.sizeFunc = fn
+}
+
+// SetEvictDecider installs an optional veto for eviction victim selection.
+// The function is called under the shard mutex during evictFromShard for
+// each candidate. Return true to allow eviction, false to pin (the scan
+// will try a different victim within the same maxScan budget). If every
+// candidate in a sweep is pinned, the eviction returns no victim and the
+// caller's "couldn't evict" path runs. Keep the function cheap — no I/O,
+// no locks that could re-enter the cache.
+func (c *CloxCache[K, V]) SetEvictDecider(fn func(key K, value V) bool) {
+	c.evictDecider = fn
+}
+
+// SetEvictNotify installs an optional post-eviction callback, invoked
+// once per evicted entry after the victim is unlinked from its chain
+// or converted to a ghost. The callback is called under the shard
+// mutex; it must return promptly and must not re-enter the cache.
+// Callers that need to do real work (broadcast, take other locks)
+// should dispatch the work on a goroutine.
+func (c *CloxCache[K, V]) SetEvictNotify(fn func(key K, value V)) {
+	c.evictNotify = fn
 }
 
 // Bytes returns the current estimated bytes used by cached entries.

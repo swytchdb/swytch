@@ -1302,7 +1302,14 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 	}
 }
 
-func TestHandleRemote_SubscriptionEffect_EmptyKey_SendsEmptyNack(t *testing.T) {
+// TestHandleRemote_SubscriptionEffect_NoAuthority_Drops asserts that a
+// subscription from a peer for a key this node has no authority over
+// (not subscribed AND no tips in the index) is dropped without
+// generating a NACK. Returning empty NACKs would be functionally
+// equivalent — bootstrap merges tip sets across all peers and an
+// empty contribution is a no-op — but the gate makes the
+// no-authority case explicit and saves a round-trip.
+func TestHandleRemote_SubscriptionEffect_NoAuthority_Drops(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{}
 	e := &Engine{
@@ -1320,7 +1327,7 @@ func TestHandleRemote_SubscriptionEffect_EmptyKey_SendsEmptyNack(t *testing.T) {
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
-	// No data for "newkey"
+	// No data for "newkey", and the engine has not subscribed to it.
 	subEff := &pb.Effect{
 		Key: []byte("newkey"), Hlc: sTs(20), NodeId: 2,
 		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(20)),
@@ -1336,13 +1343,13 @@ func TestHandleRemote_SubscriptionEffect_EmptyKey_SendsEmptyNack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Should have returned an empty NACK (no tips)
-	if len(nacks) != 1 {
-		t.Fatalf("expected 1 NACK returned, got %d", len(nacks))
+	if len(nacks) != 0 {
+		t.Fatalf("expected 0 NACKs from a no-authority key; got %d", len(nacks))
 	}
-	nack := nacks[0]
-	if len(nack.Tips) != 0 {
-		t.Fatalf("expected empty NACK tips, got %v", nack.Tips)
+	// And we should not have acquired any index entry from the peer's
+	// subscription either — the gate must prevent that.
+	if e.index.Contains("newkey") != nil {
+		t.Fatal("gate let the peer's subscription tip enter our index for a no-authority key")
 	}
 }
 

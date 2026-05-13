@@ -249,6 +249,26 @@ func NewEngine(cfg EngineConfig) *Engine {
 	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
 		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
 	})
+	// Pin cluster-operational keys (any "__swytch:" prefix). Membership,
+	// pubsub channel routing, pubsub pattern routing, and any future
+	// system-owned key shares this namespace. Eviction of one of these
+	// effects silently breaks cluster invariants (index claims a tip
+	// we no longer hold bytes for), so the cache must skip them
+	// during victim selection.
+	e.effectCache.SetEvictDecider(func(_ keytrie.EffectRef, eff *pb.Effect) bool {
+		if eff == nil {
+			return true
+		}
+		return !bytes.HasPrefix(eff.Key, []byte("__swytch:"))
+	})
+	// After-eviction hook: the cache lost the bytes for an effect, so
+	// the local index can no longer honestly claim authority over its
+	// tip. Drop the key + unsubscribe cluster-wide. Dispatched on a
+	// fresh goroutine because evictNotify runs under shard.mu and
+	// handleEviction takes other locks + does a network broadcast.
+	e.effectCache.SetEvictNotify(func(ref keytrie.EffectRef, eff *pb.Effect) {
+		go e.handleEviction(ref, eff)
+	})
 	e.cache = cache
 
 	// Percent-based memory limit: delegate to cloxcache's live
@@ -510,6 +530,36 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 			e.OnPubSubMessage(msg.Channel, msg.Payload)
 		}
 		return nil, nil
+	}
+
+	// Authority gate: drop inbound effects for keys this node has no
+	// authority over. Without this, a peer that hasn't received our
+	// local handleEviction-driven unsubscribe (or a peer that pushed
+	// pre-emptively) would resurrect the dropped key — the effect
+	// would land in the cache, the index would re-form, and the
+	// invariant (tip ⇒ fetchable bytes cluster-wide) could break
+	// again on the next eviction round.
+	//
+	// Authority means either:
+	//   - subscriptions has the key (we declared interest via
+	//     ensureSubscribed), or
+	//   - the index already has tips for the key (we've emitted
+	//     non-tx writes locally; Flush updates the index without
+	//     touching subscriptions).
+	//
+	// handleEviction clears both, so post-eviction the gate stays
+	// honest. "__swytch:" keys bypass the gate: cluster-operational
+	// and may arrive before the local node has subscribed (e.g. a
+	// joiner receiving __swytch:members before its own
+	// ensureSubscribed runs).
+	if !bytes.HasPrefix(eff.Key, []byte("__swytch:")) {
+		key := string(eff.Key)
+		_, subscribed := e.subscriptions.Load(key)
+		if !subscribed && e.index.Contains(key) == nil {
+			slog.Debug("HandleRemote: dropping notify for key with no local authority",
+				"key", key, "offset", notify.Origin)
+			return nil, nil
+		}
 	}
 
 	// Validate fork_choice_hash: must be present and correct on all effects.
@@ -1058,6 +1108,72 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	}
 
 	return nack
+}
+
+// handleEviction is invoked once per cache eviction (ghost-conversion
+// or full unlink) on a fresh goroutine. The cache lost the bytes
+// behind the evicted Tip, so the local index can no longer honestly
+// claim authority over it. Drop the key locally and send a
+// fire-and-forget unsubscribe so peers stop pushing writes for it.
+// Future reads of the key will re-subscribe and bootstrap fresh; if
+// nobody holds the bytes the key reads as non-existent — eventually
+// consistent self-cleanup.
+//
+// Keys with the "__swytch:" prefix should never reach this path
+// (evictDecider pins them); a warning is logged if it happens since
+// it indicates a broken pin invariant.
+func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
+	if e.closed.Load() {
+		return
+	}
+	if evictedEffect == nil {
+		return
+	}
+	if bytes.HasPrefix(evictedEffect.Key, []byte("__swytch:")) {
+		slog.Warn("handleEviction: __swytch: key evicted; pin invariant violated",
+			"key", string(evictedEffect.Key), "ref", evictedRef)
+		return
+	}
+
+	key := string(evictedEffect.Key)
+
+	// Wire-level unsubscribe so peers stop sending notifies for this
+	// key. Pure control message — no causal anchoring, no Flush. If
+	// it gets dropped, peers' notifies will still be rejected by the
+	// inbound subscription gate (HandleRemote) until something
+	// re-subscribes locally.
+	if e.broadcaster != nil {
+		hlc := timestamppb.New(e.clock.Now())
+		unsub := &pb.Effect{
+			Key:            []byte(key),
+			Hlc:            hlc,
+			NodeId:         uint64(e.nodeID),
+			ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+			Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+				SubscriberNodeId: uint64(e.nodeID),
+				Unsubscribe:      true,
+			}},
+		}
+		if data, err := MarshalEffect(unsub); err == nil {
+			notify := BuildOffsetNotify(e.nodeID, Tip{uint64(e.nodeID), uint64(hlc.Seconds)}, unsub, data, nil)
+			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
+		} else {
+			slog.Debug("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
+		}
+	}
+
+	// Drop local subscription state. Future ensureSubscribed for this
+	// key will re-bootstrap from peers; a later Emit re-asserts
+	// subscription naturally.
+	e.subscriptions.Delete(key)
+
+	// Drop the key from the local index entirely. Remaining cached
+	// effects for this key become unreferenced and will be evicted
+	// under future pressure.
+	e.index.Delete(key)
+
+	slog.Debug("handleEviction: dropped key and unsubscribed",
+		"key", key, "ref", evictedRef)
 }
 
 // Close performs graceful shutdown of the engine and its background components.
