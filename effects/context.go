@@ -712,18 +712,12 @@ func (c *Context) flushTx() error {
 		}
 	}
 
-	// Step 0.75: Pre-flight staleness check. Protocol invariant: once
-	// this node ACKs (or NACKs) a remote bind on key K, it must not
-	// emit its own bind consuming any tip that remote bind consumed.
-	// The per-key striped lock held by the caller serialises this
-	// flush against HandleRemote, so any remote bind on one of our
-	// keys has either been indexed already or hasn't been observed
-	// at all. If any of our initialTips is no longer a current tip,
-	// a remote bind has already consumed it locally — we're past
-	// the ACK/NACK commit point and the invariant forbids us from
-	// emitting. Abort without running fork-choice; that arbiter is
-	// reserved for truly concurrent competitors that neither side
-	// has observed yet.
+	// Protocol invariant: once this node has observed a remote bind on
+	// key K, it must not emit its own bind consuming any tip that remote
+	// bind consumed. If any of our initialTips is no longer a current
+	// tip, a remote bind has already consumed it locally — abort without
+	// running fork-choice; that arbiter is reserved for truly concurrent
+	// competitors that neither side has observed yet.
 	for key, ck := range c.keys {
 		if ck.initialTips == nil {
 			continue // first write to a brand-new key

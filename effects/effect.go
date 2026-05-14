@@ -654,11 +654,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		"key", key, "offset", notify.Origin.Offset,
 		"deps", eff.Deps)
 
-	// Use the per-key striped lock (same lock the redis handler holds
-	// during command execution) so we can safely read-modify-write the
-	// tip set without CAS loops.
-	mu := e.GetLock(key)
-	mu.Lock()
 	initialTips := e.index.Contains(key)
 
 	// Consume deps: any dep that is a current tip becomes an ancestor.
@@ -676,7 +671,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	}
 
 	e.updateIndex(key, nil, r(notify.Origin))
-	mu.Unlock()
 
 	// Bind effects must be indexed under ALL keys they touch, not just
 	// the canonical key. Otherwise NACKs for non-canonical keys won't
@@ -1202,17 +1196,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 		return
 	}
 	defer e.unsubInFlight.Delete(key)
-
-	// Take the per-key striped lock for the whole critical section
-	// (read tips → build unsub → broadcast → drop index). Every other
-	// index writer for the key (HandleRemote, flushNonTx/flushTx via
-	// updateIndex) serializes on this same lock, so a concurrent
-	// local Emit can't insert a tip between our snapshot and our
-	// Delete — which would otherwise leave the new tip in our index
-	// after we've already told peers we're unsubscribing.
-	mu := e.GetLock(key)
-	mu.Lock()
-	defer mu.Unlock()
 
 	tipSet := e.index.Contains(key)
 	if tipSet == nil {
