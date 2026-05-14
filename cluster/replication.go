@@ -542,15 +542,7 @@ func (r *Replicator) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targe
 
 	RecordNotificationSent()
 
-	// Wait for ACK or NACK response
 	if err := future.Wait(); err != nil {
-		if errors.Is(err, ErrReplicationTimeout) {
-			if ph := r.healthTable.Get(targetPeerID); ph != nil {
-				slog.Warn("ReplicateTo: peer timed out, marking dead",
-					"peer", targetPeerID)
-				ph.alive.Store(false)
-			}
-		}
 		return nil, err
 	}
 
