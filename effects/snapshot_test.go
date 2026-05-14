@@ -2389,3 +2389,400 @@ func TestGetSnapshot_ManyForksAndMerges(t *testing.T) {
 		t.Fatalf("expected %d, got %d", totalIncrements, r.Scalar.GetIntVal())
 	}
 }
+
+// TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro reproduces the first G1a
+// anomaly from Jepsen run 25887292245.
+//
+// Reader 10.0.0.69 reconstructed el-3 at 21:44:18.732866 and returned
+// [48, 53] — but the writer of `53` had already aborted (watch-conflict)
+// because its bind lost a fork-choice race on el-2 against a concurrent
+// bind from a third node. The aborted bind's effects MUST NOT surface in
+// the reader's reconstruction; the verdict must be derivable from DAG +
+// fork-choice alone (no abort propagation).
+//
+// Setup mirrors the reader's DAG at the moment of the dirty read:
+//
+//	el-3 tip: bind X = {…81326252873, 28}
+//	  ↳ X.deps include xDataEl3 = {…81326252873, 27} ("53")
+//	  ↳ chain → xPrev = {…81326252873, 21} ("48", pre-X commit)
+//	el-2 tips: { bind X, bind Y }
+//	  bind Y = {…83178718270, 20} (competitor, lower hash → wins)
+//	  bind X's NewTip on el-2 = xDataEl2 = {…81326252873, 26} ("52")
+//
+// bindKeyClosure(el-3) must expand to {el-3, el-2} (bind X touches both).
+// losersOnKey(el-2) must pair-wise hash-compare X vs Y; X loses.
+// Atomic-across-keys: X is in the loser set on el-3 too → its data
+// effects (including "53") are skipped.
+//
+// Expected reconstruction of el-3: ["48"], not ["48", "53"].
+func TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	// Node IDs lifted verbatim from the failing run.
+	const (
+		nodeWriter     uint64 = 7639866581326252873 // 10.0.0.206 — emits bind X
+		nodeCompetitor uint64 = 7639866583178718270 // 10.0.2.228 — emits bind Y
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	// Hashes chosen so Y < X (so X loses fork choice on el-2).
+	xHash := []byte{0xff, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	yHash := []byte{0x00, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ForkChoiceLess(yHash, xHash) {
+		t.Fatalf("test setup: expected Y < X by hash")
+	}
+
+	// Pre-existing committed element "48" on el-3 (a normal, non-tx data
+	// effect). This is the value reads should still see after X aborts.
+	xPrev := putAt(Tip{nodeWriter, 21}, &pb.Effect{
+		Key: []byte("el-3"), Hlc: sTs(100), NodeId: nodeWriter,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-3:48", []byte("48"))},
+	})
+
+	// Bind X's tx-marked data effects.
+	txnX := "txn-X"
+	xDataEl2 := putAt(Tip{nodeWriter, 26}, &pb.Effect{
+		Key:   []byte("el-2"),
+		Hlc:   sTs(200),
+		NodeId: nodeWriter,
+		TxnId: txnX,
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-2:52", []byte("52"))},
+	})
+	xDataEl3 := putAt(Tip{nodeWriter, 27}, &pb.Effect{
+		Key:   []byte("el-3"),
+		Hlc:   sTs(210),
+		NodeId: nodeWriter,
+		TxnId: txnX,
+		Deps:  []*pb.EffectRef{toPbRef(xPrev)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-3:53", []byte("53"))},
+	})
+
+	// Bind X itself. NewTip per key: el-2 → xDataEl2, el-3 → xDataEl3.
+	// Indexed under both keys; first key (el-3) is canonical.
+	xBind := putAt(Tip{nodeWriter, 28}, &pb.Effect{
+		Key:            []byte("el-3"),
+		Hlc:            sTs(220),
+		NodeId:         nodeWriter,
+		TxnId:          txnX,
+		ForkChoiceHash: xHash,
+		Deps:           []*pb.EffectRef{toPbRef(xDataEl2), toPbRef(xDataEl3)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(220),
+			OriginatorNodeId: nodeWriter,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: toPbRef(xDataEl2)},
+				{Key: []byte("el-3"), NewTip: toPbRef(xDataEl3)},
+			},
+		}},
+	})
+
+	// Bind Y: concurrent with X on el-2 (no DAG dep either direction),
+	// lower hash so wins fork-choice on el-2.
+	txnY := "txn-Y"
+	yBind := putAt(Tip{nodeCompetitor, 20}, &pb.Effect{
+		Key:            []byte("el-2"),
+		Hlc:            sTs(150),
+		NodeId:         nodeCompetitor,
+		TxnId:          txnY,
+		ForkChoiceHash: yHash,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(150),
+			OriginatorNodeId: nodeCompetitor,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: &pb.EffectRef{NodeId: nodeCompetitor, Offset: 20}},
+			},
+		}},
+	})
+
+	// Index reflects the reader's state at .732866:
+	//   el-3 tip: xBind (bind X)
+	//   el-2 tips: {xBind (cross-key indexed), yBind}
+	e.index.Insert("el-3", nil, keytrie.NewTipSet(xBind))
+	e.index.Insert("el-2", nil, keytrie.NewTipSet(xBind, yBind))
+
+	r, _, _, err := e.GetSnapshot("el-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := orderedValues(r)
+	if slices.Contains(got, "53") {
+		t.Fatalf("G1a: aborted bind X's effect '53' visible in el-3 reconstruction: %v", got)
+	}
+	if !slices.Contains(got, "48") {
+		t.Fatalf("expected baseline '48' to be visible in el-3 reconstruction, got %v", got)
+	}
+}
+
+// TestLosersOnKey_TwoConcurrentBindsLowerHashWins is the unit-level
+// counterpart of TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro: it
+// pokes losersOnKey directly with two concurrent binds on a single key
+// and asserts the higher-hash bind is in the loser set.
+func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeA uint64 = 7639866581326252873
+		nodeB uint64 = 7639866583178718270
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	hashHigh := []byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	hashLow := []byte{0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+
+	bindHi := putAt(Tip{nodeA, 28}, &pb.Effect{
+		Key:            []byte("el-2"),
+		Hlc:            sTs(220),
+		NodeId:         nodeA,
+		TxnId:          "txn-hi",
+		ForkChoiceHash: hashHigh,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(220),
+			OriginatorNodeId: nodeA,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: &pb.EffectRef{NodeId: nodeA, Offset: 28}},
+			},
+		}},
+	})
+	bindLo := putAt(Tip{nodeB, 20}, &pb.Effect{
+		Key:            []byte("el-2"),
+		Hlc:            sTs(150),
+		NodeId:         nodeB,
+		TxnId:          "txn-lo",
+		ForkChoiceHash: hashLow,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(150),
+			OriginatorNodeId: nodeB,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: &pb.EffectRef{NodeId: nodeB, Offset: 20}},
+			},
+		}},
+	})
+
+	e.index.Insert("el-2", nil, keytrie.NewTipSet(bindHi, bindLo))
+
+	losers := e.losersOnKey("el-2")
+	if _, ok := losers["txn-hi"]; !ok {
+		t.Fatalf("expected higher-hash bind 'txn-hi' to be in losers, got %v", losers)
+	}
+	if _, ok := losers["txn-lo"]; ok {
+		t.Fatalf("lower-hash bind 'txn-lo' should not be in losers, got %v", losers)
+	}
+}
+
+// TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip reproduces the
+// el-2 chain shape from Jepsen run 25887292245 with the actual deps:
+//
+//	Y (node nodeB): 9 → 10(tx) → 11(tx) → 12(N) → 14(tx) → 16(tx) → 17(tx) → bind 20
+//	  Y.NewTip on el-2 = {nodeB, 17}
+//	X (node nodeA): 19(N, deps include nodeB:{7,14,16}) → 22(tx) → 25(tx) → 26(tx) → bind 28
+//	  X.NewTip on el-2 = {nodeA, 26}
+//
+// X's chain transitively pulls in some of Y's tx data effects (14, 16)
+// via X's 19 deps, but never reaches Y.NewTip=17. The reaches() check
+// in losersOnKey should therefore correctly classify X and Y as
+// concurrent on el-2, and pairwise fork-choice (X.hash > Y.hash)
+// should mark X as a loser.
+//
+// Production observed: 53 (X's append on el-3) appears in every read
+// after the dirty read. If this test passes (X marked loser), the bug
+// is NOT in the algorithm we modeled — it's in the data the production
+// reader had vs. what we assumed.
+func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeA uint64 = 7639866581326252873 // writer / X
+		nodeB uint64 = 7639866583178718270 // competitor / Y
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	// Y's chain on el-2 (originator: nodeB).
+	yRoot := putAt(Tip{nodeB, 9}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(50), NodeId: nodeB,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-root", []byte("y-root"))},
+	})
+	y10 := putAt(Tip{nodeB, 10}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(51), NodeId: nodeB,
+		TxnId: "txn-Y", Deps: []*pb.EffectRef{toPbRef(yRoot)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-10", []byte("y-10"))},
+	})
+	y11 := putAt(Tip{nodeB, 11}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(52), NodeId: nodeB,
+		TxnId: "txn-Y", Deps: []*pb.EffectRef{toPbRef(y10)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-11", []byte("y-11"))},
+	})
+	y12 := putAt(Tip{nodeB, 12}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(53), NodeId: nodeB,
+		Deps: []*pb.EffectRef{toPbRef(y11)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-12", []byte("y-12"))},
+	})
+	y14 := putAt(Tip{nodeB, 14}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(54), NodeId: nodeB,
+		TxnId: "txn-Y", Deps: []*pb.EffectRef{toPbRef(y12)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-14", []byte("y-14"))},
+	})
+	y16 := putAt(Tip{nodeB, 16}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(55), NodeId: nodeB,
+		TxnId: "txn-Y", Deps: []*pb.EffectRef{toPbRef(y14)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-16", []byte("y-16"))},
+	})
+	y17 := putAt(Tip{nodeB, 17}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(56), NodeId: nodeB,
+		TxnId: "txn-Y", Deps: []*pb.EffectRef{toPbRef(y16)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-17", []byte("y-17"))},
+	})
+
+	// Bind Y: NewTip on el-2 = y17. Deps = [y17] (and Y's other-key
+	// effects, omitted since they don't affect el-2's reachability).
+	yHash := []byte{0x00, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	yBind := putAt(Tip{nodeB, 20}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(60), NodeId: nodeB,
+		TxnId:          "txn-Y",
+		ForkChoiceHash: yHash,
+		Deps:           []*pb.EffectRef{toPbRef(y17)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(60),
+			OriginatorNodeId: nodeB,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: toPbRef(y17)},
+			},
+		}},
+	})
+
+	// X's chain on el-2: 19(N, deps spanning {nodeB:7,14,16}) → 22(tx) → 25(tx) → 26(tx).
+	// y7 needs to exist as a referenced effect for BFS to not error.
+	y7 := putAt(Tip{nodeB, 7}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(40), NodeId: nodeB,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "y-7", []byte("y-7"))},
+	})
+	x19 := putAt(Tip{nodeA, 19}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(70), NodeId: nodeA,
+		Deps: []*pb.EffectRef{toPbRef(y7), toPbRef(y14), toPbRef(y16)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "x-19", []byte("x-19"))},
+	})
+	x22 := putAt(Tip{nodeA, 22}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(71), NodeId: nodeA,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x19)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "x-22", []byte("x-22"))},
+	})
+	x25 := putAt(Tip{nodeA, 25}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(72), NodeId: nodeA,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x22)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "x-25", []byte("x-25"))},
+	})
+	x26 := putAt(Tip{nodeA, 26}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(73), NodeId: nodeA,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x25)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "x-26-52", []byte("52"))},
+	})
+
+	// Bind X: NewTip on el-2 = x26, NewTip on el-3 (placeholder) omitted
+	// since this test only inspects el-2.
+	xHash := []byte{0xff, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ForkChoiceLess(yHash, xHash) {
+		t.Fatalf("test setup: expected Y.hash < X.hash")
+	}
+	xBind := putAt(Tip{nodeA, 28}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(80), NodeId: nodeA,
+		TxnId:          "txn-X",
+		ForkChoiceHash: xHash,
+		Deps:           []*pb.EffectRef{toPbRef(x26)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(80),
+			OriginatorNodeId: nodeA,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: toPbRef(x26)},
+			},
+		}},
+	})
+
+	// Tips on el-2 mirror what the reader had at .732928:
+	// {nodeB:10, nodeB:20=yBind, nodeA:26=x26 (still a tip — bind 28 didn't
+	// consume it because X.ConsumedTips on el-2 didn't include it), nodeA:28=xBind}.
+	e.index.Insert("el-2", nil, keytrie.NewTipSet(Tip{nodeB, 10}, yBind, x26, xBind))
+
+	losers := e.losersOnKey("el-2")
+	t.Logf("losersOnKey(el-2) returned: %v", losers)
+	if _, ok := losers["txn-X"]; !ok {
+		t.Fatalf("expected X (txn-X) to be marked as loser; production observed 53 surfacing on el-3 means X must be a loser on el-2. Got losers=%v", losers)
+	}
+	if _, ok := losers["txn-Y"]; ok {
+		t.Fatalf("Y (txn-Y) should NOT be a loser (it has the lower hash). Got losers=%v", losers)
+	}
+}
+
+// TestBindKeyClosure_ExpandsViaBindKeysField asserts bindKeyClosure
+// follows a bind's Keys list, so a reconstruction on one key picks up
+// loser verdicts on every key the bind touches.
+func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const nodeA uint64 = 7639866581326252873
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	// Bind X touches el-2, el-3, el-4 (the actual Jepsen txn shape).
+	bind := putAt(Tip{nodeA, 28}, &pb.Effect{
+		Key:    []byte("el-3"),
+		Hlc:    sTs(220),
+		NodeId: nodeA,
+		TxnId:  "txn-X",
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(220),
+			OriginatorNodeId: nodeA,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-2"), NewTip: &pb.EffectRef{NodeId: nodeA, Offset: 26}},
+				{Key: []byte("el-3"), NewTip: &pb.EffectRef{NodeId: nodeA, Offset: 27}},
+				{Key: []byte("el-4"), NewTip: &pb.EffectRef{NodeId: nodeA, Offset: 23}},
+			},
+		}},
+	})
+	e.index.Insert("el-3", nil, keytrie.NewTipSet(bind))
+
+	closure := e.bindKeyClosure("el-3")
+	for _, want := range []string{"el-2", "el-3", "el-4"} {
+		if _, ok := closure[want]; !ok {
+			t.Fatalf("bindKeyClosure(el-3) missing %q; got %v", want, closure)
+		}
+	}
+}

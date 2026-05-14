@@ -432,6 +432,20 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			atomicallyLost[txnID] = struct{}{}
 		}
 	}
+	if len(expandKeys) > 1 || len(atomicallyLost) > 0 {
+		closure := make([]string, 0, len(expandKeys))
+		for k := range expandKeys {
+			closure = append(closure, k)
+		}
+		lost := make([]string, 0, len(atomicallyLost))
+		for txn := range atomicallyLost {
+			lost = append(lost, txn)
+		}
+		slog.Debug("reconstruct: cross-key closure",
+			"key", key,
+			"closure", closure,
+			"atomically_lost", lost)
+	}
 
 	d := newDag(e, key, txID)
 
@@ -459,14 +473,18 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 
 		if bind := eff.GetTxnBind(); bind != nil {
 			if isInvisible != nil && isInvisible(eff.TxnId) {
+				slog.Debug("reconstruct: skip bind (invisible)", "key", key, "txn", eff.TxnId)
 				return nil
 			}
 			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
+				slog.Debug("reconstruct: skip bind (voided)", "key", key, "txn", eff.TxnId)
 				return nil
 			}
 			if _, lost := atomicallyLost[eff.TxnId]; lost {
+				slog.Debug("reconstruct: skip bind (atomically lost)", "key", key, "txn", eff.TxnId)
 				return nil
 			}
+			slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
 			bindEffects, fetchErr := e.collectBindEffects(eff, key)
 			if fetchErr != nil {
 				return fetchErr
@@ -748,6 +766,24 @@ func (e *Engine) losersOnKey(key string) map[string]struct{} {
 	}
 	if err != nil {
 		slog.Debug("losersOnKey: walk failed", "key", key, "error", err)
+	}
+	if len(binds) > 0 {
+		seen := make([]string, 0, len(binds))
+		for _, b := range binds {
+			hashPrefix := ""
+			if len(b.hash) >= 4 {
+				hashPrefix = fmt.Sprintf("%x", b.hash[:4])
+			}
+			seen = append(seen, fmt.Sprintf("%s@%v#%s", b.txnID, b.newTip, hashPrefix))
+		}
+		loserList := make([]string, 0, len(losers))
+		for txn := range losers {
+			loserList = append(loserList, txn)
+		}
+		slog.Debug("losersOnKey: verdict",
+			"key", key,
+			"binds_seen", seen,
+			"losers", loserList)
 	}
 	return losers
 }
