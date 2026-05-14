@@ -22,6 +22,7 @@ package effects
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1421,6 +1422,77 @@ func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 	}
 	if !flushFired {
 		t.Fatal("OnFlushAll callback did not fire")
+	}
+}
+
+// TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey asserts that a
+// remote bind passes the authority gate when the receiver has authority
+// over any touched key, not only the canonical first key. flushTx sets
+// bindEff.Key = bind.Keys[0].Key but collectSubscribers replicates the
+// bind to peers subscribed to any touched key; pre-fix the gate checked
+// only eff.Key, so a peer subscribed to a later key but not the
+// canonical key dropped the bind and missed committed transactions for
+// keys it was authoritative over.
+func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
+	log := newSnapshotLog()
+	bc := &mockBroadcaster{}
+	e := &Engine{
+		effectCache:       log.effectCache,
+		index:             keytrie.New(),
+		broadcaster:       bc,
+		nodeID:            1,
+		clock:             crdt.NewHLC(),
+		subscriptions:     xsync.NewMap[string, *subscriptionState](),
+		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
+		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
+		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
+		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+	}
+	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
+
+	// Subscribed only to "B" (non-canonical). No subscription, no
+	// index entry for "A" (canonical) — pre-fix this configuration
+	// triggers the gate drop.
+	e.subscriptions.Store("B", &subscriptionState{ready: make(chan struct{})})
+
+	bindOffset := Tip{2, 7000}
+	bind := &pb.TransactionalBindEffect{
+		TxnHlc:           sTs(40),
+		OriginatorNodeId: 2,
+		Keys: []*pb.TransactionalBindEffect_KeyBind{
+			{Key: []byte("A"), NewTip: &pb.EffectRef{NodeId: 2, Offset: 6998}},
+			{Key: []byte("B"), NewTip: &pb.EffectRef{NodeId: 2, Offset: 6999}},
+		},
+	}
+	bindEff := &pb.Effect{
+		Key:            []byte("A"),
+		Hlc:            sTs(40),
+		NodeId:         2,
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(40)),
+		TxnId:          "2:40:1",
+		Kind:           &pb.Effect_TxnBind{TxnBind: bind},
+	}
+	data, _ := proto.Marshal(bindEff)
+	notify := BuildOffsetNotify(2, bindOffset, bindEff, data, nil)
+
+	nacks, err := e.HandleRemote(notify)
+	if err != nil {
+		t.Fatalf("expected gate to bypass via non-canonical key authority, got %v", err)
+	}
+	if len(nacks) != 0 {
+		t.Fatalf("expected 0 NACKs (no divergence), got %d", len(nacks))
+	}
+
+	// The bind must be indexed under "B" — the key we have authority
+	// over and the reason we received the bind in the first place.
+	tipsB := e.index.Contains("B")
+	if tipsB == nil {
+		t.Fatal("bind not indexed under 'B' (the authoritative key)")
+	}
+	if !slices.Contains(tipsB.Tips(), bindOffset) {
+		t.Fatalf("bind offset %v missing from 'B' tips: %v", bindOffset, tipsB.Tips())
 	}
 }
 

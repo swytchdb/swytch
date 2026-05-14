@@ -584,10 +584,29 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// a brand-new key has no authority anywhere, and ensureSubscribed
 	// would loop until every peer was marked dead if the drop signal
 	// applied here.
+	//
+	// TxnBinds touch multiple keys; collectSubscribers replicates them
+	// to peers subscribed to any touched key. The gate must therefore
+	// accept the bind when authority holds for any key in bind.Keys,
+	// not just eff.Key (the canonical first key).
 	if !isSystemKey(eff.Key) {
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
-		if !subscribed && e.index.Contains(key) == nil {
+		authoritative := subscribed || e.index.Contains(key) != nil
+
+		if !authoritative {
+			if bind := eff.GetTxnBind(); bind != nil {
+				for _, kb := range bind.Keys {
+					kbKey := string(kb.Key)
+					if _, sub := e.subscriptions.Load(kbKey); sub || e.index.Contains(kbKey) != nil {
+						authoritative = true
+						break
+					}
+				}
+			}
+		}
+
+		if !authoritative {
 			if sub := eff.GetSubscription(); sub != nil {
 				slog.Debug("HandleRemote: empty bootstrap response for no-authority subscription",
 					"key", key, "offset", notify.Origin, "unsubscribe", sub.Unsubscribe)
