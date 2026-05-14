@@ -20,8 +20,6 @@
 package effects
 
 import (
-	"time"
-
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 )
@@ -55,7 +53,6 @@ type EngineConfig struct {
 	// precedence over MemoryLimit. The cache enforces this via a live
 	// re-evaluating tick so cgroup/system changes propagate.
 	MemoryLimitPercent float64
-	HorizonTimeout     time.Duration // horizon wait for bind visibility (0 = 500ms default)
 }
 
 // ModeForKey returns the safety mode for a key. First matching rule wins.

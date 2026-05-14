@@ -321,11 +321,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	})
 
 	if cfg.Broadcaster != nil {
-		timeout := cfg.HorizonTimeout
-		if timeout <= 0 {
-			timeout = 500 * time.Millisecond
-		}
-		e.horizon = newHorizonSet(e, timeout)
+		e.horizon = newHorizonSet(e)
 	}
 
 	return e
@@ -376,7 +372,7 @@ func (e *Engine) EffectCache() *clox.CloxCache[Tip, *pb.Effect] {
 func (e *Engine) SetBroadcaster(b Broadcaster) {
 	e.broadcaster = b
 	if e.horizon == nil && b != nil {
-		e.horizon = newHorizonSet(e, 500*time.Millisecond)
+		e.horizon = newHorizonSet(e)
 	}
 }
 
@@ -815,14 +811,11 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 // handleRemoteBind processes a TransactionalBindEffect received remotely.
 func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset Tip, txnID string) {
 	if e.horizon != nil {
-		// Defer visibility: add to horizon set instead of deleting pendingTxTips.
-		// The wait scopes to all alive peers — any of them could hold a
-		// competing bind we haven't received yet.
-		var peers []pb.NodeID
-		if e.broadcaster != nil {
-			peers = e.broadcaster.PeerIDs()
-		}
-		e.horizon.Add(txnID, bindOffset, bind, peers)
+		// Remote-arrival: we're the responder, not the originator. There are
+		// no peer ACKs/NACKs we're waiting on for this bind, so peerCount=0.
+		// If this bind overlaps an existing local group still waiting for
+		// its own responses, it joins that group and rides the same wait.
+		e.horizon.Add(txnID, bindOffset, bind, 0)
 	} else {
 		// Standalone: remove bound key tips from pendingTxTips immediately
 		for _, kb := range bind.Keys {
@@ -1239,9 +1232,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 // Close performs graceful shutdown of the engine and its background components.
 func (e *Engine) Close() error {
 	e.closed.Store(true)
-	if e.horizon != nil {
-		e.horizon.StopAll()
-	}
 	if e.antiEntropyStop != nil {
 		close(e.antiEntropyStop)
 		e.antiEntropyWg.Wait()

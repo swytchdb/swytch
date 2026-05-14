@@ -20,7 +20,6 @@
 package effects
 
 import (
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,30 +47,8 @@ func newHorizonTestEngine() *Engine {
 		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
-	e.horizon = newHorizonSet(e, 500*time.Millisecond)
+	e.horizon = newHorizonSet(e)
 	return e
-}
-
-// installFakeTimers replaces timer creation with a controllable fire function.
-func installFakeTimers(h *HorizonSet) func() {
-	var mu sync.Mutex
-	var fns []func()
-
-	h.afterFunc = func(d time.Duration, f func()) *time.Timer {
-		mu.Lock()
-		fns = append(fns, f)
-		mu.Unlock()
-		return time.NewTimer(time.Hour) // never fires
-	}
-
-	return func() {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, f := range fns {
-			f()
-		}
-		fns = nil
-	}
 }
 
 func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
@@ -103,27 +80,38 @@ func testBind(consumedTips []*pb.EffectRef, newTip *pb.EffectRef) *pb.Transactio
 	}
 }
 
-func TestHorizonSet_AddMakesInvisible(t *testing.T) {
+func TestHorizonSet_AddWithPeersMakesInvisible(t *testing.T) {
 	e := newHorizonTestEngine()
-	fireTimer := installFakeTimers(e.horizon)
-	_ = fireTimer
 
 	bind := testBind(
 		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
 
 	if !e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be invisible after Add")
+		t.Fatal("tx1 should be invisible after Add with peerCount > 0")
+	}
+}
+
+func TestHorizonSet_AddWithZeroPeersImmediatelyVisible(t *testing.T) {
+	e := newHorizonTestEngine()
+
+	bind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 20},
+	)
+
+	e.horizon.Add("tx1", Tip{1, 30}, bind, 0)
+
+	if e.horizon.IsInvisible("tx1") {
+		t.Fatal("tx1 should be visible immediately when peerCount=0")
 	}
 }
 
 func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 	e := newHorizonTestEngine()
-	fireTimer := installFakeTimers(e.horizon)
-	_ = fireTimer
 
 	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
 
@@ -132,7 +120,7 @@ func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
 	e.horizon.MakeVisible("tx1")
 
 	if e.horizon.IsInvisible("tx1") {
@@ -144,9 +132,8 @@ func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 	}
 }
 
-func TestHorizonSet_TimerFiresMakesVisible(t *testing.T) {
+func TestHorizonSet_ResponseFiresMakeVisibleAtZero(t *testing.T) {
 	e := newHorizonTestEngine()
-	fireTimer := installFakeTimers(e.horizon)
 
 	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
 
@@ -155,19 +142,23 @@ func TestHorizonSet_TimerFiresMakesVisible(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
 
 	if !e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be invisible before timer fires")
+		t.Fatal("tx1 should be invisible before any Response")
 	}
 
-	fireTimer()
+	e.horizon.Response("tx1")
+	if !e.horizon.IsInvisible("tx1") {
+		t.Fatal("tx1 should still be invisible after 1 of 2 Responses")
+	}
 
+	e.horizon.Response("tx1")
 	if e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be visible after timer fires")
+		t.Fatal("tx1 should be visible after final Response")
 	}
 
 	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
-		t.Fatal("pendingTxTips should be cleaned after timer fires")
+		t.Fatal("pendingTxTips should be cleaned after final Response")
 	}
 }

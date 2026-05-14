@@ -110,33 +110,33 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 		return false
 	}
 
-	// Competing bind: only a conflict if they share a causal base on
-	// any overlapping key. Without shared consumed tips, the binds are
-	// independent and coexist — not competing.
+	// Competing bind: only a conflict if they share a causal base on any
+	// overlapping key. Two shapes count: symmetric (we both consumed the
+	// same tip) and asymmetric (we consumed a tx-marked offset belonging
+	// to their txn — we started extending the key while their tx was
+	// already in flight).
 	if detail.IsBind {
-		sharedKey, shared := nackBindSharedBaseKey(ptxn, detail)
+		theirBindOffset := r(detail.Ref)
+		var theirTxnID string
+		if theirEff, err := e.getEffect(theirBindOffset); err == nil {
+			theirTxnID = theirEff.TxnId
+		}
+		sharedKey, shared := e.nackBindSharedBaseKey(ptxn, detail, theirTxnID)
 		if !shared {
 			return false // different causal bases, not competing
 		}
-		// Predicate refinement: the peer will reach the same
-		// verdict via evaluateBindForkChoice when it processes the
-		// competing bind; we must get there too. Walk both sides'
-		// obs/rw on the shared key (the bind offset in detail.Ref
-		// is a valid entry point — allDeps inside the walker
-		// follows the bind's per-key NewTips). If either side
-		// lacks evidence, fall back to shared-base + tie-break.
-		theirBindOffset := r(detail.Ref)
-		if theirEff, err := e.getEffect(theirBindOffset); err == nil {
-			theirTxnID := theirEff.TxnId
-			if ptxn.txnID != "" && theirTxnID != "" {
-				ourStart := collectOurBindTips(ptxn, sharedKey)
-				conflict, bothHadEvidence := e.hasPredicateConflict(
-					ptxn.txnID, theirTxnID, sharedKey,
-					ourStart,
-					[]Tip{theirBindOffset})
-				if bothHadEvidence && !conflict {
-					return false // predicates don't intersect; not a real conflict
-				}
+		// Predicate refinement: the peer will reach the same verdict
+		// via evaluateBindForkChoice when it processes the competing
+		// bind; we must get there too. If either side lacks evidence,
+		// fall back to shared-base + tie-break.
+		if ptxn.txnID != "" && theirTxnID != "" {
+			ourStart := collectOurBindTips(ptxn, sharedKey)
+			conflict, bothHadEvidence := e.hasPredicateConflict(
+				ptxn.txnID, theirTxnID, sharedKey,
+				ourStart,
+				[]Tip{theirBindOffset})
+			if bothHadEvidence && !conflict {
+				return false // predicates don't intersect; not a real conflict
 			}
 		}
 		ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
@@ -178,11 +178,20 @@ func collectOurBindTips(ptxn *pendingTxn, key string) []Tip {
 	return tips
 }
 
-// nackBindSharedBaseKey returns the first key on which the NACK'd
-// bind shares a consumed tip with our pending tx, plus a boolean for
-// whether any shared base exists at all. Used by isRealConflict to
-// scope the predicate walk to the specific key where overlap lives.
-func nackBindSharedBaseKey(ptxn *pendingTxn, detail *pb.NackTipDetail) (string, bool) {
+// nackBindSharedBaseKey returns the first key on which the NACK'd bind
+// shares a causal base with our pending tx, plus a boolean for whether any
+// shared base exists at all. Two shapes count as shared:
+//
+//  1. Symmetric: their ConsumedTips and ours overlap on the same key —
+//     both binds extend from the same point.
+//  2. Asymmetric: one of our ConsumedTips on a key is a tx-marked offset
+//     belonging to their txn (we started extending the key while their
+//     tx was already in flight; our bind sits as a sibling of theirs
+//     under the shared parent).
+//
+// Used by isRealConflict to scope the predicate walk to the specific key
+// where overlap lives.
+func (e *Engine) nackBindSharedBaseKey(ptxn *pendingTxn, detail *pb.NackTipDetail, theirTxnID string) (string, bool) {
 	for _, kct := range detail.BindConsumedTips {
 		detailKey := string(kct.Key)
 		pk := findPendingKey(ptxn, detailKey)
@@ -196,6 +205,20 @@ func nackBindSharedBaseKey(ptxn *pendingTxn, detail *pb.NackTipDetail) (string, 
 		for _, ct := range kct.ConsumedTips {
 			if ourSet[r(ct)] {
 				return detailKey, true
+			}
+		}
+	}
+	if theirTxnID == "" {
+		return "", false
+	}
+	for _, pk := range ptxn.keys {
+		for _, ct := range pk.consumedTips {
+			ctEff, err := e.getEffect(ct)
+			if err != nil || ctEff.TxnId == "" {
+				continue
+			}
+			if ctEff.TxnId == theirTxnID {
+				return pk.key, true
 			}
 		}
 	}

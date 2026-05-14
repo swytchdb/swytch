@@ -428,6 +428,11 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		tips  []Tip // start tips for predicate collection
 	}
 	wonTips := make(map[Tip]wonBind)
+	// Asymmetric competition: when a later bind's ConsumedTips include
+	// any tx-marked offset whose TxnId belongs to an already-won bind,
+	// they're competing — the later bind started before the earlier one
+	// committed. Keyed by the owning bind's TxnId for direct lookup.
+	wonByTxnID := make(map[string]wonBind)
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
@@ -463,7 +468,9 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 				if string(kb.Key) == key {
 					consumed := fromPbRefs(kb.ConsumedTips)
 					newTip := r(kb.NewTip)
+					competed := false
 					for _, ct := range consumed {
+						// Symmetric: another bind already claimed this consumed tip.
 						if prev, competing := wonTips[ct]; competing {
 							if e != nil {
 								conflict, bothHadEvidence := e.hasPredicateConflict(
@@ -473,13 +480,40 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 									continue
 								}
 							}
-							return nil
+							competed = true
+							break
 						}
+						// Asymmetric: this consumed tip is a tx-marked
+						// offset of another in-flight txn whose bind has
+						// already been processed. We started before
+						// they committed; they're our competitor.
+						ctEff, err := e.getEffect(ct)
+						if err != nil || ctEff.TxnId == "" || ctEff.TxnId == eff.TxnId {
+							continue
+						}
+						prev, owned := wonByTxnID[ctEff.TxnId]
+						if !owned {
+							continue
+						}
+						if e != nil {
+							conflict, bothHadEvidence := e.hasPredicateConflict(
+								prev.txnID, eff.TxnId, key,
+								prev.tips, []Tip{newTip})
+							if bothHadEvidence && !conflict {
+								continue
+							}
+						}
+						competed = true
+						break
+					}
+					if competed {
+						return nil
 					}
 					wb := wonBind{txnID: eff.TxnId, tips: []Tip{newTip}}
 					for _, ct := range consumed {
 						wonTips[ct] = wb
 					}
+					wonByTxnID[eff.TxnId] = wb
 					break
 				}
 			}

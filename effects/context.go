@@ -960,14 +960,12 @@ func (c *Context) flushTx() error {
 				"bind_offset", bindOffset)
 			commitPendingTxn(ptxn)
 		} else {
-			// Peers exist — keep the bind invisible while we wait
-			// for ACK/NACK. MakeVisible is called once the wait
-			// resolves (below). Horizon timer is RTT-scaled over
-			// the subscriber set — it only needs to be long enough
-			// that a concurrent competing bind from any of these
-			// peers would have reached us.
+			// Peers exist — bind stays invisible until every peer the
+			// originator was waiting on has replied (ACK or NACK).
+			// HorizonSet tracks the count; each Response below decrements
+			// it. When it reaches zero the group's MakeVisible fires.
 			if c.engine.horizon != nil {
-				c.engine.horizon.Add(c.txnID, bindOffset, bind, subscribers)
+				c.engine.horizon.Add(c.txnID, bindOffset, bind, len(subscribers))
 			}
 			// Replicate to all subscribers concurrently, collect responses.
 			// Track successes — we need a majority to commit.
@@ -990,6 +988,9 @@ func (c *Context) flushTx() error {
 						"target", target)
 					nacks, err := c.engine.broadcaster.ReplicateTo(bindNotify, bindNotify.EffectData, target)
 					results[idx] = replicaResult{subID: target, nacks: nacks, err: err}
+					if c.engine.horizon != nil {
+						c.engine.horizon.Response(c.txnID)
+					}
 				}(i, subID)
 			}
 			wg.Wait()
@@ -1055,18 +1056,6 @@ func (c *Context) flushTx() error {
 						"acks", ackCount,
 						"subscribers", len(subscribers))
 					commitPendingTxn(ptxn)
-				}
-				// We've heard back from every peer we waited on (wg.Wait
-				// completed above) and decided to commit. The bind is
-				// no longer tentative from our perspective — it IS the
-				// commit decision we're about to tell the client about.
-				// Make it visible now so the client's immediate next
-				// read sees its own write. Leaving it horizon-invisible
-				// here (the old all-ACK-no-NACK gate) causes lost-update
-				// anomalies: client hears COMMIT, next read returns
-				// stale state because horizon timer hasn't fired.
-				if c.engine.horizon != nil {
-					c.engine.horizon.MakeVisible(c.txnID)
 				}
 			}
 		}
