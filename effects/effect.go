@@ -811,11 +811,19 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 // handleRemoteBind processes a TransactionalBindEffect received remotely.
 func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset Tip, txnID string) {
 	if e.horizon != nil {
-		// Remote-arrival: we're the responder, not the originator. There are
-		// no peer ACKs/NACKs we're waiting on for this bind, so peerCount=0.
-		// If this bind overlaps an existing local group still waiting for
-		// its own responses, it joins that group and rides the same wait.
-		e.horizon.Add(txnID, bindOffset, bind, 0)
+		// Remote-arrival: hold the bind invisible for ~1×RTT so any
+		// concurrently-broadcast competing bind has time to arrive at us
+		// before reads can observe this one. Without this wait, a reader
+		// sees the bind, then later a competitor arrives and reconstruct
+		// picks a different winner — the earlier read becomes a
+		// retroactive lie. The RTT is measured per-peer; we wait for the
+		// slowest currently-alive peer.
+		e.horizon.Add(txnID, bindOffset, bind)
+		var peers []pb.NodeID
+		if e.broadcaster != nil {
+			peers = e.broadcaster.PeerIDs()
+		}
+		e.horizon.ScheduleMakeVisible(txnID, e.horizon.computeHorizonWait(peers))
 	} else {
 		// Standalone: remove bound key tips from pendingTxTips immediately
 		for _, kb := range bind.Keys {

@@ -22,6 +22,7 @@ package effects
 import (
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -36,26 +37,30 @@ type horizonEntry struct {
 }
 
 // horizonGroup tracks a group of competing Binds that share at least one
-// consumed Tip on an overlapping key. The group is promoted when waitCount
-// reaches zero — i.e. every peer the originator was waiting on has replied
-// (ACK or NACK). A remote-arrival bind contributes 0 to the count.
+// consumed Tip on an overlapping key. Visibility is driven externally:
+// flushTx calls MakeVisible / Abort on the originator side; handleRemoteBind
+// schedules MakeVisible via ScheduleMakeVisible on the remote-arrival side
+// (1×RTT timer).
 type horizonGroup struct {
-	mu        sync.Mutex
-	entries   map[string]*horizonEntry // txnID → entry
-	bindKeys  map[string][]Tip         // key → consumed tips (for overlap detection)
-	allKeys   map[string]struct{}      // union of all keys in group
-	waitCount int                      // peer responses still pending
-	visible   bool
+	mu       sync.Mutex
+	entries  map[string]*horizonEntry // txnID → entry
+	bindKeys map[string][]Tip         // key → consumed tips (for overlap detection)
+	allKeys  map[string]struct{}      // union of all keys in group
+	timer    *time.Timer              // scheduled MakeVisible (remote-arrival path)
+	visible  bool
 }
 
 // HorizonSet tracks Binds in their horizon wait period. Effects from
 // invisible Binds are excluded from reconstruction until the horizon
-// completes (all expected peer responses received via Response).
+// completes.
 type HorizonSet struct {
 	entries *xsync.Map[string, *horizonEntry] // txnID → entry (fast lookup)
 	mu      sync.Mutex                        // protects group creation/merge
 	groups  []*horizonGroup                   // all active groups
 	engine  *Engine
+
+	// Test hook: if non-nil, called instead of time.AfterFunc.
+	afterFunc func(d time.Duration, f func()) *time.Timer
 }
 
 func newHorizonSet(engine *Engine) *HorizonSet {
@@ -65,15 +70,40 @@ func newHorizonSet(engine *Engine) *HorizonSet {
 	}
 }
 
-// Add registers a Bind in the invisible set. If the Bind's keys overlap
-// with an existing group (shared consumed tips), the Bind joins that group.
+// computeHorizonWait returns the duration the remote-arrival path should
+// hold a bind invisible before making it visible. Semantic: any competing
+// bind broadcast concurrently from another node reaches us within one
+// round-trip, so after 1×maxRTT we've seen anyone who's coming.
 //
-// peerCount is the number of ACK/NACK responses we will wait for before
-// this bind becomes visible. The originator passes the size of its replicate
-// fan-out; a remote-arrival bind passes 0 (it becomes visible the moment
-// it's added, unless it merges into a group that's still waiting for its
-// originator's responses).
-func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBindEffect, peerCount int) {
+// Falls back to a fixed duration when RTT data is unavailable.
+func (h *HorizonSet) computeHorizonWait(peers []pb.NodeID) time.Duration {
+	const fallback = 500 * time.Millisecond
+	if h.engine == nil || h.engine.rttProvider == nil || len(peers) == 0 {
+		return fallback
+	}
+	var maxRTT time.Duration
+	haveData := false
+	for _, p := range peers {
+		r := h.engine.rttProvider.GetRTT(p)
+		if r <= 0 {
+			continue
+		}
+		haveData = true
+		if r > maxRTT {
+			maxRTT = r
+		}
+	}
+	if !haveData {
+		return fallback
+	}
+	return maxRTT
+}
+
+// Add registers a Bind in the invisible set. The bind stays invisible
+// until MakeVisible, Abort, or a timer scheduled via ScheduleMakeVisible
+// fires. If the bind's keys overlap with an existing group's consumed tips,
+// it joins that group; otherwise a new group is created.
+func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBindEffect) {
 	consumedByKey := make(map[string][]Tip, len(bind.Keys))
 	newTips := make(map[string]Tip, len(bind.Keys))
 	allKeys := make(map[string]struct{}, len(bind.Keys))
@@ -129,7 +159,10 @@ func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBin
 			for k := range other.allKeys {
 				targetGroup.allKeys[k] = struct{}{}
 			}
-			targetGroup.waitCount += other.waitCount
+			if other.timer != nil {
+				other.timer.Stop()
+				other.timer = nil
+			}
 			other.visible = true // consumed
 			other.mu.Unlock()
 		}
@@ -146,36 +179,42 @@ func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBin
 	for k := range allKeys {
 		targetGroup.allKeys[k] = struct{}{}
 	}
-	targetGroup.waitCount += peerCount
-	shouldFire := targetGroup.waitCount <= 0
 	targetGroup.mu.Unlock()
 	h.mu.Unlock()
 
 	h.entries.Store(txnID, entry)
 
 	slog.Debug("HorizonSet.Add", "txnID", txnID, "bindOffset", bindOffset,
-		"group_size", len(targetGroup.entries), "wait_count", targetGroup.waitCount)
-
-	if shouldFire {
-		h.MakeVisible(txnID)
-	}
+		"group_size", len(targetGroup.entries))
 }
 
-// Response records that one peer the originator was waiting on has replied
-// (ACK or NACK). When the group's waitCount reaches zero, MakeVisible fires.
-func (h *HorizonSet) Response(txnID string) {
+// ScheduleMakeVisible schedules MakeVisible(txnID) to fire after `wait`.
+// Used by handleRemoteBind for the 1×RTT remote-arrival wait — long
+// enough that any concurrently-broadcast competing bind has time to
+// arrive before reads see this one. Resets any existing timer on the
+// group; a later-joining bind extends the wait so its own competitors
+// also have time to land.
+func (h *HorizonSet) ScheduleMakeVisible(txnID string, wait time.Duration) {
 	entry, ok := h.entries.Load(txnID)
 	if !ok {
 		return
 	}
 	group := entry.group
 	group.mu.Lock()
-	group.waitCount--
-	shouldFire := group.waitCount <= 0 && !group.visible
-	group.mu.Unlock()
-	if shouldFire {
-		h.MakeVisible(txnID)
+	if group.visible {
+		group.mu.Unlock()
+		return
 	}
+	if group.timer != nil {
+		group.timer.Stop()
+	}
+	fn := func() { h.MakeVisible(txnID) }
+	if h.afterFunc != nil {
+		group.timer = h.afterFunc(wait, fn)
+	} else {
+		group.timer = time.AfterFunc(wait, fn)
+	}
+	group.mu.Unlock()
 }
 
 // MakeVisible promotes an entire group: removes all txnIDs from the invisible
@@ -193,6 +232,10 @@ func (h *HorizonSet) MakeVisible(txnID string) {
 		return
 	}
 	group.visible = true
+	if group.timer != nil {
+		group.timer.Stop()
+		group.timer = nil
+	}
 	entries := make([]*horizonEntry, 0, len(group.entries))
 	for _, e := range group.entries {
 		entries = append(entries, e)
@@ -223,6 +266,45 @@ func (h *HorizonSet) MakeVisible(txnID string) {
 
 	slog.Debug("HorizonSet.MakeVisible", "txnID", txnID,
 		"promoted_count", len(entries), "keys", len(allKeys))
+}
+
+// Abort removes a single entry from the horizon set without promoting it.
+// Used by flushTx when the originator decides to abort after NACK
+// processing. The bind effect is still in the local DAG and at peers;
+// reconstruct's cross-key reachability is what skips it on read.
+//
+// Other entries in the same group are unaffected — they continue waiting
+// on their own visibility trigger (timer or explicit MakeVisible).
+func (h *HorizonSet) Abort(txnID string) {
+	entry, ok := h.entries.Load(txnID)
+	if !ok {
+		return
+	}
+	h.entries.Delete(txnID)
+
+	group := entry.group
+	group.mu.Lock()
+	delete(group.entries, txnID)
+	for _, newTip := range entry.keyNewTips {
+		h.engine.pendingTxTips.Delete(newTip)
+	}
+	isEmpty := len(group.entries) == 0
+	if isEmpty {
+		if group.timer != nil {
+			group.timer.Stop()
+			group.timer = nil
+		}
+		group.visible = true // marker for filterGroups
+	}
+	group.mu.Unlock()
+
+	if isEmpty {
+		h.mu.Lock()
+		h.groups = filterGroups(h.groups)
+		h.mu.Unlock()
+	}
+
+	slog.Debug("HorizonSet.Abort", "txnID", txnID)
 }
 
 // IsInvisible returns true if the given txnID is in the invisible set.

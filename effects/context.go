@@ -960,12 +960,14 @@ func (c *Context) flushTx() error {
 				"bind_offset", bindOffset)
 			commitPendingTxn(ptxn)
 		} else {
-			// Peers exist — bind stays invisible until every peer the
-			// originator was waiting on has replied (ACK or NACK).
-			// HorizonSet tracks the count; each Response below decrements
-			// it. When it reaches zero the group's MakeVisible fires.
+			// Peers exist — bind stays invisible until we finish processing
+			// peer responses and explicitly call MakeVisible (commit) or
+			// Abort (abort) below. The decision must happen AFTER the NACK
+			// loop, otherwise the bind can briefly become visible while a
+			// concurrent reader picks up its effects before isRealConflict
+			// has had a chance to fire.
 			if c.engine.horizon != nil {
-				c.engine.horizon.Add(c.txnID, bindOffset, bind, len(subscribers))
+				c.engine.horizon.Add(c.txnID, bindOffset, bind)
 			}
 			// Replicate to all subscribers concurrently, collect responses.
 			// Track successes — we need a majority to commit.
@@ -988,9 +990,6 @@ func (c *Context) flushTx() error {
 						"target", target)
 					nacks, err := c.engine.broadcaster.ReplicateTo(bindNotify, bindNotify.EffectData, target)
 					results[idx] = replicaResult{subID: target, nacks: nacks, err: err}
-					if c.engine.horizon != nil {
-						c.engine.horizon.Response(c.txnID)
-					}
 				}(i, subID)
 			}
 			wg.Wait()
@@ -1060,6 +1059,17 @@ func (c *Context) flushTx() error {
 						"acks", ackCount,
 						"subscribers", len(subscribers))
 					commitPendingTxn(ptxn)
+				}
+			}
+
+			// Drive visibility from here, AFTER the NACK loop has had a
+			// chance to set txnStateAborted via isRealConflict. The bind
+			// must not become visible before this decision is made.
+			if c.engine.horizon != nil {
+				if ptxn.state.Load() == txnStateAborted {
+					c.engine.horizon.Abort(c.txnID)
+				} else {
+					c.engine.horizon.MakeVisible(c.txnID)
 				}
 			}
 		}

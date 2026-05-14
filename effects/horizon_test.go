@@ -20,6 +20,7 @@
 package effects
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,6 +52,28 @@ func newHorizonTestEngine() *Engine {
 	return e
 }
 
+// installFakeTimers replaces timer creation with a controllable fire function.
+func installFakeTimers(h *HorizonSet) func() {
+	var mu sync.Mutex
+	var fns []func()
+
+	h.afterFunc = func(d time.Duration, f func()) *time.Timer {
+		mu.Lock()
+		fns = append(fns, f)
+		mu.Unlock()
+		return time.NewTimer(time.Hour) // never fires
+	}
+
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, f := range fns {
+			f()
+		}
+		fns = nil
+	}
+}
+
 func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 	e := &Engine{
 		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
@@ -80,7 +103,9 @@ func testBind(consumedTips []*pb.EffectRef, newTip *pb.EffectRef) *pb.Transactio
 	}
 }
 
-func TestHorizonSet_AddWithPeersMakesInvisible(t *testing.T) {
+// Add registers a bind as invisible. The originator's flushTx will later
+// call MakeVisible or Abort.
+func TestHorizonSet_AddMakesInvisible(t *testing.T) {
 	e := newHorizonTestEngine()
 
 	bind := testBind(
@@ -88,28 +113,14 @@ func TestHorizonSet_AddWithPeersMakesInvisible(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
 
 	if !e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be invisible after Add with peerCount > 0")
+		t.Fatal("tx1 should be invisible after Add")
 	}
 }
 
-func TestHorizonSet_AddWithZeroPeersImmediatelyVisible(t *testing.T) {
-	e := newHorizonTestEngine()
-
-	bind := testBind(
-		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
-		&pb.EffectRef{NodeId: 1, Offset: 20},
-	)
-
-	e.horizon.Add("tx1", Tip{1, 30}, bind, 0)
-
-	if e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be visible immediately when peerCount=0")
-	}
-}
-
+// MakeVisible promotes the entry and cleans pendingTxTips.
 func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 	e := newHorizonTestEngine()
 
@@ -120,19 +131,19 @@ func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
 	e.horizon.MakeVisible("tx1")
 
 	if e.horizon.IsInvisible("tx1") {
 		t.Fatal("tx1 should be visible after MakeVisible")
 	}
-
 	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
 		t.Fatal("pendingTxTips should be cleaned after MakeVisible")
 	}
 }
 
-func TestHorizonSet_ResponseFiresMakeVisibleAtZero(t *testing.T) {
+// Abort removes the entry without making it visible.
+func TestHorizonSet_AbortRemovesEntryWithoutPromotion(t *testing.T) {
 	e := newHorizonTestEngine()
 
 	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
@@ -142,23 +153,42 @@ func TestHorizonSet_ResponseFiresMakeVisibleAtZero(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, 2)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
+	e.horizon.Abort("tx1")
 
-	if !e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be invisible before any Response")
-	}
-
-	e.horizon.Response("tx1")
-	if !e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should still be invisible after 1 of 2 Responses")
-	}
-
-	e.horizon.Response("tx1")
 	if e.horizon.IsInvisible("tx1") {
-		t.Fatal("tx1 should be visible after final Response")
+		t.Fatal("tx1 should no longer be in the invisible set after Abort")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
+		t.Fatal("pendingTxTips should be cleaned after Abort")
+	}
+}
+
+// ScheduleMakeVisible's timer fires MakeVisible (remote-arrival path).
+func TestHorizonSet_ScheduledTimerFiresMakesVisible(t *testing.T) {
+	e := newHorizonTestEngine()
+	fireTimer := installFakeTimers(e.horizon)
+
+	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
+
+	bind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 20},
+	)
+
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
+	e.horizon.ScheduleMakeVisible("tx1", 100*time.Millisecond)
+
+	if !e.horizon.IsInvisible("tx1") {
+		t.Fatal("tx1 should be invisible before timer fires")
 	}
 
+	fireTimer()
+
+	if e.horizon.IsInvisible("tx1") {
+		t.Fatal("tx1 should be visible after timer fires")
+	}
 	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
-		t.Fatal("pendingTxTips should be cleaned after final Response")
+		t.Fatal("pendingTxTips should be cleaned after timer fires")
 	}
 }
