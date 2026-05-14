@@ -215,7 +215,10 @@ func (e *Engine) nextOffset() Tip {
 }
 
 // FlushKey is the special key used to signal a full index wipe (FLUSHDB/FLUSHALL).
-const FlushKey = "\x00"
+// Lives under the __swytch: namespace so isSystemKey recognizes it as
+// cluster-operational and the authority gate bypasses it on inbound,
+// and so it can't collide with a user-chosen key.
+const FlushKey = "__swytch:flush"
 
 // FlushIndex deletes all keys from the index and evicts all cache entries.
 func (e *Engine) FlushIndex() {

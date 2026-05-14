@@ -1360,6 +1360,70 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 	}
 }
 
+// TestHandleRemote_FlushKey_BypassesAuthorityGate asserts that an
+// inbound flush-all effect propagates even though the receiver has no
+// prior subscription or index entry for FlushKey. Pre-fix FlushKey was
+// "\x00" which did not match the __swytch: system-key prefix, so the
+// authority gate dropped inbound flushes with ErrAuthorityDropped and
+// cluster-wide FLUSHDB/FLUSHALL stopped at any peer that hadn't
+// independently observed a prior flush. Moving FlushKey into the
+// __swytch: namespace bypasses the gate via isSystemKey and lets the
+// flush handler downstream wipe the local index.
+func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
+	log := newSnapshotLog()
+	bc := &mockBroadcaster{}
+	e := &Engine{
+		effectCache:       log.effectCache,
+		index:             keytrie.New(),
+		broadcaster:       bc,
+		nodeID:            1,
+		clock:             crdt.NewHLC(),
+		subscriptions:     xsync.NewMap[string, *subscriptionState](),
+		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
+		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
+		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
+		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
+		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+	}
+	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
+
+	e.updateIndex("alpha", nil, Tip{1, 100})
+	e.updateIndex("beta", nil, Tip{1, 101})
+	if e.index.Contains("alpha") == nil || e.index.Contains("beta") == nil {
+		t.Fatal("test setup: seeded keys not in index")
+	}
+
+	flushFired := false
+	e.OnFlushAll = func() { flushFired = true }
+
+	flushEff := &pb.Effect{
+		Key: []byte(FlushKey), Hlc: sTs(30), NodeId: 2,
+		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(30)),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:         pb.EffectOp_REMOVE_OP,
+			Merge:      pb.MergeRule_LAST_WRITE_WINS,
+			Collection: pb.CollectionKind_SCALAR,
+		}},
+	}
+	flushData, _ := proto.Marshal(flushEff)
+	notify := BuildOffsetNotify(2, Tip{2, 6000}, flushEff, flushData, nil)
+
+	nacks, err := e.HandleRemote(notify)
+	if err != nil {
+		t.Fatalf("expected nil err (gate must bypass FlushKey), got %v", err)
+	}
+	if len(nacks) != 0 {
+		t.Fatalf("expected 0 NACKs from flush, got %d", len(nacks))
+	}
+	if e.index.Contains("alpha") != nil || e.index.Contains("beta") != nil {
+		t.Fatal("FlushIndex did not run; seeded keys remain in the index")
+	}
+	if !flushFired {
+		t.Fatal("OnFlushAll callback did not fire")
+	}
+}
+
 // TestGetSnapshot_ForkWithSnapshotEffect verifies that a SnapshotEffect on one
 // branch doesn't cause double-counting of the shared prefix during forked
 // reconstruction. This was the root cause of the Jepsen counter bug: the
