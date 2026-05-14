@@ -576,10 +576,20 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// interprets as "do not respond." First-ACK replication then
 	// flows from authoritative peers rather than counting our drop
 	// as a successful replica.
+	//
+	// SubscriptionEffects are exempt and respond with an empty ACK:
+	// a brand-new key has no authority anywhere, and ensureSubscribed
+	// would loop until every peer was marked dead if the drop signal
+	// applied here.
 	if !isSystemKey(eff.Key) {
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		if !subscribed && e.index.Contains(key) == nil {
+			if sub := eff.GetSubscription(); sub != nil {
+				slog.Debug("HandleRemote: empty bootstrap response for no-authority subscription",
+					"key", key, "offset", notify.Origin, "unsubscribe", sub.Unsubscribe)
+				return nil, nil
+			}
 			slog.Info("HandleRemote: dropping notify for key with no local authority",
 				"key", key, "offset", notify.Origin)
 			return nil, ErrAuthorityDropped

@@ -21,7 +21,6 @@ package effects
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -1307,14 +1306,16 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 	}
 }
 
-// TestHandleRemote_SubscriptionEffect_NoAuthority_Drops asserts that a
+// TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck asserts that a
 // subscription from a peer for a key this node has no authority over
-// (not subscribed AND no tips in the index) is dropped without
-// generating a NACK. Returning empty NACKs would be functionally
-// equivalent — bootstrap merges tip sets across all peers and an
-// empty contribution is a no-op — but the gate makes the
-// no-authority case explicit and saves a round-trip.
-func TestHandleRemote_SubscriptionEffect_NoAuthority_Drops(t *testing.T) {
+// (not subscribed AND no tips in the index) produces an empty ACK
+// rather than the normal authority-gate drop. The bootstrap subscribe
+// flow on the sender side waits on ReplicateTo for an ACK from every
+// reachable peer; suppressing the wire response there would prevent
+// any new key from being bootstrapped on a cluster where no peer yet
+// has authority. The receiver still does not index the remote
+// subscription — index cleanliness is preserved.
+func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{}
 	e := &Engine{
@@ -1345,16 +1346,17 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_Drops(t *testing.T) {
 	notify := BuildOffsetNotify(2, Tip{2, 5000}, subEff, subData, nil)
 
 	nacks, err := e.HandleRemote(notify)
-	if !errors.Is(err, ErrAuthorityDropped) {
-		t.Fatalf("expected ErrAuthorityDropped, got %v", err)
+	if err != nil {
+		t.Fatalf("expected nil err (empty ACK), got %v", err)
 	}
 	if len(nacks) != 0 {
 		t.Fatalf("expected 0 NACKs from a no-authority key; got %d", len(nacks))
 	}
 	// And we should not have acquired any index entry from the peer's
-	// subscription either — the gate must prevent that.
+	// subscription either — the no-authority short-circuit must skip
+	// indexing even though it now returns an ACK.
 	if e.index.Contains("newkey") != nil {
-		t.Fatal("gate let the peer's subscription tip enter our index for a no-authority key")
+		t.Fatal("no-authority short-circuit let the peer's subscription tip enter our index")
 	}
 }
 
