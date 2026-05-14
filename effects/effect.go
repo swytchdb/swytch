@@ -1524,7 +1524,12 @@ func (e *Engine) probeAndFetchKey(key string) {
 
 	slog.Debug("anti-entropy: found missing tips", "key", key, "missing", len(missing))
 
-	// Fetch full chain from missing tips
+	// Fetch full chain from missing tips and route each effect through
+	// HandleRemote so the normal bind/tx-tip/horizon machinery runs.
+	// Direct updateIndex would slip binds into the index without ever
+	// passing through handleRemoteBind — they'd skip HorizonSet entirely
+	// and become visible to reads before the 1×RTT competing-bind wait
+	// could possibly do its job.
 	fetched := make(map[Tip]bool)
 	fetchStack := make([]Tip, len(missing))
 	copy(fetchStack, missing)
@@ -1537,7 +1542,6 @@ func (e *Engine) probeAndFetchKey(key string) {
 		}
 		fetched[off] = true
 
-		// Check effect cache first
 		if e.effectCache != nil {
 			if cached, ok := e.effectCache.Get(off, 0); ok {
 				fetchStack = append(fetchStack, fromPbRefs(cached.Deps)...)
@@ -1549,23 +1553,23 @@ func (e *Engine) probeAndFetchKey(key string) {
 		if fetchErr != nil {
 			continue
 		}
-		if err := e.storeWireData(off, fetchedData); err != nil {
+		fetchedEff, parseErr := parseWireEffect(fetchedData)
+		if parseErr != nil {
 			continue
 		}
-		if eff, err := parseWireEffect(fetchedData); err == nil {
-			if e.effectCache != nil {
-				e.effectCache.Put(off, eff)
-			}
-			fetchStack = append(fetchStack, fromPbRefs(eff.Deps)...)
+		notify := &pb.OffsetNotify{
+			Origin:     toPbRef(off),
+			Key:        fetchedEff.Key,
+			EffectData: fetchedData,
 		}
+		if _, herr := e.HandleRemote(notify); herr != nil {
+			slog.Debug("anti-entropy: HandleRemote failed",
+				"ref", off, "error", herr)
+			continue
+		}
+		fetchStack = append(fetchStack, fromPbRefs(fetchedEff.Deps)...)
 	}
 
-	// Add missing tips to index
-	for _, off := range missing {
-		e.updateIndex(key, nil, off)
-	}
-
-	// Invalidate cache
 	if e.cache != nil {
 		e.cache.Evict(key)
 	}
