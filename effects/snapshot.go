@@ -638,11 +638,17 @@ func (e *Engine) losersOnKey(key string) map[string]struct{} {
 	}
 	d := newDag(e, key, "")
 
-	type wonAnchor struct {
+	// Collect every bind visible on this key. We can't decide winners
+	// during the walk — dag.walk's topo order isn't a hash-order, so
+	// the first bind we see isn't necessarily the lowest-hash one.
+	// Fork choice is over the hashes, period; we run it pairwise after
+	// the walk.
+	type seenBind struct {
 		txnID  string
 		newTip Tip
+		hash   []byte
 	}
-	var anchors []wonAnchor
+	var binds []seenBind
 
 	reaches := func(from, target Tip) bool {
 		if from == target {
@@ -701,24 +707,45 @@ func (e *Engine) losersOnKey(key string) map[string]struct{} {
 		if newTip == zero {
 			return nil
 		}
-		for _, prior := range anchors {
-			if reaches(newTip, prior.newTip) {
-				continue
-			}
-			if prior.txnID != "" && eff.TxnId != "" {
-				conflict, bothHadEvidence := e.hasPredicateConflict(
-					prior.txnID, eff.TxnId, key,
-					[]Tip{prior.newTip}, []Tip{newTip})
-				if bothHadEvidence && !conflict {
-					continue
-				}
-			}
-			losers[eff.TxnId] = struct{}{}
-			return nil
-		}
-		anchors = append(anchors, wonAnchor{txnID: eff.TxnId, newTip: newTip})
+		binds = append(binds, seenBind{
+			txnID:  eff.TxnId,
+			newTip: newTip,
+			hash:   eff.ForkChoiceHash,
+		})
 		return nil
 	})
+
+	// Pairwise fork choice. A bind B loses iff there exists another
+	// bind B' on this key such that:
+	//   1. neither reaches the other (concurrent siblings on K), AND
+	//   2. B' has the lower ForkChoiceHash, AND
+	//   3. predicate refinement doesn't prove the writes disjoint.
+	for i := range binds {
+		b := &binds[i]
+		for j := range binds {
+			if i == j {
+				continue
+			}
+			other := &binds[j]
+			if reaches(b.newTip, other.newTip) || reaches(other.newTip, b.newTip) {
+				continue // serializable, not competing
+			}
+			if !ForkChoiceLess(other.hash, b.hash) {
+				continue // they don't beat us; check next
+			}
+			// They beat us by hash. Predicate refinement is the only out.
+			if other.txnID != "" && b.txnID != "" {
+				conflict, bothHadEvidence := e.hasPredicateConflict(
+					other.txnID, b.txnID, key,
+					[]Tip{other.newTip}, []Tip{b.newTip})
+				if bothHadEvidence && !conflict {
+					continue // disjoint predicates, coexist
+				}
+			}
+			losers[b.txnID] = struct{}{}
+			break
+		}
+	}
 	if err != nil {
 		slog.Debug("losersOnKey: walk failed", "key", key, "error", err)
 	}
