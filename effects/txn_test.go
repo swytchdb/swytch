@@ -158,101 +158,28 @@ func TestIsRealConflict_DependentEffect_NotConflict(t *testing.T) {
 	}
 }
 
-func TestIsRealConflict_CompetingTxn_FWW_WeWin(t *testing.T) {
+// A NACK carrying any competing bind from another txn — regardless of
+// shared causal base or fork-choice hash — means the peer has already
+// spoken (ACK'd/NACK'd) something we didn't consume. We must abort.
+func TestIsRealConflict_CompetingBind_AlwaysAborts(t *testing.T) {
 	ptxn := newTestPendingTxn(100, pendingTxnKey{
-		key:          "k",
-		newTip:       Tip{1, 500},
-		consumedTips: []Tip{{1, 300}}, // shared causal base
-		collection:   pb.CollectionKind_SCALAR,
-	})
-
-	// Their bind hash must be higher (worse) than ours for us to win
-	ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-	// Find a nodeID/HLC combo whose hash is higher than ours
-	theirNode := pb.NodeID(99)
-	theirHLC := tTs(200)
-	theirHash := ComputeForkChoiceHash(theirNode, theirHLC)
-	for ForkChoiceLess(theirHash, ourHash) {
-		theirNode++
-		theirHash = ComputeForkChoiceHash(theirNode, tTs(200))
-	}
-	theirHLC = tTs(200)
-
-	detail := &pb.NackTipDetail{
-		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:                theirHLC,
-		IsBind:             true,
-		BindHlc:            theirHLC,
-		BindNodeId:         uint64(theirNode),
-		BindForkChoiceHash: theirHash,
-		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 300}}}, // shared base
-		},
-	}
-
-	if testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("we should win FWW (our hash < their hash)")
-	}
-}
-
-func TestIsRealConflict_CompetingTxn_FWW_WeLose(t *testing.T) {
-	ptxn := newTestPendingTxn(200, pendingTxnKey{
-		key:          "k",
-		newTip:       Tip{1, 500},
-		consumedTips: []Tip{{1, 300}}, // shared causal base
-		collection:   pb.CollectionKind_SCALAR,
-	})
-
-	// Their bind hash must be lower (better) than ours for them to win
-	ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-	theirNode := pb.NodeID(5)
-	theirHLC := tTs(100)
-	theirHash := ComputeForkChoiceHash(theirNode, theirHLC)
-	for !ForkChoiceLess(theirHash, ourHash) {
-		theirNode++
-		theirHash = ComputeForkChoiceHash(theirNode, tTs(100))
-	}
-	theirHLC = tTs(100)
-
-	detail := &pb.NackTipDetail{
-		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:                theirHLC,
-		IsBind:             true,
-		BindHlc:            theirHLC,
-		BindNodeId:         uint64(theirNode),
-		BindForkChoiceHash: theirHash,
-		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 300}}}, // shared base
-		},
-	}
-
-	if !testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("we should lose FWW (their hash < our hash)")
-	}
-}
-
-func TestIsRealConflict_CompetingTxn_DifferentBase_NotConflict(t *testing.T) {
-	ptxn := newTestPendingTxn(200, pendingTxnKey{
 		key:          "k",
 		newTip:       Tip{1, 500},
 		consumedTips: []Tip{{1, 300}},
 		collection:   pb.CollectionKind_SCALAR,
 	})
-
 	detail := &pb.NackTipDetail{
-		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:                tTs(100),
-		IsBind:             true,
-		BindHlc:            tTs(100),
-		BindNodeId:         5,
-		BindForkChoiceHash: ComputeForkChoiceHash(5, tTs(100)),
+		Ref:        &pb.EffectRef{NodeId: 1, Offset: 600},
+		Hlc:        tTs(100),
+		IsBind:     true,
+		BindHlc:    tTs(100),
+		BindNodeId: 5,
 		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}}, // different base
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}},
 		},
 	}
-
-	if testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("binds with different causal bases should not conflict")
+	if !testIsRealConflict(t, ptxn, "k", detail) {
+		t.Fatal("a competing bind in a NACK must always be treated as a conflict")
 	}
 }
 

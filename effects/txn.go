@@ -26,7 +26,6 @@ import (
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // ErrTxnAborted is returned by Flush when a transaction loses FWW or
@@ -110,42 +109,31 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 		return false
 	}
 
-	// Competing bind: only a conflict if they share a causal base on any
-	// overlapping key. Two shapes count: symmetric (we both consumed the
-	// same tip) and asymmetric (we consumed a tx-marked offset belonging
-	// to their txn — we started extending the key while their tx was
-	// already in flight).
+	// Competing bind: the peer's tip set contains a bind from another txn
+	// that we did not acknowledge in our ConsumedTips. The peer has
+	// already spoken (ACK or NACK) — it cannot change its mind. We must
+	// defer. Predicate refinement is the only out: if our writes
+	// provably don't intersect with theirs, both can coexist.
 	if detail.IsBind {
 		theirBindOffset := r(detail.Ref)
 		var theirTxnID string
 		if theirEff, err := e.getEffect(theirBindOffset); err == nil {
 			theirTxnID = theirEff.TxnId
 		}
-		sharedKey, shared := e.nackBindSharedBaseKey(ptxn, detail, theirTxnID)
-		if !shared {
-			return false // different causal bases, not competing
+		if theirTxnID != "" && theirTxnID == ptxn.txnID {
+			return false // our own bind
 		}
-		// Predicate refinement: the peer will reach the same verdict
-		// via evaluateBindForkChoice when it processes the competing
-		// bind; we must get there too. If either side lacks evidence,
-		// fall back to shared-base + tie-break.
 		if ptxn.txnID != "" && theirTxnID != "" {
-			ourStart := collectOurBindTips(ptxn, sharedKey)
+			ourStart := collectOurBindTips(ptxn, key)
 			conflict, bothHadEvidence := e.hasPredicateConflict(
-				ptxn.txnID, theirTxnID, sharedKey,
+				ptxn.txnID, theirTxnID, key,
 				ourStart,
 				[]Tip{theirBindOffset})
 			if bothHadEvidence && !conflict {
-				return false // predicates don't intersect; not a real conflict
+				return false // disjoint predicates — can coexist
 			}
 		}
-		ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-		if ForkChoiceLess(detail.BindForkChoiceHash, ourHash) {
-			// Their hash is lower → they win, we lose
-			return true
-		}
-		// Our hash is lower → we win
-		return false
+		return true
 	}
 
 	// Transactional effect without a bind: in-progress, not yet competing
@@ -176,53 +164,6 @@ func collectOurBindTips(ptxn *pendingTxn, key string) []Tip {
 		}
 	}
 	return tips
-}
-
-// nackBindSharedBaseKey returns the first key on which the NACK'd bind
-// shares a causal base with our pending tx, plus a boolean for whether any
-// shared base exists at all. Two shapes count as shared:
-//
-//  1. Symmetric: their ConsumedTips and ours overlap on the same key —
-//     both binds extend from the same point.
-//  2. Asymmetric: one of our ConsumedTips on a key is a tx-marked offset
-//     belonging to their txn (we started extending the key while their
-//     tx was already in flight; our bind sits as a sibling of theirs
-//     under the shared parent).
-//
-// Used by isRealConflict to scope the predicate walk to the specific key
-// where overlap lives.
-func (e *Engine) nackBindSharedBaseKey(ptxn *pendingTxn, detail *pb.NackTipDetail, theirTxnID string) (string, bool) {
-	for _, kct := range detail.BindConsumedTips {
-		detailKey := string(kct.Key)
-		pk := findPendingKey(ptxn, detailKey)
-		if pk == nil {
-			continue
-		}
-		ourSet := make(map[Tip]bool, len(pk.consumedTips))
-		for _, ct := range pk.consumedTips {
-			ourSet[ct] = true
-		}
-		for _, ct := range kct.ConsumedTips {
-			if ourSet[r(ct)] {
-				return detailKey, true
-			}
-		}
-	}
-	if theirTxnID == "" {
-		return "", false
-	}
-	for _, pk := range ptxn.keys {
-		for _, ct := range pk.consumedTips {
-			ctEff, err := e.getEffect(ct)
-			if err != nil || ctEff.TxnId == "" {
-				continue
-			}
-			if ctEff.TxnId == theirTxnID {
-				return pk.key, true
-			}
-		}
-	}
-	return "", false
 }
 
 // affectsSameData checks if a competing Tip affects the same data as our
@@ -262,28 +203,6 @@ func affectsSameData(pk *pendingTxnKey, detail *pb.NackTipDetail) bool {
 	return false
 }
 
-// nackBindSharesBase checks if a competing bind in a NACK shares a consumed
-// Tip with our pending transaction on any overlapping key.
-func nackBindSharesBase(ptxn *pendingTxn, detail *pb.NackTipDetail) bool {
-	for _, kct := range detail.BindConsumedTips {
-		detailKey := string(kct.Key)
-		pk := findPendingKey(ptxn, detailKey)
-		if pk == nil {
-			continue // our tx doesn't touch this key
-		}
-		// Check if any of our consumed tips overlap with theirs
-		ourSet := make(map[Tip]bool, len(pk.consumedTips))
-		for _, ct := range pk.consumedTips {
-			ourSet[ct] = true
-		}
-		for _, ct := range kct.ConsumedTips {
-			if ourSet[r(ct)] {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // findPendingKey finds the pendingTxnKey for a given key name.
 func findPendingKey(ptxn *pendingTxn, key string) *pendingTxnKey {

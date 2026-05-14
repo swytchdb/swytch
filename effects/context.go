@@ -1011,6 +1011,10 @@ func (c *Context) flushTx() error {
 						"target", res.subID,
 						"nack_key", string(nack.Key),
 						"tip_count", len(nack.TipDetails))
+					// Pull every tip the peer mentions into our DAG
+					// before deciding conflict — the NACK is informational
+					// and ignoring it would let the cluster diverge.
+					c.engine.ingestNackTips(nack)
 					for _, detail := range nack.TipDetails {
 						if c.engine.isRealConflict(ptxn, string(nack.Key), detail) {
 							slog.Debug("flushTx: real conflict detected, aborting",

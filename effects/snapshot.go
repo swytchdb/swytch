@@ -423,20 +423,46 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	var subRootEffects []*pb.Effect
 	count := 0
 
-	type wonBind struct {
-		txnID string
-		tips  []Tip // start tips for predicate collection
+	// A bind that doesn't reach every prior-won bind's NewTip on this
+	// key via DAG deps is a concurrent sibling. Since the walk visits
+	// in ForkChoiceHash order, the second-walked bind has the higher
+	// hash and loses — unless predicate refinement proves the writes
+	// are disjoint.
+	type wonAnchor struct {
+		txnID  string
+		newTip Tip
 	}
-	wonTips := make(map[Tip]wonBind)
-	// Asymmetric competition: a later-walked bind whose ConsumedTips
-	// include a tx-marked offset of an already-won bind has explicit
-	// structural evidence of the competition. The reverse direction
-	// (winner walks first, loser has no structural pointer to winner)
-	// needs a pre-mark: when we win and find that we consumed an
-	// unwalked txn's tx-marked offset, record the loser's txnID so
-	// the walk skips them when they show up.
-	wonByTxnID := make(map[string]wonBind)
-	preLost := make(map[string]struct{})
+	var wonAnchors []wonAnchor
+
+	reaches := func(from, target Tip) bool {
+		if from == target {
+			return true
+		}
+		visited := make(map[Tip]bool)
+		stack := []Tip{from}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if visited[cur] {
+				continue
+			}
+			visited[cur] = true
+			nodeEff, ok := d.nodes[cur]
+			if !ok {
+				continue
+			}
+			for _, dep := range nodeEff.Deps {
+				dt := r(dep)
+				if dt == target {
+					return true
+				}
+				if !visited[dt] {
+					stack = append(stack, dt)
+				}
+			}
+		}
+		return false
+	}
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
@@ -463,74 +489,33 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
 				return nil
 			}
-			// Pre-marked as loser by an earlier-walked winner.
-			if _, lost := preLost[eff.TxnId]; lost {
-				return nil
-			}
-			// Check if this bind competes with an already-won bind.
-			// Topo order visits lower fork-choice hash first, so the
-			// first bind for a given set of consumed tips is the winner —
-			// unless predicate refinement shows non-overlapping predicates,
-			// in which case both coexist (matching commit-time semantics).
+			var newTip Tip
 			for _, kb := range bind.Keys {
 				if string(kb.Key) == key {
-					consumed := fromPbRefs(kb.ConsumedTips)
-					newTip := r(kb.NewTip)
-					competed := false
-					var preLoseTxns []string
-					for _, ct := range consumed {
-						// Symmetric: another bind already claimed this consumed tip.
-						if prev, competing := wonTips[ct]; competing {
-							if e != nil {
-								conflict, bothHadEvidence := e.hasPredicateConflict(
-									prev.txnID, eff.TxnId, key,
-									prev.tips, []Tip{newTip})
-								if bothHadEvidence && !conflict {
-									continue
-								}
-							}
-							competed = true
-							break
-						}
-						// Asymmetric: this consumed tip is a tx-marked
-						// offset of another in-flight txn.
-						ctEff, err := e.getEffect(ct)
-						if err != nil || ctEff.TxnId == "" || ctEff.TxnId == eff.TxnId {
-							continue
-						}
-						if prev, owned := wonByTxnID[ctEff.TxnId]; owned {
-							// They already won — we started before they
-							// committed; we lose.
-							if e != nil {
-								conflict, bothHadEvidence := e.hasPredicateConflict(
-									prev.txnID, eff.TxnId, key,
-									prev.tips, []Tip{newTip})
-								if bothHadEvidence && !conflict {
-									continue
-								}
-							}
-							competed = true
-							break
-						}
-						// Their bind hasn't been walked yet. We're walking
-						// first (lower hash → we win the eventual fork
-						// choice). Pre-mark them as a loser so when their
-						// bind comes through it's skipped.
-						preLoseTxns = append(preLoseTxns, ctEff.TxnId)
-					}
-					if competed {
-						return nil
-					}
-					for _, tid := range preLoseTxns {
-						preLost[tid] = struct{}{}
-					}
-					wb := wonBind{txnID: eff.TxnId, tips: []Tip{newTip}}
-					for _, ct := range consumed {
-						wonTips[ct] = wb
-					}
-					wonByTxnID[eff.TxnId] = wb
+					newTip = r(kb.NewTip)
 					break
 				}
+			}
+			var zero Tip
+			if newTip != zero {
+				for _, prior := range wonAnchors {
+					if reaches(newTip, prior.newTip) {
+						continue
+					}
+					if e != nil && prior.txnID != "" && eff.TxnId != "" {
+						conflict, bothHadEvidence := e.hasPredicateConflict(
+							prior.txnID, eff.TxnId, key,
+							[]Tip{prior.newTip}, []Tip{newTip})
+						if bothHadEvidence && !conflict {
+							continue
+						}
+					}
+					return nil
+				}
+				wonAnchors = append(wonAnchors, wonAnchor{
+					txnID:  eff.TxnId,
+					newTip: newTip,
+				})
 			}
 			bindEffects, fetchErr := e.collectBindEffects(eff, key)
 			if fetchErr != nil {

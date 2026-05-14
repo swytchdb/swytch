@@ -1068,6 +1068,10 @@ func (e *Engine) HandleNack(nack *pb.NackNotify) error {
 		}
 	}
 
+	// Pull every tip the peer mentions into our local DAG before deciding
+	// anything else. The NACK is informational; we must consume it.
+	e.ingestNackTips(nack)
+
 	// Check if this NACK is for a transactional key
 	var matchedTxn *pendingTxn
 	e.pendingTxns.Range(func(_ Tip, ptxn *pendingTxn) bool {
@@ -1152,6 +1156,57 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	}
 
 	return nack
+}
+
+// ingestNackTips fetches and processes every effect referenced in a NACK's
+// tip details so the local DAG catches up with the peer's view. A NACK
+// is the cluster telling us "you missed these tips"; ignoring the payload
+// leaves us permanently behind and the cluster never converges.
+//
+// Walks each tip's dep chain (BFS) and pulls any effect we don't already
+// have via FetchFromAny + HandleRemote. Idempotent — effects we already
+// hold are skipped.
+func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
+	if nack == nil || e.broadcaster == nil {
+		return
+	}
+	var zero Tip
+	visited := make(map[Tip]bool)
+	var stack []Tip
+	for _, d := range nack.TipDetails {
+		if d == nil || d.Ref == nil {
+			continue
+		}
+		stack = append(stack, r(d.Ref))
+	}
+	for len(stack) > 0 {
+		off := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if off == zero || visited[off] {
+			continue
+		}
+		visited[off] = true
+		if e.effectCache != nil {
+			if cached, ok := e.effectCache.Get(off, 0); ok {
+				stack = append(stack, fromPbRefs(cached.Deps)...)
+				continue
+			}
+		}
+		notify := &pb.OffsetNotify{
+			Origin: toPbRef(off),
+			Key:    nack.Key,
+		}
+		if _, err := e.HandleRemote(notify); err != nil {
+			slog.Debug("ingestNackTips: HandleRemote failed",
+				"ref", off, "error", err)
+			continue
+		}
+		if e.effectCache != nil {
+			if cached, ok := e.effectCache.Get(off, 0); ok {
+				stack = append(stack, fromPbRefs(cached.Deps)...)
+			}
+		}
+	}
 }
 
 // handleEviction restores the "tip ⇒ fetchable bytes" invariant when
