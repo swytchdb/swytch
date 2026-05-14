@@ -444,8 +444,12 @@ jobs:
           fi
           echo "results file: $latest"
           # Look for `:valid? <value>` in the top-level results map.
-          v=$(grep -oE ':valid\?[[:space:]]+(true|false|:unknown)' "$latest" \
-              | head -n1 | awk '{print $2}')
+          # Jepsen prints the top-level :valid? last and closes it with `}`
+          # (sub-checker :valid? entries are followed by `,` because more keys
+          # follow inside their map). Anchor on the closing brace and take the
+          # last match to avoid picking up a passing nested checker.
+          v=$(grep -oE ':valid\?[[:space:]]+(true|false|:unknown)\}' "$latest" \
+              | tail -n1 | grep -oE '(true|false|:unknown)')
           case "$v" in
             true)     echo "valid=true"     >>"$GITHUB_OUTPUT" ;;
             false)    echo "valid=false"    >>"$GITHUB_OUTPUT" ;;
