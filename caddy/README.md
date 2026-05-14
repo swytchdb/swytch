@@ -44,7 +44,7 @@ which would fail because the parent module is `package main`.)
         join <dns-name>                 # peers resolve via DNS; optional
         cluster_port <num>              # QUIC port; default 7380/UDP
         cluster_advertise <addr:port>   # this node's reachable address; auto-detect if empty
-        key_prefix __swytch:caddy:      # default; must live under __swytch:
+        key_prefix __caddy:             # default; must live under __caddy:
         lock_ttl 30s                    # ACME issuance lock TTL; default 30s
     }
 }
@@ -71,7 +71,7 @@ JSON-encoded equivalents of the Caddyfile keywords:
     "join": "...",
     "cluster_port": 7380,
     "cluster_advertise": "10.0.0.1:7380",
-    "key_prefix": "__swytch:caddy:",
+    "key_prefix": "__caddy:",
     "lock_ttl": "30s"
   }
 }

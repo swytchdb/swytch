@@ -368,7 +368,7 @@ func TestCaddyfile_AllOptions(t *testing.T) {
 		join cluster.example.com
 		cluster_port 9999
 		cluster_advertise 10.0.0.1:9999
-		key_prefix __swytch:custom:
+		key_prefix __caddy:custom:
 		lock_ttl 45s
 	}`)
 	if err != nil {
@@ -386,7 +386,7 @@ func TestCaddyfile_AllOptions(t *testing.T) {
 	if s.ClusterAdvertise != "10.0.0.1:9999" {
 		t.Errorf("ClusterAdvertise: got %q", s.ClusterAdvertise)
 	}
-	if s.KeyPrefix != "__swytch:custom:" {
+	if s.KeyPrefix != "__caddy:custom:" {
 		t.Errorf("KeyPrefix: got %q", s.KeyPrefix)
 	}
 	if time.Duration(s.LockTTL) != 45*time.Second {
@@ -447,7 +447,7 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 	defer resetRuntimeForTest(t)
 
 	base := beacon.RuntimeConfig{} // single-node, no listener
-	if err := claimRuntime(base, "__swytch:caddy:"); err != nil {
+	if err := claimRuntime(base, "__caddy:"); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
 	if singletonRuntime().refs != 1 {
@@ -455,7 +455,7 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 	}
 
 	// Compatible reclaim bumps the count.
-	if err := claimRuntime(base, "__swytch:caddy:"); err != nil {
+	if err := claimRuntime(base, "__caddy:"); err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
 	if singletonRuntime().refs != 2 {
@@ -476,13 +476,13 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 
 	// Conflicting passphrase on reclaim must error.
 	wrong := beacon.RuntimeConfig{ClusterPassphrase: "x"}
-	if err := claimRuntime(wrong, "__swytch:caddy:"); err == nil {
+	if err := claimRuntime(wrong, "__caddy:"); err == nil {
 		t.Fatalf("expected error for incompatible passphrase")
 	}
 
 	// Conflicting advertise on reclaim must error too — the QUIC listener
 	// is already bound and the TLS cert SAN baked in.
-	if err := claimRuntime(beacon.RuntimeConfig{AdvertiseAddr: "10.0.0.1:7380"}, "__swytch:caddy:"); err == nil {
+	if err := claimRuntime(beacon.RuntimeConfig{AdvertiseAddr: "10.0.0.1:7380"}, "__caddy:"); err == nil {
 		t.Fatalf("expected error for incompatible advertise")
 	}
 

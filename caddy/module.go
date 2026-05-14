@@ -55,7 +55,7 @@ const (
 // Defaults for Caddyfile parsing.
 const (
 	defaultClusterPort = 7380
-	defaultKeyPrefix   = "__swytch:caddy:"
+	defaultKeyPrefix   = "__caddy:"
 	defaultLockTTL     = 30 * time.Second
 )
 
@@ -86,8 +86,11 @@ type SwytchStorage struct {
 	// Empty triggers auto-detection.
 	ClusterAdvertise string `json:"cluster_advertise,omitempty"`
 
-	// KeyPrefix scopes all keys this module reads/writes inside the
-	// reserved `__swytch:` namespace. Default `__swytch:caddy:`.
+	// KeyPrefix scopes all keys this module reads/writes. Must live
+	// under the reserved `__caddy:` namespace so the effect cache's
+	// system-key pinning (which is __swytch:-only) does not pin
+	// potentially large certificate/lock data and defeat the cache's
+	// memory limit. Default `__caddy:`.
 	KeyPrefix string `json:"key_prefix,omitempty"`
 
 	// LockTTL is the duration after which a held lock is considered
@@ -140,8 +143,8 @@ func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
 	if s.KeyPrefix == "" {
 		s.KeyPrefix = defaultKeyPrefix
 	}
-	if !strings.HasPrefix(s.KeyPrefix, "__swytch:") {
-		return fmt.Errorf("swytch storage: key_prefix must live under __swytch: namespace, got %q", s.KeyPrefix)
+	if !strings.HasPrefix(s.KeyPrefix, "__caddy:") {
+		return fmt.Errorf("swytch storage: key_prefix must live under __caddy: namespace, got %q", s.KeyPrefix)
 	}
 	if s.LockTTL == 0 {
 		s.LockTTL = caddycore.Duration(defaultLockTTL)
