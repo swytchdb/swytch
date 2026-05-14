@@ -30,7 +30,6 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -39,8 +38,9 @@ import (
 
 // Sentinel errors for replication failures.
 var (
-	ErrNoPeers            = errors.New("no alive symmetric peers available for replication")
-	ErrReplicationTimeout = errors.New("replication timed out waiting for ACK")
+	ErrNoPeers              = errors.New("no alive symmetric peers available for replication")
+	ErrReplicationTimeout   = errors.New("replication timed out waiting for ACK")
+	ErrAllPeersNotSubscribed = errors.New("every tracked peer reported they are not subscribed to the key")
 )
 
 // Retransmission constants.
@@ -51,11 +51,20 @@ const (
 // ReplicationFuture represents a pending replication operation.
 // It resolves when the first same-region peer ACKs or when the deadline expires.
 // Callers check Wait()'s return value to distinguish success from failure.
+//
+// expected/dropped/setupDone implement fast-fail on "every peer says
+// they're not subscribed": a NotSubscribed NACK does not resolve the
+// future (it would falsely satisfy first-ACK), but when every tracked
+// peer's response is NotSubscribed the future rejects immediately
+// instead of waiting for the timeout.
 type ReplicationFuture struct {
-	done  chan struct{}
-	once  sync.Once
-	err   atomic.Pointer[error]
-	nacks atomic.Pointer[[]*pb.NackNotify] // NACKs from NACK response (status=0x01)
+	done      chan struct{}
+	once      sync.Once
+	err       atomic.Pointer[error]
+	nacks     atomic.Pointer[[]*pb.NackNotify] // NACKs from NACK response (status=0x01)
+	expected  atomic.Int32                     // total tracker entries attached to this future
+	dropped   atomic.Int32                     // tracked peers that responded with NotSubscribed
+	setupDone atomic.Bool                      // true once expected has been finalized
 }
 
 // Wait blocks until the replication future is resolved and returns any error.
@@ -127,6 +136,8 @@ type trackedRequest struct {
 func (rt *requestTracker) Register(peerID NodeId, packetSize int) (uint64, *ReplicationFuture) {
 	id := rt.nextID.Add(1)
 	f := &ReplicationFuture{done: make(chan struct{})}
+	f.expected.Store(1)
+	f.setupDone.Store(true)
 	rt.pending.Store(id, &trackedRequest{
 		future:     f,
 		createdAt:  time.Now().UnixNano(),
@@ -324,6 +335,7 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 			traceContext: notify.GetTraceContext(),
 		}
 		r.tracker.pending.Store(requestID, tr)
+		future.expected.Add(1)
 		RecordNotificationSent()
 		trackedCount++
 	}
@@ -331,6 +343,15 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	if trackedCount == 0 {
 		slog.Error("all same-region sends failed", "targets", len(targets))
 		future.reject(ErrNoPeers)
+		return future
+	}
+
+	// Finalize expected so any in-flight NotSubscribed responses can
+	// trigger fast-fail. Re-check here covers the race where every
+	// tracked peer responded before we set setupDone.
+	future.setupDone.Store(true)
+	if future.dropped.Load() == future.expected.Load() {
+		future.reject(ErrAllPeersNotSubscribed)
 	}
 
 	return future
@@ -414,15 +435,6 @@ func (r *Replicator) HandleNotify(peerID NodeId, requestID uint64, notify *pb.Of
 				"peer", peerID, "requestID", requestID,
 				"error", err,
 			)
-			// AuthorityDropped means "we deliberately did not store
-			// this." Suppress the wire response entirely so the
-			// sender's first-ACK isn't satisfied by this peer; their
-			// other (authoritative) peers will ACK if anyone does.
-			// If no peer does, the sender's tracked replication
-			// times out — which is the correct signal.
-			if errors.Is(err, effects.ErrAuthorityDropped) {
-				return
-			}
 		}
 	}
 
@@ -499,6 +511,7 @@ func (r *Replicator) HandleNotifyACKWithData(peerID NodeId, requestID uint64, st
 
 	// Parse and store NACKs BEFORE resolving the future so callers
 	// of Wait()/Nacks() see them immediately.
+	notSubscribed := false
 	if status == 0x01 && len(fullPacket) > 22 {
 		nacks, err := parseNotifyNACKPayload(fullPacket[22:])
 		if err != nil {
@@ -506,10 +519,36 @@ func (r *Replicator) HandleNotifyACKWithData(peerID NodeId, requestID uint64, st
 		}
 		if len(nacks) > 0 {
 			tr.future.nacks.Store(&nacks)
+			notSubscribed = allNotSubscribed(nacks)
 		}
 	}
 
+	// A NotSubscribed NACK means "this peer discarded the write."
+	// It must not satisfy first-ACK semantics — wait for a real
+	// accepting peer. When every tracked peer reports NotSubscribed
+	// the future rejects fast instead of waiting for the deadline.
+	if notSubscribed {
+		dropped := tr.future.dropped.Add(1)
+		if tr.future.setupDone.Load() && dropped == tr.future.expected.Load() {
+			tr.future.reject(ErrAllPeersNotSubscribed)
+		}
+		return
+	}
+
 	tr.future.resolve()
+}
+
+// allNotSubscribed reports whether every NACK in the response carries
+// the NotSubscribed flag. Mixed responses (any real conflict NACK)
+// fall through to normal resolve so the sender can still process
+// missing-tip NACKs.
+func allNotSubscribed(nacks []*pb.NackNotify) bool {
+	for _, n := range nacks {
+		if !n.GetNotSubscribed() {
+			return false
+		}
+	}
+	return len(nacks) > 0
 }
 
 // ReplicateTo sends a notification to a specific peer and waits for ACK or NACK.

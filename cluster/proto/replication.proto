@@ -348,6 +348,7 @@ message NackNotify {
   EffectRef conflicting = 2;         // the effect that triggered the conflict
   repeated EffectRef tips = 3;       // sender's full tip set for this key
   repeated NackTipDetail tip_details = 4;  // metadata per tip for smart conflict detection
+  bool not_subscribed = 5;           // receiver is not subscribed to this key, so it discarded the write
 }
 
 // ForwardedTransaction carries an entire transaction to be executed on

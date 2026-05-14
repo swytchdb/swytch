@@ -567,28 +567,20 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
-	// Authority gate: a node accepts inbound effects only for keys it
-	// claims authority over. Authority means subscriptions has the
-	// key (declared interest) OR the index already has tips for it
-	// (locally emitted non-tx writes; Flush updates the index without
-	// touching subscriptions). System keys bypass the gate — they're
-	// load-bearing for cluster bootstrap and may arrive before a
-	// joiner has subscribed.
+	// Authority gate: accept the effect only if we already track the
+	// key locally — either subscribed to it, or the index already has
+	// tips (a previous local write installed them). System keys are
+	// exempt because cluster bootstrap depends on them arriving before
+	// any subscription exists.
 	//
-	// Drops return ErrAuthorityDropped, which the transport
-	// interprets as "do not respond." First-ACK replication then
-	// flows from authoritative peers rather than counting our drop
-	// as a successful replica.
-	//
-	// SubscriptionEffects are exempt and respond with an empty ACK:
-	// a brand-new key has no authority anywhere, and ensureSubscribed
-	// would loop until every peer was marked dead if the drop signal
-	// applied here.
+	// SubscriptionEffects are exempt and respond with an empty ACK so
+	// ensureSubscribed isn't deadlocked when nobody yet has authority
+	// for a brand-new key.
 	//
 	// TxnBinds touch multiple keys; collectSubscribers replicates them
-	// to peers subscribed to any touched key. The gate must therefore
-	// accept the bind when authority holds for any key in bind.Keys,
-	// not just eff.Key (the canonical first key).
+	// to peers subscribed to any touched key, so the gate must accept
+	// the bind when authority holds for any key in bind.Keys (not just
+	// eff.Key, the canonical first key).
 	if !isSystemKey(eff.Key) {
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
@@ -614,7 +606,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 			}
 			slog.Info("HandleRemote: dropping notify for key with no local authority",
 				"key", key, "offset", notify.Origin)
-			return nil, ErrAuthorityDropped
+			return []*pb.NackNotify{{Key: eff.Key, NotSubscribed: true}}, nil
 		}
 	}
 
