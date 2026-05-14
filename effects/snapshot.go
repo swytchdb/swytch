@@ -417,52 +417,27 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	}
 	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID)
 
+	// A bind is atomic across every key it touches. To determine who
+	// won/lost we cannot just look at the key we're reconstructing —
+	// a bind that lost on key L (because another bind beat it there
+	// via reachability) must be skipped on every key in its keyset.
+	// We compute the bind-key closure starting from `key`, then for
+	// each key in the closure determine per-key losers and union them.
+	// The main walk for `key` skips any bind that is in the unioned
+	// loser set.
+	expandKeys := e.bindKeyClosure(key)
+	atomicallyLost := make(map[string]struct{})
+	for k := range expandKeys {
+		for txnID := range e.losersOnKey(k) {
+			atomicallyLost[txnID] = struct{}{}
+		}
+	}
+
 	d := newDag(e, key, txID)
 
 	var result *pb.ReducedEffect
 	var subRootEffects []*pb.Effect
 	count := 0
-
-	// A bind that doesn't reach every prior-won bind's NewTip on this
-	// key via DAG deps is a concurrent sibling. Since the walk visits
-	// in ForkChoiceHash order, the second-walked bind has the higher
-	// hash and loses — unless predicate refinement proves the writes
-	// are disjoint.
-	type wonAnchor struct {
-		txnID  string
-		newTip Tip
-	}
-	var wonAnchors []wonAnchor
-
-	reaches := func(from, target Tip) bool {
-		if from == target {
-			return true
-		}
-		visited := make(map[Tip]bool)
-		stack := []Tip{from}
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if visited[cur] {
-				continue
-			}
-			visited[cur] = true
-			nodeEff, ok := d.nodes[cur]
-			if !ok {
-				continue
-			}
-			for _, dep := range nodeEff.Deps {
-				dt := r(dep)
-				if dt == target {
-					return true
-				}
-				if !visited[dt] {
-					stack = append(stack, dt)
-				}
-			}
-		}
-		return false
-	}
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
@@ -489,33 +464,8 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
 				return nil
 			}
-			var newTip Tip
-			for _, kb := range bind.Keys {
-				if string(kb.Key) == key {
-					newTip = r(kb.NewTip)
-					break
-				}
-			}
-			var zero Tip
-			if newTip != zero {
-				for _, prior := range wonAnchors {
-					if reaches(newTip, prior.newTip) {
-						continue
-					}
-					if e != nil && prior.txnID != "" && eff.TxnId != "" {
-						conflict, bothHadEvidence := e.hasPredicateConflict(
-							prior.txnID, eff.TxnId, key,
-							[]Tip{prior.newTip}, []Tip{newTip})
-						if bothHadEvidence && !conflict {
-							continue
-						}
-					}
-					return nil
-				}
-				wonAnchors = append(wonAnchors, wonAnchor{
-					txnID:  eff.TxnId,
-					newTip: newTip,
-				})
+			if _, lost := atomicallyLost[eff.TxnId]; lost {
+				return nil
 			}
 			bindEffects, fetchErr := e.collectBindEffects(eff, key)
 			if fetchErr != nil {
@@ -636,6 +586,145 @@ func bindsShareBase(a, b *forkChoiceBindEntry) bool {
 }
 
 // collectBindEffects fetches the transactional effects for a winning bind
+// bindKeyClosure returns every key reachable by following bind cross-key
+// relationships outward from startKey. A bind is atomic across all its
+// keys, so determining whether a bind we encounter on `startKey` was a
+// winner requires knowing the per-key verdicts on every key it touches.
+// That widening transitively pulls in further keys whose tips also hold
+// binds, until a fixed point.
+func (e *Engine) bindKeyClosure(startKey string) map[string]struct{} {
+	keys := map[string]struct{}{startKey: {}}
+	queue := []string{startKey}
+	for len(queue) > 0 {
+		k := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		tipSet := e.index.Contains(k)
+		if tipSet == nil {
+			continue
+		}
+		for _, t := range tipSet.Tips() {
+			eff, err := e.getEffect(t)
+			if err != nil {
+				continue
+			}
+			bind := eff.GetTxnBind()
+			if bind == nil {
+				continue
+			}
+			for _, kb := range bind.Keys {
+				other := string(kb.Key)
+				if _, ok := keys[other]; ok {
+					continue
+				}
+				keys[other] = struct{}{}
+				queue = append(queue, other)
+			}
+		}
+	}
+	return keys
+}
+
+// losersOnKey walks one key's DAG and returns the txnIDs of binds that
+// lost the per-key reachability test there. A bind loses when its
+// NewTip on `key` does not reach the NewTip of an earlier-walked bind
+// (lower ForkChoiceHash → walked first) and predicate refinement does
+// not prove the writes are disjoint. Used by reconstruct to compute
+// the atomic loser set across a bind-key closure.
+func (e *Engine) losersOnKey(key string) map[string]struct{} {
+	losers := make(map[string]struct{})
+	tipSet := e.index.Contains(key)
+	if tipSet == nil {
+		return losers
+	}
+	d := newDag(e, key, "")
+
+	type wonAnchor struct {
+		txnID  string
+		newTip Tip
+	}
+	var anchors []wonAnchor
+
+	reaches := func(from, target Tip) bool {
+		if from == target {
+			return true
+		}
+		visited := make(map[Tip]bool)
+		stack := []Tip{from}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if visited[cur] {
+				continue
+			}
+			visited[cur] = true
+			nodeEff, ok := d.nodes[cur]
+			if !ok {
+				continue
+			}
+			for _, dep := range nodeEff.Deps {
+				dt := r(dep)
+				if dt == target {
+					return true
+				}
+				if !visited[dt] {
+					stack = append(stack, dt)
+				}
+			}
+		}
+		return false
+	}
+
+	var isInvisible func(string) bool
+	if e.horizon != nil {
+		isInvisible = e.horizon.IsInvisible
+	}
+
+	err := d.walk(tipSet.Tips(), func(eff *pb.Effect) error {
+		bind := eff.GetTxnBind()
+		if bind == nil {
+			return nil
+		}
+		if isInvisible != nil && isInvisible(eff.TxnId) {
+			return nil
+		}
+		if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
+			return nil
+		}
+		var newTip Tip
+		for _, kb := range bind.Keys {
+			if string(kb.Key) == key {
+				newTip = r(kb.NewTip)
+				break
+			}
+		}
+		var zero Tip
+		if newTip == zero {
+			return nil
+		}
+		for _, prior := range anchors {
+			if reaches(newTip, prior.newTip) {
+				continue
+			}
+			if prior.txnID != "" && eff.TxnId != "" {
+				conflict, bothHadEvidence := e.hasPredicateConflict(
+					prior.txnID, eff.TxnId, key,
+					[]Tip{prior.newTip}, []Tip{newTip})
+				if bothHadEvidence && !conflict {
+					continue
+				}
+			}
+			losers[eff.TxnId] = struct{}{}
+			return nil
+		}
+		anchors = append(anchors, wonAnchor{txnID: eff.TxnId, newTip: newTip})
+		return nil
+	})
+	if err != nil {
+		slog.Debug("losersOnKey: walk failed", "key", key, "error", err)
+	}
+	return losers
+}
+
 // on the given key. Walks from the bind's NewTip following deps until it
 // reaches the ConsumedTips (the pre-transaction state), collecting only
 // effects that belong to the same transaction.
