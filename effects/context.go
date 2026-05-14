@@ -234,17 +234,20 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 	// while a blocking XREADGROUP holds a compaction snapshot) are visible.
 	myTip := ck.lastOffset
 	reconTips := []Tip{myTip}
-	var indexed *keytrie.TipSet
+	var baseTips []Tip
 	if c.txSnapshot != nil {
-		indexed = c.txSnapshot.Contains(key)
-	} else {
-		indexed = c.engine.index.Contains(key)
+		if ts := c.txSnapshot.Contains(key); ts != nil {
+			// Match getSnapshotFromTx: resolve pending-tx tips to their
+			// pre-tx deps so a later read in the same txn walks the same
+			// committed-as-of-snapshot DAG as the first read did.
+			baseTips = c.engine.resolveTipDeps(ts.Tips())
+		}
+	} else if ts := c.engine.index.Contains(key); ts != nil {
+		baseTips = ts.Tips()
 	}
-	if indexed != nil {
-		for _, t := range indexed.Tips() {
-			if t != myTip {
-				reconTips = append(reconTips, t)
-			}
+	for _, t := range baseTips {
+		if t != myTip {
+			reconTips = append(reconTips, t)
 		}
 	}
 	slog.Debug("Context.GetSnapshot: hasPending reconstruct", "key", key,
