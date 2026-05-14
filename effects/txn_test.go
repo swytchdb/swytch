@@ -46,12 +46,14 @@ func testIsRealConflict(t *testing.T, ptxn *pendingTxn, key string, detail *pb.N
 }
 
 func newTestPendingTxn(txnHLCNanos int64, keys ...pendingTxnKey) *pendingTxn {
+	txnHLC := time.Unix(0, txnHLCNanos)
 	return &pendingTxn{
-		txnHLC:     time.Unix(0, txnHLCNanos),
-		originNode: 1,
-		bindOffset: Tip{1, 9999},
-		keys:       keys,
-		done:       make(chan struct{}),
+		txnHLC:         txnHLC,
+		originNode:     1,
+		forkChoiceHash: ComputeForkChoiceHash(1, timestamppb.New(txnHLC)),
+		bindOffset:     Tip{1, 9999},
+		keys:           keys,
+		done:           make(chan struct{}),
 	}
 }
 
@@ -158,28 +160,66 @@ func TestIsRealConflict_DependentEffect_NotConflict(t *testing.T) {
 	}
 }
 
-// A NACK carrying any competing bind from another txn — regardless of
-// shared causal base or fork-choice hash — means the peer has already
-// spoken (ACK'd/NACK'd) something we didn't consume. We must abort.
-func TestIsRealConflict_CompetingBind_AlwaysAborts(t *testing.T) {
+// A NACK carrying a competing bind from another txn is resolved by
+// ForkChoiceHash, the same arbiter reconstruct uses. We abort iff their
+// hash is lower than ours; otherwise we win and continue.
+func TestIsRealConflict_CompetingBind_TheirHashLower_WeAbort(t *testing.T) {
 	ptxn := newTestPendingTxn(100, pendingTxnKey{
 		key:          "k",
 		newTip:       Tip{1, 500},
 		consumedTips: []Tip{{1, 300}},
 		collection:   pb.CollectionKind_SCALAR,
 	})
+	// Find a (nodeID, hlc) pair whose hash sorts below ours.
+	theirNode := pb.NodeID(2)
+	theirHash := ComputeForkChoiceHash(theirNode, tTs(100))
+	for !ForkChoiceLess(theirHash, ptxn.forkChoiceHash) {
+		theirNode++
+		theirHash = ComputeForkChoiceHash(theirNode, tTs(100))
+	}
 	detail := &pb.NackTipDetail{
-		Ref:        &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:        tTs(100),
-		IsBind:     true,
-		BindHlc:    tTs(100),
-		BindNodeId: 5,
+		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
+		Hlc:                tTs(100),
+		IsBind:             true,
+		BindHlc:            tTs(100),
+		BindNodeId:         uint64(theirNode),
+		BindForkChoiceHash: theirHash,
 		BindConsumedTips: []*pb.KeyConsumedTips{
 			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}},
 		},
 	}
 	if !testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("a competing bind in a NACK must always be treated as a conflict")
+		t.Fatal("their lower hash → we must abort")
+	}
+}
+
+func TestIsRealConflict_CompetingBind_OurHashLower_WeWin(t *testing.T) {
+	ptxn := newTestPendingTxn(100, pendingTxnKey{
+		key:          "k",
+		newTip:       Tip{1, 500},
+		consumedTips: []Tip{{1, 300}},
+		collection:   pb.CollectionKind_SCALAR,
+	})
+	// Find a (nodeID, hlc) pair whose hash sorts above ours.
+	theirNode := pb.NodeID(2)
+	theirHash := ComputeForkChoiceHash(theirNode, tTs(200))
+	for ForkChoiceLess(theirHash, ptxn.forkChoiceHash) {
+		theirNode++
+		theirHash = ComputeForkChoiceHash(theirNode, tTs(200))
+	}
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
+		Hlc:                tTs(200),
+		IsBind:             true,
+		BindHlc:            tTs(200),
+		BindNodeId:         uint64(theirNode),
+		BindForkChoiceHash: theirHash,
+		BindConsumedTips: []*pb.KeyConsumedTips{
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}},
+		},
+	}
+	if testIsRealConflict(t, ptxn, "k", detail) {
+		t.Fatal("our lower hash → we must win and continue")
 	}
 }
 

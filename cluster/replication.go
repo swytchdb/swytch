@@ -38,8 +38,8 @@ import (
 
 // Sentinel errors for replication failures.
 var (
-	ErrNoPeers              = errors.New("no alive symmetric peers available for replication")
-	ErrReplicationTimeout   = errors.New("replication timed out waiting for ACK")
+	ErrNoPeers               = errors.New("no alive symmetric peers available for replication")
+	ErrReplicationTimeout    = errors.New("replication timed out waiting for ACK")
 	ErrAllPeersNotSubscribed = errors.New("every tracked peer reported they are not subscribed to the key")
 )
 

@@ -919,11 +919,12 @@ func (c *Context) flushTx() error {
 
 	// Step 4: Create pending txn for NACK tracking
 	ptxn := &pendingTxn{
-		txnID:      c.txnID,
-		txnHLC:     txnHLC,
-		originNode: c.engine.nodeID,
-		bindOffset: bindOffset,
-		done:       make(chan struct{}),
+		txnID:          c.txnID,
+		txnHLC:         txnHLC,
+		originNode:     c.engine.nodeID,
+		forkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		bindOffset:     bindOffset,
+		done:           make(chan struct{}),
 	}
 	for key, ck := range c.keys {
 		var consumedTips []Tip

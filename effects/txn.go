@@ -63,13 +63,14 @@ const (
 
 // pendingTxn tracks a transaction awaiting NACK resolution.
 type pendingTxn struct {
-	txnID      string // transaction ID (matches TxnId on emitted effects)
-	txnHLC     time.Time
-	originNode pb.NodeID
-	bindOffset Tip             // offset of the TransactionalBindEffect
-	keys       []pendingTxnKey // read-only after creation
-	state      atomic.Uint32   // txnState*
-	done       chan struct{}   // closed on decision
+	txnID          string // transaction ID (matches TxnId on emitted effects)
+	txnHLC         time.Time
+	originNode     pb.NodeID
+	forkChoiceHash []byte          // precomputed ForkChoiceHash(originNode, txnHLC)
+	bindOffset     Tip             // offset of the TransactionalBindEffect
+	keys           []pendingTxnKey // read-only after creation
+	state          atomic.Uint32   // txnState*
+	done           chan struct{}   // closed on decision
 }
 
 type pendingTxnKey struct {
@@ -109,11 +110,14 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 		return false
 	}
 
-	// Competing bind: the peer's tip set contains a bind from another txn
-	// that we did not acknowledge in our ConsumedTips. The peer has
-	// already spoken (ACK or NACK) — it cannot change its mind. We must
-	// defer. Predicate refinement is the only out: if our writes
-	// provably don't intersect with theirs, both can coexist.
+	// Competing bind: NACK tells us there's a competitor; fork-choice
+	// hash decides who's first. ForkChoiceHash is the cluster-wide
+	// arbiter — every observer's reconstruct uses the same rule, so
+	// origin's abort decision MUST match it. Local "they NACK'd me, so
+	// I lose" is wrong: space-like concurrency means there's no observer-
+	// independent "first"; the hash provides the deterministic order
+	// every observer agrees on. Predicate refinement is the only out:
+	// disjoint writes coexist regardless of hash.
 	if detail.IsBind {
 		theirBindOffset := r(detail.Ref)
 		var theirTxnID string
@@ -133,7 +137,12 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 				return false // disjoint predicates — can coexist
 			}
 		}
-		return true
+		if ForkChoiceLess(detail.BindForkChoiceHash, ptxn.forkChoiceHash) {
+			// Their hash is lower → they win, we lose, abort.
+			return true
+		}
+		// Our hash is lower → we win, continue.
+		return false
 	}
 
 	// Transactional effect without a bind: in-progress, not yet competing
@@ -202,7 +211,6 @@ func affectsSameData(pk *pendingTxnKey, detail *pb.NackTipDetail) bool {
 	}
 	return false
 }
-
 
 // findPendingKey finds the pendingTxnKey for a given key name.
 func findPendingKey(ptxn *pendingTxn, key string) *pendingTxnKey {
