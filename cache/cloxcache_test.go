@@ -758,6 +758,52 @@ func TestCloxCacheEvictNotifyFires(t *testing.T) {
 	}
 }
 
+// TestCloxCacheEvictPartialSweepExtends reproduces the
+// pin-pressure-in-the-sweep-window bug: with the default partial
+// sweep, the chosen window can happen to contain only pinned entries
+// even when evictable entries exist elsewhere in the shard. The
+// previous behavior returned victim==nil and Put returned false,
+// stranding the new key (the effect-cache callers ignore the false
+// return and index the effect with no cached bytes). The fix extends
+// the scan across remaining slots when the partial sweep is empty;
+// every Put against a shard that holds at least one unpinned entry
+// must succeed.
+func TestCloxCacheEvictPartialSweepExtends(t *testing.T) {
+	cfg := Config{
+		NumShards:     1,
+		SlotsPerShard: 64,
+		Capacity:      64,
+		SweepPercent:  2, // maxScan = max(64*2/100, 1) = 1 slot
+		CollectStats:  true,
+	}
+	cache := NewCloxCache[[2]uint64, int](cfg)
+	defer cache.Close()
+
+	cache.SetEvictDecider(func(key [2]uint64, _ int) bool { return key[0] != 1 })
+
+	for i := range uint64(60) {
+		if ok, _, _, _ := cache.Put([2]uint64{1, i}, int(i)); !ok {
+			t.Fatalf("seed pinned {1,%d}: Put returned !ok", i)
+		}
+	}
+	for i := range uint64(4) {
+		if ok, _, _, _ := cache.Put([2]uint64{2, i}, int(i)); !ok {
+			t.Fatalf("seed unpinned {2,%d}: Put returned !ok", i)
+		}
+	}
+
+	// With a 1-slot sweep window and 4 unpinned entries spread across
+	// 64 slots, the partial sweep frequently lands on a pinned slot.
+	// Pre-fix this leaves victim==nil and Put fails; post-fix the
+	// fallback scan finds one of the unpinned entries and Put succeeds.
+	for i := uint64(100); i < 200; i++ {
+		ok, _, _, _ := cache.Put([2]uint64{2, i}, int(i))
+		if !ok {
+			t.Fatalf("Put {2,%d} failed despite unpinned entries in the shard", i)
+		}
+	}
+}
+
 // TestCloxCacheEvictDeciderAllPinnedRefusesEviction verifies the
 // "every candidate pinned" path: when nothing in a sweep is evictable,
 // the cache returns success=false from Put rather than evicting a

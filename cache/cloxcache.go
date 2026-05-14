@@ -646,10 +646,10 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 	var oldestGhostSlot *atomic.Pointer[recordNode[K, V]]
 	oldestGhostAccess := int64(^uint64(0) >> 1)
 
-	for scanned := range maxScan {
-		slotID := (startSlot + scanned) % slotsPerShard
-		slot := &shard.slots[slotID]
-
+	// Walks one slot's chain and updates the captured victim/ghost trackers.
+	// Returns true if a live (non-ghost, non-pinned) eviction candidate
+	// has been recorded so far in this shard scan.
+	scanSlot := func(slot *atomic.Pointer[recordNode[K, V]]) bool {
 		node := slot.Load()
 		var prev *recordNode[K, V]
 
@@ -671,10 +671,7 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 			}
 
 			// Pin check: skip live entries the decider rejects so they
-			// never become an eviction candidate. If every live entry in
-			// the sweep is pinned, victim stays nil and the eviction
-			// returns 0 (no-op); the Put caller's existing "couldn't
-			// evict" path then aborts the retry loop.
+			// never become an eviction candidate.
 			if c.evictDecider != nil && !c.evictDecider(node.key, node.value.Load().(V)) {
 				prev = node
 				node = node.next.Load()
@@ -699,6 +696,29 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 
 			prev = node
 			node = node.next.Load()
+		}
+
+		return lowFreqVictim != nil || fallbackVictim != nil
+	}
+
+	for scanned := range maxScan {
+		slotID := (startSlot + scanned) % slotsPerShard
+		scanSlot(&shard.slots[slotID])
+	}
+
+	// If pin pressure happened to concentrate in the partial-sweep
+	// window, the trackers can be empty even when evictable entries
+	// exist elsewhere in the shard. Returning 0 here would make Put
+	// fail and leave the caller indexing an effect whose bytes were
+	// never cached. Extend the scan across the remaining slots and
+	// stop as soon as a candidate appears — keeps the common-case
+	// cost at sweepPercent and only pays full-shard when forced.
+	if lowFreqVictim == nil && fallbackVictim == nil && maxScan < slotsPerShard {
+		for scanned := maxScan; scanned < slotsPerShard; scanned++ {
+			slotID := (startSlot + scanned) % slotsPerShard
+			if scanSlot(&shard.slots[slotID]) {
+				break
+			}
 		}
 	}
 
