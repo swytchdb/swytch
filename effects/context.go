@@ -20,10 +20,12 @@
 package effects
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"log/slog"
 	"math/rand/v2"
+	"sort"
 	"sync"
 	"time"
 
@@ -878,11 +880,20 @@ func (c *Context) flushTx() error {
 		}
 		bind.Keys = append(bind.Keys, kb)
 	}
+	// Sort bind.Keys by key bytes so the canonical key (bind.Keys[0])
+	// and every observer's iteration order are deterministic — c.keys
+	// is a Go map, raw iteration is random. Any predicate or behavior
+	// that branches on eff.Key (or on bind.Keys ordering) needs this
+	// to be stable across runs.
+	sort.Slice(bind.Keys, func(i, j int) bool {
+		return bytes.Compare(bind.Keys[i].Key, bind.Keys[j].Key) < 0
+	})
 
 	// Bind deps: the last effect on each key in the transaction.
-	var bindDeps []*pb.EffectRef
-	for _, ck := range c.keys {
-		bindDeps = append(bindDeps, toPbRef(ck.lastOffset))
+	// Walk bind.Keys (already sorted) so eff.Deps is deterministic too.
+	bindDeps := make([]*pb.EffectRef, 0, len(bind.Keys))
+	for _, kb := range bind.Keys {
+		bindDeps = append(bindDeps, kb.NewTip)
 	}
 
 	// Pre-emission check: a bind that completed its horizon wait is a
