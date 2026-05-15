@@ -2742,6 +2742,258 @@ func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 	}
 }
 
+// TestLosersOnKey_SharedAncestorConcurrentBinds reproduces the second
+// G1a from Jepsen run 25890153673.
+//
+// Reader 10.0.0.208 reconstructed el-1 and the new `losersOnKey: verdict`
+// debug log showed 7 binds visible on el-1, all with hash bytes from the
+// run, and losers=[] — i.e. no bind is marked a loser. The aborted writer
+// X (txn 7639884449200700087:…:6, hash bea34ea4) was in `binds_seen` but
+// not in losers. Its value 180 surfaced on the reader.
+//
+// Tracing the deps in logs: X.NewTip on el-1 = [449200700087, 41], which
+// reaches [450658684150, 43] via `41 → 40 → 39 → 43`. Offset 43 was
+// emitted with `tx:false` (non-tx) and kind Noop — a committed phantom-
+// write marker, NOT part of Y's commit branch (Y.TxnId differs; Y.NewTip
+// is offset 51, not 43).
+//
+// Y's NewTip on el-1 = [450658684150, 51]. Y's causal past reaches 43
+// via 51 → 48 → … → 44 → 43.
+//
+// So X and Y are concurrent siblings around shared ancestor 43. Neither
+// causal past contains the other's NewTip. `losersOnKey` MUST classify
+// them as concurrent and mark X (higher hash) as a loser.
+//
+// This test reproduces the minimal shape: shared non-tx Noop ancestor
+// with two concurrent binds branching off.
+func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeX uint64 = 7639884449200700087 // X's writer
+		nodeY uint64 = 7639884450658684150 // Y's writer (and ancestor's node)
+		nodeM uint64 = 7639884447148611983 // root effect's node
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	// Root committed data effect on el-1 (any predecessor).
+	root := putAt(Tip{nodeM, 28}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(10), NodeId: nodeM,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "root", []byte("root"))},
+	})
+
+	// Shared ancestor: non-tx Noop on el-1 (phantom-write marker), the
+	// kind production offset 43 is.
+	sharedAncestor := putAt(Tip{nodeY, 43}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(20), NodeId: nodeY,
+		Deps: []*pb.EffectRef{toPbRef(root)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+
+	// X's tx-data chain depends on sharedAncestor.
+	xData := putAt(Tip{nodeX, 41}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(60), NodeId: nodeX,
+		TxnId: "txn-X",
+		Deps:  []*pb.EffectRef{toPbRef(sharedAncestor)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "X-180", []byte("180"))},
+	})
+
+	// Y's tx-data chain also depends on sharedAncestor, with one extra hop.
+	yIntermediate := putAt(Tip{nodeY, 48}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(40), NodeId: nodeY,
+		TxnId: "txn-Y",
+		Deps:  []*pb.EffectRef{toPbRef(sharedAncestor)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "Y-pre", []byte("Y-pre"))},
+	})
+	yData := putAt(Tip{nodeY, 51}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(45), NodeId: nodeY,
+		TxnId: "txn-Y",
+		Deps:  []*pb.EffectRef{toPbRef(yIntermediate)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "Y-data", []byte("Y-data"))},
+	})
+
+	// Hashes chosen so Y < X (matches production: 15d2c1af < bea34ea4).
+	yHash := []byte{0x15, 0xd2, 0xc1, 0xaf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	xHash := []byte{0xbe, 0xa3, 0x4e, 0xa4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ForkChoiceLess(yHash, xHash) {
+		t.Fatalf("test setup: expected Y < X by hash")
+	}
+
+	xBind := putAt(Tip{nodeX, 42}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(70), NodeId: nodeX,
+		TxnId:          "txn-X",
+		ForkChoiceHash: xHash,
+		Deps:           []*pb.EffectRef{toPbRef(xData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(70), OriginatorNodeId: nodeX,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(xData)},
+			},
+		}},
+	})
+
+	yBind := putAt(Tip{nodeY, 53}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(55), NodeId: nodeY,
+		TxnId:          "txn-Y",
+		ForkChoiceHash: yHash,
+		Deps:           []*pb.EffectRef{toPbRef(yData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(55), OriginatorNodeId: nodeY,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(yData)},
+			},
+		}},
+	})
+
+	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
+
+	losers := e.losersOnKey("el-1")
+	t.Logf("losersOnKey(el-1) returned: %v", losers)
+	if _, ok := losers["txn-X"]; !ok {
+		t.Fatalf("BUG: expected X (higher hash) to be marked as loser. X and Y are concurrent siblings around shared non-tx ancestor — neither reaches the other. Got losers=%v", losers)
+	}
+	if _, ok := losers["txn-Y"]; ok {
+		t.Fatalf("Y (lower hash) should NOT be a loser. Got losers=%v", losers)
+	}
+}
+
+// TestLosersOnKey_SideChannelMakesSequential reproduces the *actual*
+// production scenario from Jepsen run 25890153673 — once we trace the
+// real Deps fields from the reader's `dag.walk` log:
+//
+// The writer X's chain on el-1 reaches Y not through any shared
+// ancestor, but through a *side-channel* effect on a third node:
+//
+//	X.NewTip = [449, 41] → 40 → 39 → {…, 453:70, …}
+//	453:70 is a non-tx Noop emitted on node 453 with deps that include
+//	[450, 51] (Y.NewTip!) and [450, 53] (Y.bind).
+//
+// So X is downstream of Y in the DAG. From any reader's reconstruct
+// perspective, X is sequential-after-Y. losersOnKey correctly returns
+// `losers=[]` (no fork-choice needed — they coexist).
+//
+// This means the BUG IS NOT in losersOnKey. It's in isRealConflict on
+// the writer, which didn't check reaches() at NACK time, hashed-out,
+// and aborted X — even though X had already observed Y transitively
+// via the side-channel noop. Reads include X.value (180). Jepsen
+// reports G1a because writer said :fail but value persists.
+//
+// This test asserts losersOnKey returns empty given the side-channel
+// shape — i.e., the algorithm correctly identifies the sequential
+// relationship. A separate test (or production fix) needs to make
+// isRealConflict match this behavior.
+func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeX     uint64 = 7639884449200700087 // X's writer
+		nodeY     uint64 = 7639884450658684150 // Y's writer
+		nodeThird uint64 = 7639884453256734367 // node hosting the side-channel noop
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	// Root effect on el-1.
+	root := putAt(Tip{nodeY, 19}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(5), NodeId: nodeY,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "root", []byte("root"))},
+	})
+
+	// Y's tx-data and bind on el-1 — committed earlier.
+	yData := putAt(Tip{nodeY, 51}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(30), NodeId: nodeY,
+		TxnId: "txn-Y",
+		Deps:  []*pb.EffectRef{toPbRef(root)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "Y", []byte("Y"))},
+	})
+	yHash := []byte{0x15, 0xd2, 0xc1, 0xaf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	yBind := putAt(Tip{nodeY, 53}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(35), NodeId: nodeY,
+		TxnId:          "txn-Y",
+		ForkChoiceHash: yHash,
+		Deps:           []*pb.EffectRef{toPbRef(yData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(35), OriginatorNodeId: nodeY,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(yData)},
+			},
+		}},
+	})
+
+	// Side-channel: a non-tx Noop on a third node whose deps include
+	// Y.NewTip and Y.bind. This is the kind of effect that gets emitted
+	// when some other operation reads el-1 after Y commits — its
+	// observation marker references Y.
+	sideChannel := putAt(Tip{nodeThird, 70}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(50), NodeId: nodeThird,
+		Deps: []*pb.EffectRef{toPbRef(yData), toPbRef(yBind)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+
+	// X's chain — emitted AFTER the side-channel exists. X's intermediate
+	// effect 39 has the side-channel as a dep, mirroring production where
+	// 39.deps = [450:43, 453:69, 453:70, 449:38].
+	x39 := putAt(Tip{nodeX, 39}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(60), NodeId: nodeX,
+		TxnId: "txn-X",
+		Deps:  []*pb.EffectRef{toPbRef(sideChannel)},
+		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	x40 := putAt(Tip{nodeX, 40}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(61), NodeId: nodeX,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x39)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	xData := putAt(Tip{nodeX, 41}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(62), NodeId: nodeX,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x40)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "X-180", []byte("180"))},
+	})
+	xHash := []byte{0xbe, 0xa3, 0x4e, 0xa4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ForkChoiceLess(yHash, xHash) {
+		t.Fatalf("test setup: expected Y < X by hash")
+	}
+	xBind := putAt(Tip{nodeX, 42}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(70), NodeId: nodeX,
+		TxnId:          "txn-X",
+		ForkChoiceHash: xHash,
+		Deps:           []*pb.EffectRef{toPbRef(xData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(70), OriginatorNodeId: nodeX,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(xData)},
+			},
+		}},
+	})
+
+	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
+
+	losers := e.losersOnKey("el-1")
+	t.Logf("losersOnKey(el-1) returned: %v", losers)
+	if len(losers) != 0 {
+		t.Fatalf("X reaches Y via side-channel noop — they are sequential, not concurrent. losersOnKey must return no losers. Got %v", losers)
+	}
+}
+
 // TestBindKeyClosure_ExpandsViaBindKeysField asserts bindKeyClosure
 // follows a bind's Keys list, so a reconstruction on one key picks up
 // loser verdicts on every key the bind touches.

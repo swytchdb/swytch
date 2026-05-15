@@ -304,19 +304,37 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 // causal log so all nodes can verify whether the key was modified
 // between WATCH and EXEC. The NOOP offset and post-flush TipSet pointer
 // are stored for comparison at BeginTx time.
+//
+// The noop is tx-marked with the upcoming transaction's id (generated
+// lazily here). This is what makes write-skew detection work across
+// nodes: a competing write on a watched key becomes a structural fork
+// sibling of the watching tx's bind, surfaced by reconstruct's
+// pairwise fork-choice on the key. Without the TxnId, the noop is an
+// anonymous committed effect that other writers can chain off,
+// producing false sequential relationships (the run-25890153673 G1a).
 func (c *Context) Watch(key string) {
 	if c.watchedKeys == nil {
 		c.watchedKeys = make(map[string]*watchedKeyState)
+	}
+
+	// Lazily materialize the txn id so the WATCH noop is tx-marked.
+	// The upcoming BeginTx (at MULTI/EXEC) inherits this id.
+	if c.txnID == "" {
+		c.txnID = c.engine.generateTxnID()
 	}
 
 	// Check if key has actual data BEFORE emitting the NOOP
 	snap, _, _, _ := c.engine.GetSnapshot(key)
 	hadData := snap != nil
 
-	// Emit NOOP to record the observation in the causal log
+	// Emit NOOP to record the observation in the causal log. We set
+	// TxnId explicitly because Emit only stamps it inside an active
+	// MULTI (c.inTx); WATCH is pre-MULTI but the noop still belongs
+	// to the upcoming tx.
 	if err := c.Emit(&pb.Effect{
-		Key:  []byte(key),
-		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+		Key:   []byte(key),
+		TxnId: c.txnID,
+		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 	}); err != nil {
 		slog.Error("Watch: NOOP emit failed", "key", key, "error", err)
 		return
@@ -339,9 +357,17 @@ func (c *Context) Watch(key string) {
 	}
 }
 
-// ClearWatches removes all watched keys without affecting transaction state.
+// ClearWatches removes all watched keys. Called from UNWATCH, DISCARD,
+// and EXEC's pre-BeginTx abort paths — all cases where the upcoming
+// transaction is being discarded. Also drops the lazily-generated
+// txnID so the next WATCH/MULTI starts fresh; if we're already inside
+// MULTI/EXEC (c.inTx) the id is load-bearing for in-flight effects
+// and must be preserved.
 func (c *Context) ClearWatches() {
 	clear(c.watchedKeys)
+	if !c.inTx {
+		c.txnID = ""
+	}
 }
 
 // BeginTx marks subsequent effects as transactional.
@@ -353,7 +379,11 @@ func (c *Context) BeginTx() {
 		return // nested transaction inherits outer
 	}
 	c.inTx = true
-	c.txnID = c.engine.generateTxnID()
+	// A prior WATCH may have already materialized our txn id; reuse it
+	// so the WATCH noop and the MULTI/EXEC effects share one tx.
+	if c.txnID == "" {
+		c.txnID = c.engine.generateTxnID()
+	}
 }
 
 // CheckWatches validates WATCH observations and emits transactional NOOPs
@@ -386,6 +416,7 @@ func (c *Context) CheckWatches() bool {
 		// Key was modified — abort
 		clear(c.watchedKeys)
 		c.inTx = false
+		c.txnID = ""
 		c.txSnapshot = nil
 		return false
 	}
@@ -401,6 +432,7 @@ func (c *Context) CheckWatches() bool {
 			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
 			clear(c.watchedKeys)
 			c.inTx = false
+			c.txnID = ""
 			c.txSnapshot = nil
 			return false
 		}
