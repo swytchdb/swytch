@@ -652,6 +652,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	initialTips := e.index.Contains(key)
 
+	_, subscribedCanonical := e.subscriptions.Load(key)
+	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+
 	// Consume deps: any dep that is a current tip becomes an ancestor.
 	deps := eff.Deps
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -662,38 +665,39 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 			}
 		}
 	}
-	if len(deps) > 0 {
-		e.index.RemoveTips(key, fromPbRefs(deps))
+	if canonicalIndexable {
+		if len(deps) > 0 {
+			e.index.RemoveTips(key, fromPbRefs(deps))
+		}
+		e.updateIndex(key, nil, r(notify.Origin))
 	}
 
-	e.updateIndex(key, nil, r(notify.Origin))
-
-	// Bind effects must be indexed under ALL keys they touch, not just
-	// the canonical key. Otherwise NACKs for non-canonical keys won't
-	// include the bind in their tip details, and competing transactions
-	// won't detect the conflict via fork-choice.
 	if bind := eff.GetTxnBind(); bind != nil {
 		for _, kb := range bind.Keys {
 			kbKey := string(kb.Key)
-			if kbKey != key { // already indexed above
-				preTips := e.index.Contains(kbKey)
-				var preOffsets []Tip
-				if preTips != nil {
-					preOffsets = preTips.Tips()
-				}
-				slog.Debug("HandleRemote: indexing bind for additional key (before)",
-					"key", kbKey, "bind_offset", notify.Origin,
-					"pre_tips", preOffsets)
-				e.updateIndex(kbKey, nil, r(notify.Origin))
-				postTips := e.index.Contains(kbKey)
-				var postOffsets []Tip
-				if postTips != nil {
-					postOffsets = postTips.Tips()
-				}
-				slog.Debug("HandleRemote: indexing bind for additional key (after)",
-					"key", kbKey, "bind_offset", notify.Origin,
-					"post_tips", postOffsets)
+			if kbKey == key { // canonical handled above
+				continue
 			}
+			if _, ok := e.subscriptions.Load(kbKey); !ok {
+				continue
+			}
+			preTips := e.index.Contains(kbKey)
+			var preOffsets []Tip
+			if preTips != nil {
+				preOffsets = preTips.Tips()
+			}
+			slog.Debug("HandleRemote: indexing bind for additional key (before)",
+				"key", kbKey, "bind_offset", notify.Origin,
+				"pre_tips", preOffsets)
+			e.updateIndex(kbKey, nil, r(notify.Origin))
+			postTips := e.index.Contains(kbKey)
+			var postOffsets []Tip
+			if postTips != nil {
+				postOffsets = postTips.Tips()
+			}
+			slog.Debug("HandleRemote: indexing bind for additional key (after)",
+				"key", kbKey, "bind_offset", notify.Origin,
+				"post_tips", postOffsets)
 		}
 	}
 
