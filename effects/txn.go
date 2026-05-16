@@ -92,7 +92,6 @@ type pendingTxnKey struct {
 // node. All call sites must reach the same answer so the client's
 // abort/commit signal matches the cluster's view of the bind.
 func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTipDetail) bool {
-	// Effects whose deps include any of our tx offsets are sequential, not concurrent
 	for _, dep := range detail.Deps {
 		if r(dep) == ptxn.bindOffset {
 			return false
@@ -101,6 +100,13 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 			if r(dep) == pk.newTip {
 				return false
 			}
+		}
+	}
+	if detail.Ref != nil {
+		target := r(detail.Ref)
+		var zero Tip
+		if target != zero && e.reachesFromTx(ptxn, target) {
+			return false
 		}
 	}
 
@@ -159,6 +165,50 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 		return affectsSameData(pk, detail)
 	}
 
+	return false
+}
+
+// reachesFromTx returns true if target is in the DAG ancestry of our
+// pending tx (its bind offset or any per-key NewTip), walking eff.Deps
+// via the local effect cache. Walks until the cache runs out — a miss
+// stops that branch rather than fetching, so an unreachable verdict is
+// "we can't confirm sequentiality from local state" not "they are
+// definitely concurrent."
+func (e *Engine) reachesFromTx(ptxn *pendingTxn, target Tip) bool {
+	var zero Tip
+	if target == zero {
+		return false
+	}
+	visited := make(map[Tip]struct{})
+	stack := make([]Tip, 0, 1+len(ptxn.keys))
+	push := func(t Tip) {
+		if t == zero {
+			return
+		}
+		if _, seen := visited[t]; seen {
+			return
+		}
+		visited[t] = struct{}{}
+		stack = append(stack, t)
+	}
+	push(ptxn.bindOffset)
+	for _, pk := range ptxn.keys {
+		push(pk.newTip)
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == target {
+			return true
+		}
+		eff, err := e.getEffect(cur)
+		if err != nil {
+			continue
+		}
+		for _, dep := range eff.Deps {
+			push(r(dep))
+		}
+	}
 	return false
 }
 
