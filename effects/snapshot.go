@@ -687,7 +687,17 @@ func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[strin
 			if bind != nil {
 				for _, kb := range bind.Keys {
 					other := string(kb.Key)
-					addBindTip(other, r(kb.NewTip))
+					if other != k {
+						// Cross-key NewTip: seed losersOnKey's walk on
+						// `other` so it reaches this bind even when the
+						// only path goes through the current key.
+						// Same-key NewTip is already reachable from
+						// `other`'s own tipset; recording it here just
+						// piles redundant starting tips into long
+						// single-key chains and explodes the pairwise
+						// reach check.
+						addBindTip(other, r(kb.NewTip))
+					}
 					if _, ok := keys[other]; !ok {
 						keys[other] = struct{}{}
 						queue = append(queue, other)

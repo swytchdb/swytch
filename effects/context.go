@@ -386,6 +386,11 @@ func (c *Context) BeginTx() {
 	if c.txnID == "" {
 		c.txnID = c.engine.generateTxnID()
 	}
+	// SSI: snapshot the index at txn start so every read/emit within
+	// the txn sees a consistent committed state.
+	if c.txSnapshot == nil {
+		c.txSnapshot = c.engine.index.Snapshot()
+	}
 }
 
 // CheckWatches validates WATCH observations and emits transactional NOOPs
@@ -395,9 +400,12 @@ func (c *Context) BeginTx() {
 // Returns false if any watched key was modified — the caller should abort
 // the transaction and return a null array to the client.
 func (c *Context) CheckWatches() bool {
-	// Capture index snapshot for SSI — all reads within the transaction
-	// will use this snapshot instead of the live index.
-	c.txSnapshot = c.engine.index.Snapshot()
+	// BeginTx already captured the SSI snapshot at txn start. Cover the
+	// case where CheckWatches is called without a prior BeginTx (no
+	// transactional emits before EXEC).
+	if c.txSnapshot == nil {
+		c.txSnapshot = c.engine.index.Snapshot()
+	}
 
 	if len(c.watchedKeys) == 0 {
 		return true

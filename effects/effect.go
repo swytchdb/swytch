@@ -423,39 +423,47 @@ func fromPbRefs(refs []*pb.EffectRef) []Tip {
 	return tips
 }
 
-// resolveTipDeps substitutes pre-tx deps for in-progress transaction tips.
-// For each Tip, if it's tracked in pendingTxTips (an in-progress tx effect),
-// replace it with the pre-tx deps so we never depend on uncommitted state.
+// resolveTipDeps walks each tip back through pendingTxTips until it
+// lands on a committed ancestor (a bind or a non-tx effect). SSI
+// requires that every dep we hand a new effect references state that
+// has already been committed somewhere in the cluster — never a tip
+// belonging to a foreign in-flight transaction. Single-level
+// substitution would leave us pointing at another tx-tipped offset of
+// the same in-flight txn, which is what we're trying to avoid.
 func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
+	seen := make(map[Tip]struct{}, len(tips))
 	var resolved []Tip
 	changed := false
-	for _, tp := range tips {
-		if deps, ok := e.pendingTxTips.Load(tp); ok {
-			if len(deps) == 0 {
-				// Empty deps means the tx created this key — the tip is
-				// the only reference to that causal history; keep it.
-				resolved = append(resolved, tp)
-			} else {
-				resolved = append(resolved, deps...)
-			}
-			changed = true
-		} else {
-			resolved = append(resolved, tp)
+	var walk func(Tip)
+	walk = func(tp Tip) {
+		if _, dup := seen[tp]; dup {
+			return
 		}
+		seen[tp] = struct{}{}
+		deps, ok := e.pendingTxTips.Load(tp)
+		if !ok {
+			resolved = append(resolved, tp)
+			return
+		}
+		changed = true
+		if len(deps) == 0 {
+			// First write on this key; no committed predecessor exists.
+			// Keep the tx tip — the new emit has nothing else to anchor
+			// on, and reconstruct's tx-skip filtering handles it.
+			resolved = append(resolved, tp)
+			return
+		}
+		for _, d := range deps {
+			walk(d)
+		}
+	}
+	for _, tp := range tips {
+		walk(tp)
 	}
 	if !changed {
 		return tips
 	}
-	// Deduplicate
-	seen := make(map[Tip]struct{}, len(resolved))
-	deduped := resolved[:0]
-	for _, v := range resolved {
-		if _, ok := seen[v]; !ok {
-			seen[v] = struct{}{}
-			deduped = append(deduped, v)
-		}
-	}
-	return deduped
+	return resolved
 }
 
 // HandleRemote processes a remote effect notification: stores the effect

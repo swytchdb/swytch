@@ -2994,6 +2994,124 @@ func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 	}
 }
 
+// TestIsRealConflict_TransitiveReachMakesSequential is the originator-
+// side counterpart to TestLosersOnKey_SideChannelMakesSequential. Same
+// production DAG: X's pre-bind chain reaches Y's bind transitively via
+// a noop's deps. When X's flushTx receives a NACK whose detail points
+// to Y's bind, isRealConflict must derive the same verdict as
+// reconstruct's losersOnKey — sequential, not concurrent — and return
+// false so X commits instead of aborting. A 1-hop check on detail.Deps
+// alone would miss the transitive path and fall through to the hash
+// compare, where Y's lower hash would falsely trigger an abort.
+func TestIsRealConflict_TransitiveReachMakesSequential(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeX     uint64 = 7639884449200700087
+		nodeY     uint64 = 7639884450658684150
+		nodeThird uint64 = 7639884453256734367
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	root := putAt(Tip{nodeY, 19}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(5), NodeId: nodeY,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "root", []byte("root"))},
+	})
+
+	yData := putAt(Tip{nodeY, 51}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(30), NodeId: nodeY,
+		TxnId: "txn-Y",
+		Deps:  []*pb.EffectRef{toPbRef(root)},
+		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "Y", []byte("Y"))},
+	})
+	yHash := []byte{0x15, 0xd2, 0xc1, 0xaf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	yBind := putAt(Tip{nodeY, 53}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(35), NodeId: nodeY,
+		TxnId:          "txn-Y",
+		ForkChoiceHash: yHash,
+		Deps:           []*pb.EffectRef{toPbRef(yData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(35), OriginatorNodeId: nodeY,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(yData)},
+			},
+		}},
+	})
+
+	sideChannel := putAt(Tip{nodeThird, 70}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(50), NodeId: nodeThird,
+		Deps: []*pb.EffectRef{toPbRef(yData), toPbRef(yBind)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+
+	x39 := putAt(Tip{nodeX, 39}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(60), NodeId: nodeX,
+		TxnId: "txn-X",
+		Deps:  []*pb.EffectRef{toPbRef(sideChannel)},
+		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	x40 := putAt(Tip{nodeX, 40}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(61), NodeId: nodeX,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x39)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	xData := putAt(Tip{nodeX, 41}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(62), NodeId: nodeX,
+		TxnId: "txn-X", Deps: []*pb.EffectRef{toPbRef(x40)},
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "X-180", []byte("180"))},
+	})
+	xHash := []byte{0xbe, 0xa3, 0x4e, 0xa4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ForkChoiceLess(yHash, xHash) {
+		t.Fatalf("test setup: expected Y < X by hash")
+	}
+	xBind := putAt(Tip{nodeX, 42}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(70), NodeId: nodeX,
+		TxnId:          "txn-X",
+		ForkChoiceHash: xHash,
+		Deps:           []*pb.EffectRef{toPbRef(xData)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(70), OriginatorNodeId: nodeX,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(xData)},
+			},
+		}},
+	})
+
+	ptxn := &pendingTxn{
+		txnID:          "txn-X",
+		txnHLC:         time.Unix(0, 70),
+		originNode:     pb.NodeID(nodeX),
+		forkChoiceHash: xHash,
+		bindOffset:     xBind,
+		keys: []pendingTxnKey{
+			{key: "el-1", newTip: xData, collection: pb.CollectionKind_ORDERED},
+		},
+		done: make(chan struct{}),
+	}
+
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: yBind[0], Offset: yBind[1]},
+		Hlc:                sTs(35),
+		IsBind:             true,
+		BindForkChoiceHash: yHash,
+		Deps:               []*pb.EffectRef{toPbRef(yData)},
+	}
+
+	if e.isRealConflict(ptxn, "el-1", detail) {
+		t.Fatalf("X transitively reaches Y via the noop chain — isRealConflict must return false (sequential, not concurrent). Got true.")
+	}
+}
+
 // TestBindKeyClosure_ExpandsViaBindKeysField asserts bindKeyClosure
 // follows a bind's Keys list, so a reconstruction on one key picks up
 // loser verdicts on every key the bind touches.
