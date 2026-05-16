@@ -820,6 +820,123 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	return nacks, nil
 }
 
+// handleBackfill ingests an effect we've learned about indirectly — via a
+// NACK's tip details, a recursive dep fetch, or anti-entropy. It does the
+// index work HandleRemote does (cache, pendingTxTips, canonical update,
+// cross-key bind indexing) but skips the horizon-wait entry: the bind has
+// already been adjudicated at its originator and is past its wait at the
+// peer that named it to us. Routing it through horizon would re-enter
+// HorizonSet.Add for an already-visible txn, which is non-idempotent and
+// makes the bind invisible again until the next timer fires.
+func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
+	if notify == nil || notify.Origin == nil {
+		return nil
+	}
+
+	effectData := notify.EffectData
+	if len(effectData) == 0 {
+		if e.broadcaster == nil {
+			return nil
+		}
+		var err error
+		effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+		if err != nil {
+			return err
+		}
+	}
+
+	protoData := effectData
+	if len(effectData) > 4 {
+		keyLen := binary.LittleEndian.Uint32(effectData[:4])
+		if keyLen > 0 && uint32(len(effectData)) >= 4+keyLen {
+			protoData = effectData[4+keyLen:]
+		}
+	}
+
+	eff := &pb.Effect{}
+	if err := UnmarshalEffect(protoData, eff); err != nil {
+		return err
+	}
+
+	if !isSystemKey(eff.Key) {
+		key := string(eff.Key)
+		_, subscribed := e.subscriptions.Load(key)
+		authoritative := subscribed || e.index.Contains(key) != nil
+		if !authoritative {
+			if bind := eff.GetTxnBind(); bind != nil {
+				for _, kb := range bind.Keys {
+					kbKey := string(kb.Key)
+					if _, sub := e.subscriptions.Load(kbKey); sub || e.index.Contains(kbKey) != nil {
+						authoritative = true
+						break
+					}
+				}
+			}
+		}
+		if !authoritative {
+			return nil
+		}
+	}
+
+	expected := ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+	if !bytes.Equal(eff.ForkChoiceHash, expected) {
+		return fmt.Errorf("fork_choice_hash missing or mismatch for offset %v", notify.Origin)
+	}
+
+	if e.effectCache != nil {
+		e.effectCache.Put(r(notify.Origin), eff)
+	}
+
+	if eff.TxnId != "" && eff.GetTxnBind() == nil {
+		e.pendingTxTips.Store(r(notify.Origin), fromPbRefs(eff.Deps))
+	}
+
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			e.pendingTxTips.Delete(r(kb.NewTip))
+		}
+	}
+
+	key := string(eff.Key)
+	_, subscribedCanonical := e.subscriptions.Load(key)
+	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+
+	deps := eff.Deps
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			if string(kb.Key) == key {
+				deps = []*pb.EffectRef{kb.NewTip}
+				break
+			}
+		}
+	}
+	if canonicalIndexable {
+		if len(deps) > 0 {
+			e.index.RemoveTips(key, fromPbRefs(deps))
+		}
+		e.updateIndex(key, nil, r(notify.Origin))
+	}
+
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			kbKey := string(kb.Key)
+			if kbKey == key {
+				continue
+			}
+			if _, ok := e.subscriptions.Load(kbKey); !ok {
+				continue
+			}
+			e.updateIndex(kbKey, nil, r(notify.Origin))
+		}
+	}
+
+	if e.cache != nil {
+		e.cache.Evict(key)
+	}
+
+	return nil
+}
+
 // handleRemoteBind processes a TransactionalBindEffect received remotely.
 func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset Tip, txnID string) {
 	if e.horizon != nil {
@@ -1193,8 +1310,8 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 			Origin: toPbRef(off),
 			Key:    nack.Key,
 		}
-		if _, err := e.HandleRemote(notify); err != nil {
-			slog.Debug("ingestNackTips: HandleRemote failed",
+		if err := e.handleBackfill(notify); err != nil {
+			slog.Debug("ingestNackTips: handleBackfill failed",
 				"ref", off, "error", err)
 			continue
 		}
@@ -1516,11 +1633,10 @@ func (e *Engine) probeAndFetchKey(key string) {
 	slog.Debug("anti-entropy: found missing tips", "key", key, "missing", len(missing))
 
 	// Fetch full chain from missing tips and route each effect through
-	// HandleRemote so the normal bind/tx-tip/horizon machinery runs.
-	// Direct updateIndex would slip binds into the index without ever
-	// passing through handleRemoteBind — they'd skip HorizonSet entirely
-	// and become visible to reads before the 1×RTT competing-bind wait
-	// could possibly do its job.
+	// handleBackfill so the cross-key bind indexing runs. HandleRemote
+	// would re-enter HorizonSet for already-visible binds, making them
+	// invisible again until the next 1×RTT timer fires; backfilled effects
+	// have already been adjudicated at their originator.
 	fetched := make(map[Tip]bool)
 	fetchStack := make([]Tip, len(missing))
 	copy(fetchStack, missing)
@@ -1553,8 +1669,8 @@ func (e *Engine) probeAndFetchKey(key string) {
 			Key:        fetchedEff.Key,
 			EffectData: fetchedData,
 		}
-		if _, herr := e.HandleRemote(notify); herr != nil {
-			slog.Debug("anti-entropy: HandleRemote failed",
+		if herr := e.handleBackfill(notify); herr != nil {
+			slog.Debug("anti-entropy: handleBackfill failed",
 				"ref", off, "error", herr)
 			continue
 		}
