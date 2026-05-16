@@ -1041,9 +1041,12 @@ func (c *Context) flushTx() error {
 				c.engine.horizon.Add(c.txnID, bindOffset, bind)
 			}
 			// Replicate to all subscribers concurrently, collect responses.
-			// Track successes — we need a majority to commit.
-			// Network errors to individual peers don't abort unless
-			// we lose majority.
+			// Per the TLA+ spec (ExactlyOnce.CommitPop): commit requires
+			// every subscriber to respond (ACK or NACK). A peer that ACK'd
+			// has committed via the "once you've spoken" invariant to NACK
+			// any subsequent competing bind on this key. A peer we couldn't
+			// reach hasn't made that commitment, so we cannot rely on it
+			// to enforce AtMostOneCommit.
 			type replicaResult struct {
 				subID pb.NodeID
 				nacks []*pb.NackNotify
@@ -1065,7 +1068,7 @@ func (c *Context) flushTx() error {
 			}
 			wg.Wait()
 
-			ackCount := 0
+			responseCount := 0
 			for _, res := range results {
 				if res.err != nil {
 					slog.Warn("flushTx: ReplicateTo failed",
@@ -1074,7 +1077,7 @@ func (c *Context) flushTx() error {
 						"error", res.err)
 					continue
 				}
-				ackCount++
+				responseCount++
 				for _, nack := range res.nacks {
 					slog.Debug("flushTx: received NACK",
 						"bind_offset", bindOffset,
@@ -1108,28 +1111,16 @@ func (c *Context) flushTx() error {
 			}
 
 			if ptxn.state.Load() != txnStateAborted {
-				// +1 for ourselves — we always have our own bind
-				totalNodes := len(subscribers) + 1
-				reachable := ackCount + 1
-				if reachable > totalNodes/2 {
-					if commitPendingTxn(ptxn) {
-						slog.Debug("flushTx: majority responded, committed",
-							"bind_offset", bindOffset,
-							"acks", ackCount,
-							"subscribers", len(subscribers))
-					}
-				} else {
-					// The Bind is already broadcast and stored on peers.
-					// Aborting locally would leave tentative effects
-					// visible elsewhere (G1a). Commit and let fork-choice
-					// resolve any competing Binds on reconnect.
-					// The replication layer already marked unreachable
-					// peers dead, so subsequent pre-checks will block.
-					slog.Warn("flushTx: minority partition post-broadcast, committing holographically",
+				if responseCount < len(subscribers) {
+					slog.Warn("flushTx: not all subscribers responded, aborting",
 						"bind_offset", bindOffset,
-						"acks", ackCount,
+						"responses", responseCount,
 						"subscribers", len(subscribers))
-					commitPendingTxn(ptxn)
+					abortPendingTxn(ptxn)
+				} else if commitPendingTxn(ptxn) {
+					slog.Debug("flushTx: all subscribers responded, committed",
+						"bind_offset", bindOffset,
+						"subscribers", len(subscribers))
 				}
 			}
 
