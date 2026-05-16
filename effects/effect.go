@@ -1189,12 +1189,6 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 			continue
 		}
 		visited[off] = true
-		if e.effectCache != nil {
-			if cached, ok := e.effectCache.Get(off, 0); ok {
-				stack = append(stack, fromPbRefs(cached.Deps)...)
-				continue
-			}
-		}
 		notify := &pb.OffsetNotify{
 			Origin: toPbRef(off),
 			Key:    nack.Key,
