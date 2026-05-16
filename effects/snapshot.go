@@ -197,6 +197,11 @@ func (e *Engine) ensureSubscribed(key string) error {
 	}
 	offset := e.nextOffset()
 
+	if e.effectCache != nil {
+		e.effectCache.Put(offset, eff)
+	}
+	e.updateIndex(key, nil, offset)
+
 	if e.broadcaster == nil {
 		succeeded = true
 		return nil
