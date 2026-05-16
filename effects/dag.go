@@ -83,6 +83,14 @@ func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
 		return nil
 	}
 
+	// Phase 1.5: trim nodes already folded into the LCA snapshot. BFS may
+	// have walked into the snapshot's dep chain (because the snapshot was
+	// dequeued with a non-empty queue, so it wasn't terminal at that point).
+	// Those nodes are already represented in the snapshot's reduced state;
+	// leaving them in d.nodes makes ReduceChain process the same data
+	// effects twice — duplicates in list reads, double-counts in scalars.
+	d.trimAncestorsOfLCA()
+
 	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		slog.Debug("dag.walk", "key", d.key, "nodes", len(d.nodes),
 			"lca", d.lcaTip, "encoded", d.encode(tips))
@@ -176,6 +184,61 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 		}
 	}
 	return nil
+}
+
+// trimAncestorsOfLCA removes from d.nodes every node in the transitive
+// dep-ancestry of the LCA snapshot. Those nodes' state is already folded
+// into the snapshot's reduced effect; including them in ReduceChain would
+// double-count their data effects (the symptom is duplicate elements in
+// a list-append read).
+//
+// Only nodes already in d.nodes are removed — we don't fetch additional
+// effects from the engine. The bfs that populated d.nodes is the only
+// source of folded-ancestor entries we need to clear.
+func (d *dag) trimAncestorsOfLCA() {
+	var zero Tip
+	if d.lcaTip == zero {
+		return
+	}
+	lcaEff, ok := d.nodes[d.lcaTip]
+	if !ok || lcaEff.GetSnapshot() == nil {
+		return
+	}
+	folded := make(map[Tip]struct{})
+	stack := make([]Tip, 0, len(lcaEff.Deps))
+	for _, dep := range lcaEff.Deps {
+		stack = append(stack, r(dep))
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, seen := folded[cur]; seen {
+			continue
+		}
+		folded[cur] = struct{}{}
+		eff, ok := d.nodes[cur]
+		if !ok {
+			continue
+		}
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == d.key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.Deps
+		}
+		for _, dep := range refs {
+			stack = append(stack, r(dep))
+		}
+	}
+	for t := range folded {
+		delete(d.nodes, t)
+		delete(d.visited, t)
+	}
 }
 
 // topoCollect does a post-order DFS within the collected nodes, producing
