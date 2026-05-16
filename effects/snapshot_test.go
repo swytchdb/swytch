@@ -750,7 +750,7 @@ func TestGetSnapshot_OrderedList(t *testing.T) {
 	}
 }
 
-func TestGetSnapshot_DELReturnsRemoveOp(t *testing.T) {
+func TestGetSnapshot_DELReturnsNil(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log, nil)
 
@@ -764,12 +764,20 @@ func TestGetSnapshot_DELReturnsRemoveOp(t *testing.T) {
 	})
 	e.index.Insert("k", nil, keytrie.NewTipSet(off2))
 
+	// After DEL, GetSnapshot returns nil (key is logically non-existent).
+	// Prior behavior surfaced a REMOVE_OP marker, but with subscription
+	// self-install during ensureSubscribed the REMOVE_OP gets merged into
+	// a metadata-only ReducedEffect (the subscription overwrites the
+	// tombstone in ReduceChain), and engine.GetSnapshot now strips
+	// metadata-only / tombstone results to nil so callers see a
+	// consistent "key doesn't exist" signal — same as for a never-written
+	// key (see TestGetSnapshot_MissReturnsNil).
 	r, _, _, err := e.GetSnapshot("k")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r == nil || r.Op != pb.EffectOp_REMOVE_OP {
-		t.Fatal("expected REMOVE_OP after DEL")
+	if r != nil {
+		t.Fatalf("expected nil after DEL, got %+v", r)
 	}
 }
 
@@ -940,12 +948,18 @@ func TestGetSnapshot_ReturnsTips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tips) != 2 {
-		t.Fatalf("expected 2 tips, got %d", len(tips))
+	// GetSnapshot's ensureSubscribed installs the originator's own
+	// SubscriptionEffect locally, which becomes a third tip alongside off1
+	// and off2 (it has no descendant yet, so it stays at the head).
+	if len(tips) != 3 {
+		t.Fatalf("expected 3 tips (off1 + off2 + subscription), got %d", len(tips))
 	}
-	tipSet := map[Tip]bool{tips[0]: true, tips[1]: true}
+	tipSet := make(map[Tip]bool, len(tips))
+	for _, tp := range tips {
+		tipSet[tp] = true
+	}
 	if !tipSet[off1] || !tipSet[off2] {
-		t.Fatalf("expected tips {%v, %v}, got %v", off1, off2, tips)
+		t.Fatalf("expected tips to include {%v, %v}, got %v", off1, off2, tips)
 	}
 }
 

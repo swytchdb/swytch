@@ -1168,13 +1168,27 @@ func TestGetSnapshot_ExcludesPendingTxTips(t *testing.T) {
 	if txTips == nil {
 		t.Fatal("expected tips after tx flush")
 	}
-	// Find the tx tip (differs from committed offset)
+	// Find the tx bind tip (differs from committed offset, and skip the
+	// originator's own subscription tip that ensureSubscribed installed
+	// during the tx flush — that one is commutative metadata, not the
+	// bind we want to simulate as pending).
 	var txOff Tip
 	for _, off := range txTips.Tips() {
-		if off != committedOff {
-			txOff = off
-			break
+		if off == committedOff {
+			continue
 		}
+		eff, ok := e.effectCache.Get(off, 0)
+		if !ok {
+			continue
+		}
+		if eff.GetSubscription() != nil {
+			continue
+		}
+		txOff = off
+		break
+	}
+	if txOff == (Tip{}) {
+		t.Fatal("did not find tx bind tip in index after tx flush")
 	}
 
 	// Register as in-progress tx tip (simulating the tx being pending)

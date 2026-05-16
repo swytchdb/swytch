@@ -795,15 +795,26 @@ func (c *Context) flushTx() error {
 			}
 		}
 		for t := range currentSet {
-			if !initialSet[t] {
-				slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
-					"key", key, "new_tip", t, "initial_tips", initial)
-				for _, ck3 := range c.keys {
-					c.engine.pendingTxTips.Delete(ck3.lastOffset)
-				}
-				c.reset()
-				return ErrTxnAborted
+			if initialSet[t] {
+				continue
 			}
+			// Subscription tips are commutative metadata, not bind writes
+			// — they can't be the "remote bind landed during txn window"
+			// case this axis exists to catch. ensureSubscribed installs
+			// the originator's own SubscriptionEffect into the index
+			// during flushTx, AFTER initialTips was captured at Emit
+			// time, so the originator's own subscription would otherwise
+			// look like a competitor and trigger a spurious abort.
+			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+				continue
+			}
+			slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
+				"key", key, "new_tip", t, "initial_tips", initial)
+			for _, ck3 := range c.keys {
+				c.engine.pendingTxTips.Delete(ck3.lastOffset)
+			}
+			c.reset()
+			return ErrTxnAborted
 		}
 	}
 
@@ -849,16 +860,27 @@ func (c *Context) flushTx() error {
 					break
 				}
 			}
-			if !isOurs {
-				// Concurrent effect on watched key → SSI conflict
-				slog.Debug("SSI conflict: concurrent write on watched key",
-					"tip", t, "our_tip", myTip)
-				for _, ck3 := range c.keys {
-					c.engine.pendingTxTips.Delete(ck3.lastOffset)
-				}
-				c.reset()
-				return ErrTxnAborted
+			if isOurs {
+				continue
 			}
+			// Subscription tips are commutative metadata, not data writes
+			// — they cannot create a data fork. ensureSubscribed installs
+			// the originator's own SubscriptionEffect into the index
+			// during flushTx, after the SSI snapshot was taken by
+			// BeginTx, so without this skip the originator's own
+			// subscription tip would look like a concurrent external
+			// write and trigger a spurious abort.
+			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+				continue
+			}
+			// Concurrent effect on watched key → SSI conflict
+			slog.Debug("SSI conflict: concurrent write on watched key",
+				"tip", t, "our_tip", myTip)
+			for _, ck3 := range c.keys {
+				c.engine.pendingTxTips.Delete(ck3.lastOffset)
+			}
+			c.reset()
+			return ErrTxnAborted
 		}
 	}
 

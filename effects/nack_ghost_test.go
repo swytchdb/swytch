@@ -267,10 +267,28 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
 	}
 
-	// Index must NOT have either ghost tip — we never install on
-	// full failure.
-	if e.index.Contains(key) != nil {
-		t.Fatalf("index has tips after fully-failed bootstrap: %v", e.index.Contains(key).Tips())
+	// ensureSubscribed now installs the originator's own SubscriptionEffect
+	// into the local index before broadcasting, so a fully-failed bootstrap
+	// still leaves that one tip in place. What MUST NOT happen is installing
+	// any of the unreachable ghost tips — that would advertise ghost
+	// authority to others.
+	tips := e.index.Contains(key)
+	if tips == nil {
+		t.Fatal("expected our own subscription tip to be installed locally")
+	}
+	for _, tp := range tips.Tips() {
+		if tp == ghostA || tp == ghostB {
+			t.Fatalf("ghost tip %v installed despite unreachable bootstrap", tp)
+		}
+		eff, ok := e.effectCache.Get(tp, 0)
+		if !ok {
+			t.Fatalf("tip %v not in effectCache", tp)
+		}
+		if eff.GetSubscription() == nil || pb.NodeID(eff.NodeId) != e.nodeID {
+			t.Fatalf("unexpected installed tip %v (effect %+v) — only the local "+
+				"SubscriptionEffect should be present after a fully-failed bootstrap",
+				tp, eff)
+		}
 	}
 
 	// Subscription state is incomplete with retry in flight.

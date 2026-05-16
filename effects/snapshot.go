@@ -143,6 +143,21 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		e.cache.Put(key, result)
 	}
 
+	// Targeted filter: surface a metadata-only ReducedEffect as nil so
+	// callers don't see a "key exists" signal driven by the originator's
+	// own SubscriptionEffect (installed by ensureSubscribed during this
+	// call) or by a REMOVE_OP tombstone. Expiry, element-level expiry,
+	// and empty-collection auto-delete are presentation concerns and stay
+	// in filterSnapshot for the Context layer — engine.GetSnapshot must
+	// return raw causal state for those cases per the test
+	// TestGetSnapshot_ExpiredReconstructedStillReturnsState. When we
+	// surface nil here, also zero chainLen so the caller's compaction
+	// path doesn't dereference a nil result.
+	if result != nil &&
+		result.Scalar == nil && len(result.NetAdds) == 0 && len(result.OrderedElements) == 0 &&
+		(result.Op == pb.EffectOp_UNKNOWN_OP || result.Op == pb.EffectOp_REMOVE_OP) {
+		return nil, snapshotTips, 0, nil
+	}
 	return result, snapshotTips, chainLen, nil
 }
 
