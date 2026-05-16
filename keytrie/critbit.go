@@ -425,22 +425,36 @@ func (c *Critbit) RemoveTips(key string, refs []EffectRef) {
 }
 
 func (c *Critbit) Delete(key string) bool {
+	return c.DeleteAndSnapshot(key) != nil
+}
+
+// DeleteAndSnapshot marks the leaf deleted and atomically swaps its tips
+// to nil, returning the previous tip set (or nil if the key did not
+// exist or was already deleted).
+//
+// Flipping deleted first makes Contains/RemoveTips ignore the leaf; the
+// subsequent tips.Swap(nil) ensures any concurrent Insert with a non-nil
+// old fails its tips.CAS because tips no longer matches their snapshot.
+// Insert with old=nil (intentional revival) re-seeds old from the live
+// tips and proceeds via the existing revival path.
+func (c *Critbit) DeleteAndSnapshot(key string) *TipSet {
 	if c.closed.Load() {
-		return false
+		return nil
 	}
 	rootNode := c.root.Load()
 	if rootNode == nil {
-		return false
+		return nil
 	}
 	leaf := c.findBestMatch(rootNode, key)
 	if leaf == nil || leaf.key != key {
-		return false
+		return nil
 	}
-	if leaf.deleted.CompareAndSwap(false, true) {
-		c.size.Add(-1)
-		return true
+	if !leaf.deleted.CompareAndSwap(false, true) {
+		return nil
 	}
-	return false
+	old := leaf.tips.Swap(nil)
+	c.size.Add(-1)
+	return old
 }
 
 func (c *Critbit) Size() int64 {

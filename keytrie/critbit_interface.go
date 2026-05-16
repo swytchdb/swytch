@@ -37,6 +37,12 @@ type KeyIndex interface {
 	// Delete removes a key. Returns true if the key existed.
 	Delete(key string) bool
 
+	// DeleteAndSnapshot removes a key and returns the tip set it held
+	// at the moment of deletion. Returns nil if the key did not exist
+	// or was already deleted. Atomic w.r.t. concurrent Insert: a writer
+	// holding a stale non-nil `old` will fail its CAS.
+	DeleteAndSnapshot(key string) *TipSet
+
 	// Contains checks if a key exists and returns its TipSet.
 	// Returns nil if key doesn't exist.
 	Contains(key string) *TipSet

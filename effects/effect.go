@@ -1257,7 +1257,10 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	}
 	defer e.unsubInFlight.Delete(key)
 
-	tipSet := e.index.Contains(key)
+	// Atomically take the deletion: any concurrent updateIndex with a
+	// stale non-nil old will fail its tips.CAS once tips is cleared,
+	// and the snapshot we broadcast matches the tips we actually drop.
+	tipSet := e.index.DeleteAndSnapshot(key)
 	if tipSet == nil {
 		// Already torn down or never installed.
 		e.subscriptions.Delete(key)
@@ -1289,7 +1292,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 		}
 	}
 
-	e.index.Delete(key)
 	e.subscriptions.Delete(key)
 
 	slog.Debug("handleEviction: dropped key and unsubscribed",
