@@ -2581,7 +2581,7 @@ func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
 
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(bindHi, bindLo))
 
-	losers := e.losersOnKey("el-2")
+	losers, _ := e.losersOnKey("el-2", nil)
 	if _, ok := losers["txn-hi"]; !ok {
 		t.Fatalf("expected higher-hash bind 'txn-hi' to be in losers, got %v", losers)
 	}
@@ -2732,7 +2732,7 @@ func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 	// consume it because X.ConsumedTips on el-2 didn't include it), nodeA:28=xBind}.
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(Tip{nodeB, 10}, yBind, x26, xBind))
 
-	losers := e.losersOnKey("el-2")
+	losers, _ := e.losersOnKey("el-2", nil)
 	t.Logf("losersOnKey(el-2) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("expected X (txn-X) to be marked as loser; production observed 53 surfacing on el-3 means X must be a loser on el-2. Got losers=%v", losers)
@@ -2857,7 +2857,7 @@ func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers := e.losersOnKey("el-1")
+	losers, _ := e.losersOnKey("el-1", nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("BUG: expected X (higher hash) to be marked as loser. X and Y are concurrent siblings around shared non-tx ancestor — neither reaches the other. Got losers=%v", losers)
@@ -2987,7 +2987,7 @@ func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers := e.losersOnKey("el-1")
+	losers, _ := e.losersOnKey("el-1", nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if len(losers) != 0 {
 		t.Fatalf("X reaches Y via side-channel noop — they are sequential, not concurrent. losersOnKey must return no losers. Got %v", losers)
@@ -3031,7 +3031,10 @@ func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 	})
 	e.index.Insert("el-3", nil, keytrie.NewTipSet(bind))
 
-	closure := e.bindKeyClosure("el-3")
+	closure, _, err := e.bindKeyClosure("el-3")
+	if err != nil {
+		t.Fatalf("bindKeyClosure: %v", err)
+	}
 	for _, want := range []string{"el-2", "el-3", "el-4"} {
 		if _, ok := closure[want]; !ok {
 			t.Fatalf("bindKeyClosure(el-3) missing %q; got %v", want, closure)

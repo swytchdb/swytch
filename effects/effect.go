@@ -835,11 +835,6 @@ func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset T
 		}
 	}
 
-	// Evaluate fork-choice against existing binds on all keys.
-	// Losers are marked in voidedBinds for filterTentativeEffects.
-	e.evaluateBindForkChoice(bind, bindOffset,
-		ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc), txnID)
-
 	// Process abort_deps: remove those offsets and abort any local pending txn
 	for _, abortedOffset := range bind.AbortDeps {
 		aborted := r(abortedOffset)
@@ -927,12 +922,15 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 	return "" // no competing bind
 }
 
-// evaluateBindForkChoice checks a newly arrived bind against all existing
-// binds on its keys. Losers are added to voidedBinds for cross-transaction
-// visibility. Also checks for concurrent non-transactional data effects
-// (SSI invalidation). Returns true if txnID itself was voided.
-// Called at bind arrival time (HandleRemote or flushTx) so the check
-// happens once, not on every read.
+// evaluateBindForkChoice returns true if the bind would lose at the
+// originator's commit point against any existing competitor on its keys
+// (hash-based fork choice with predicate-refinement and shared-base
+// gating) or against a concurrent non-tx data effect (SSI). flushTx
+// uses this to abort before emitting. The check is local-arrival-time
+// only — it does NOT write to voidedBinds, because arrival-time
+// visibility is partial (multi-step competitor flips, unsubscribed
+// cross-keys), and a wrong-but-trusted voidedBinds entry would cause
+// reconstruct to skip a winner. reconstruct is the canonical writer.
 func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOffset Tip, bindHash []byte, txnID string) bool {
 	newEntry := &forkChoiceBindEntry{
 		offset: bindOffset,
@@ -999,18 +997,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 					if bothHadEvidence && !conflict {
 						continue
 					}
-					if ForkChoiceLess(newEntry.hash, otherEntry.hash) {
-						// We win, they lose
-						slog.Debug("evaluateBindForkChoice: voiding loser",
-							"winner_txn", txnID, "loser_txn", eff.TxnId,
-							"key", k)
-						e.voidedBinds.Put(eff.TxnId, struct{}{})
-					} else {
-						// They win, we lose
-						slog.Debug("evaluateBindForkChoice: voiding loser",
-							"winner_txn", eff.TxnId, "loser_txn", txnID,
-							"key", k)
-						e.voidedBinds.Put(txnID, struct{}{})
+					if !ForkChoiceLess(newEntry.hash, otherEntry.hash) {
 						return true
 					}
 				}
@@ -1049,10 +1036,6 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 						stack = append(stack, fromPbRefs(depEff.Deps)...)
 					}
 					if !isDescendant {
-						slog.Debug("evaluateBindForkChoice: SSI invalidation",
-							"txn", txnID, "key", k,
-							"concurrent_offset", tipOff)
-						e.voidedBinds.Put(txnID, struct{}{})
 						return true
 					}
 				}
