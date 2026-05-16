@@ -521,6 +521,65 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		result = ReduceChain(result, subRootEffects)
 	}
 
+	// Prune stale tips: any input tip that was collected but is an
+	// ancestor (referenced as a dep by another collected node) can be
+	// removed from the index. Unreadable tips are preserved — they may
+	// be temporarily unavailable. Only prune when at least one real
+	// DAG tip is committed (present in the current index) to avoid
+	// removing tips superseded only by an in-flight transaction.
+	if len(tips) > 1 {
+		inputSet := make(map[Tip]bool, len(tips))
+		for _, t := range tips {
+			inputSet[t] = true
+		}
+		hasChild := make(map[Tip]bool, len(tips))
+		for _, eff := range d.nodes {
+			for _, dep := range eff.Deps {
+				dt := r(dep)
+				if inputSet[dt] {
+					hasChild[dt] = true
+				}
+			}
+		}
+		realTips := make(map[Tip]bool, len(tips))
+		for _, t := range tips {
+			if _, ok := d.nodes[t]; ok && !hasChild[t] {
+				realTips[t] = true
+			}
+		}
+		if len(realTips) < len(tips) {
+			currentIndex := e.index.Contains(key)
+			if currentIndex != nil {
+				indexSet := make(map[Tip]bool)
+				for _, t := range currentIndex.Tips() {
+					indexSet[t] = true
+				}
+				hasCommitted := false
+				for t := range realTips {
+					if indexSet[t] {
+						hasCommitted = true
+						break
+					}
+				}
+				if hasCommitted {
+					var stale []Tip
+					for _, t := range tips {
+						if realTips[t] {
+							continue
+						}
+						if _, ok := d.nodes[t]; ok {
+							stale = append(stale, t)
+						}
+					}
+					if len(stale) > 0 {
+						slog.Debug("reconstruct: pruning stale tips", "key", key, "stale", stale)
+						e.index.RemoveTips(key, stale)
+					}
+				}
+			}
+		}
+	}
+
 	slog.Debug("reconstruct: done", "key", key, "txn_id", txID,
 		"count", count, "cross_key_walked", crossKeyWalked,
 		"result_nil", result == nil)
