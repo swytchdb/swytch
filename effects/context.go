@@ -755,11 +755,15 @@ func (c *Context) flushTx() error {
 	}
 
 	// Protocol invariant: once this node has observed a remote bind on
-	// key K, it must not emit its own bind consuming any tip that remote
-	// bind consumed. If any of our initialTips is no longer a current
-	// tip, a remote bind has already consumed it locally — abort without
-	// running fork-choice; that arbiter is reserved for truly concurrent
-	// competitors that neither side has observed yet.
+	// key K, it must not emit its own bind that's DAG-concurrent with
+	// the remote bind. Two ways that can happen, both caught here:
+	//  (a) the remote bind consumed one of our initialTips — our tip
+	//      is gone from current.
+	//  (b) the remote bind landed as a new tip after we captured
+	//      initialTips — current has a tip our initialTips never saw.
+	// In (b), our emit won't dep-reference the remote bind so the two
+	// commit DAG-concurrent. Abort here rather than let fork-choice
+	// surface the inconsistency as G1a / incompatible-order later.
 	for key, ck := range c.keys {
 		if ck.initialTips == nil {
 			continue // first write to a brand-new key
@@ -767,6 +771,10 @@ func (c *Context) flushTx() error {
 		initial := ck.initialTips.Tips()
 		if len(initial) == 0 {
 			continue
+		}
+		initialSet := make(map[Tip]bool, len(initial))
+		for _, t := range initial {
+			initialSet[t] = true
 		}
 		current := c.engine.index.Contains(key)
 		currentSet := make(map[Tip]bool)
@@ -779,6 +787,17 @@ func (c *Context) flushTx() error {
 			if !currentSet[t] {
 				slog.Debug("flushTx: stale consumed tip, aborting before emission",
 					"key", key, "stale_tip", t, "current_tips", current)
+				for _, ck3 := range c.keys {
+					c.engine.pendingTxTips.Delete(ck3.lastOffset)
+				}
+				c.reset()
+				return ErrTxnAborted
+			}
+		}
+		for t := range currentSet {
+			if !initialSet[t] {
+				slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
+					"key", key, "new_tip", t, "initial_tips", initial)
 				for _, ck3 := range c.keys {
 					c.engine.pendingTxTips.Delete(ck3.lastOffset)
 				}
