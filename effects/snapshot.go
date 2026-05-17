@@ -20,16 +20,58 @@
 package effects
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/keytrie"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// verdictEntry holds a snapshot's verdict for a txnID; snapshotTip is the
+// offset of the snapshot that supplied it, used for debug log provenance.
+type verdictEntry struct {
+	verdict     pb.Verdict
+	snapshotTip Tip
+}
+
+// verdictMap accumulates snapshot-supplied verdicts during a walk so binds
+// already adjudicated can skip pairwise fork choice.
+type verdictMap map[string]verdictEntry
+
+// harvest folds a snapshot's TxnVerdicts into the map. First-seen wins;
+// disagreement is logged but not arbitrated (HLC is author-supplied and
+// not a trustworthy tiebreaker).
+func (v verdictMap) harvest(snapshotTip Tip, snap *pb.SnapshotEffect) {
+	if snap == nil {
+		return
+	}
+	for txnID, newVerdict := range snap.TxnVerdicts {
+		if newVerdict == pb.Verdict_VERDICT_UNSPECIFIED {
+			continue
+		}
+		existing, ok := v[txnID]
+		if !ok {
+			v[txnID] = verdictEntry{verdict: newVerdict, snapshotTip: snapshotTip}
+			continue
+		}
+		if existing.verdict == newVerdict {
+			continue
+		}
+		slog.Warn("snapshot verdict disagreement",
+			"txn_id", txnID,
+			"existing_verdict", existing.verdict,
+			"existing_snapshot", existing.snapshotTip,
+			"new_verdict", newVerdict,
+			"new_snapshot", snapshotTip)
+	}
+}
 
 // filterSnapshot applies post-reconstruction filtering: key-level expiry,
 // element-level expiry for KEYED collections, and auto-delete of empty
@@ -437,23 +479,25 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	}
 	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID)
 
-	// A bind is atomic across every key it touches. To determine who
-	// won/lost we cannot just look at the key we're reconstructing —
-	// a bind that lost on key L (because another bind beat it there
-	// via reachability) must be skipped on every key in its keyset.
-	// We compute the bind-key closure starting from `key` (which also
-	// transitively subscribes to every key in the closure), then run
-	// per-key fork choice on each closure key, seeded with the bind
-	// NewTips discovered during closure expansion so the walk reaches
-	// every relevant bind even across intervening snapshots.
-	expandKeys, bindsByKey, err := e.bindKeyClosure(key)
+	// Bind discovery + verdict harvest only need to walk back to the
+	// caller's pre-tx view. For a tx-context reconstruct the engine's
+	// per-tx snapshot supplies per-key cutoff tips; outside a tx, no
+	// cutoff (walk is bounded only by snapshot LCA in dag.walk).
+	cutoff := e.txCutoff(txID)
+
+	expandKeys, bindsByKey, snapshotVerdicts, err := e.bindKeyClosure(key, cutoff)
 	if err != nil {
 		return nil, 0, err
 	}
 	atomicallyLost := make(map[string]struct{})
+	for txnID, entry := range snapshotVerdicts {
+		if entry.verdict == pb.Verdict_LOST {
+			atomicallyLost[txnID] = struct{}{}
+		}
+	}
 	crossKeyWalked := 0
 	for k := range expandKeys {
-		losers, walked := e.losersOnKey(k, bindsByKey[k])
+		losers, walked := e.losersOnKey(k, bindsByKey[k], snapshotVerdicts, cutoff)
 		if k != key {
 			crossKeyWalked += walked
 		}
@@ -461,10 +505,8 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			atomicallyLost[txnID] = struct{}{}
 		}
 	}
-	for txnID := range atomicallyLost {
-		e.voidedBinds.Put(txnID, struct{}{})
-	}
-	if len(expandKeys) > 1 || len(atomicallyLost) > 0 {
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) &&
+		(len(expandKeys) > 1 || len(atomicallyLost) > 0 || len(snapshotVerdicts) > 0) {
 		closure := make([]string, 0, len(expandKeys))
 		for k := range expandKeys {
 			closure = append(closure, k)
@@ -473,10 +515,15 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		for txn := range atomicallyLost {
 			lost = append(lost, txn)
 		}
+		verdictSrcs := make([]string, 0, len(snapshotVerdicts))
+		for txn, entry := range snapshotVerdicts {
+			verdictSrcs = append(verdictSrcs, fmt.Sprintf("%s=%s@%v", txn, entry.verdict.String(), entry.snapshotTip))
+		}
 		slog.Debug("reconstruct: cross-key closure",
 			"key", key,
 			"closure", closure,
 			"atomically_lost", lost,
+			"snapshot_verdicts", verdictSrcs,
 			"cross_key_walked", crossKeyWalked)
 	}
 
@@ -509,15 +556,23 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 				slog.Debug("reconstruct: skip bind (invisible)", "key", key, "txn", eff.TxnId)
 				return nil
 			}
-			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
-				slog.Debug("reconstruct: skip bind (voided)", "key", key, "txn", eff.TxnId)
-				return nil
-			}
 			if _, lost := atomicallyLost[eff.TxnId]; lost {
-				slog.Debug("reconstruct: skip bind (atomically lost)", "key", key, "txn", eff.TxnId)
+				if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_LOST {
+					slog.Debug("reconstruct: skip bind (snapshot verdict LOST)",
+						"key", key, "txn", eff.TxnId,
+						"snapshot", entry.snapshotTip)
+				} else {
+					slog.Debug("reconstruct: skip bind (atomically lost)", "key", key, "txn", eff.TxnId)
+				}
 				return nil
 			}
-			slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
+			if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_WON {
+				slog.Debug("reconstruct: include bind (snapshot verdict WON)",
+					"key", key, "txn", eff.TxnId,
+					"snapshot", entry.snapshotTip)
+			} else {
+				slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
+			}
 			bindEffects, fetchErr := e.collectBindEffects(eff, key)
 			if fetchErr != nil {
 				return fetchErr
@@ -654,7 +709,7 @@ func bindsShareBase(a, b *forkChoiceBindEntry) bool {
 // losersOnKey(K') so the per-key walk reaches those binds even when an
 // intervening snapshot on K' would otherwise truncate the walk before
 // them.
-func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[string][]Tip, error) {
+func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map[string]struct{}, map[string][]Tip, verdictMap, error) {
 	keys := map[string]struct{}{startKey: {}}
 	bindsByKey := make(map[string][]Tip)
 	seenBindTip := make(map[string]map[Tip]struct{})
@@ -670,12 +725,13 @@ func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[strin
 		s[t] = struct{}{}
 		bindsByKey[k] = append(bindsByKey[k], t)
 	}
+	verdicts := make(verdictMap)
 	queue := []string{startKey}
 	for len(queue) > 0 {
 		k := queue[len(queue)-1]
 		queue = queue[:len(queue)-1]
 		if err := e.ensureSubscribed(k); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		tipSet := e.index.Contains(k)
 		var startTips []Tip
@@ -702,6 +758,14 @@ func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[strin
 			eff, err := e.getEffect(t)
 			if err != nil {
 				continue
+			}
+			// Pre-tx cutoff: if this tip is in the caller's tx snapshot
+			// view for this effect's key, anything below it is already
+			// in our pre-tx state and can't compete. Don't descend.
+			if txCutoff != nil {
+				if ts := txCutoff.Contains(string(eff.Key)); ts != nil && ts.Contains(t) {
+					continue
+				}
 			}
 			bind := eff.GetTxnBind()
 			if bind != nil {
@@ -732,32 +796,32 @@ func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[strin
 				}
 				continue
 			}
-			if eff.GetSnapshot() != nil {
-				continue // snapshot is the walk's lower bound
+			if snap := eff.GetSnapshot(); snap != nil {
+				verdicts.harvest(t, snap)
+				if snap.PrevSnapshot != nil {
+					stack = append(stack, r(snap.PrevSnapshot))
+				}
+				for _, dep := range eff.Deps {
+					stack = append(stack, r(dep))
+				}
+				continue
 			}
 			for _, dep := range eff.Deps {
 				stack = append(stack, r(dep))
 			}
 		}
 	}
-	return keys, bindsByKey, nil
+	return keys, bindsByKey, verdicts, nil
 }
 
-// losersOnKey walks one key's DAG and returns the txnIDs of binds that
-// lost the per-key reachability test there. A bind loses when its
-// NewTip on `key` does not reach the NewTip of a competitor and the
-// competitor has the lower ForkChoiceHash and predicate refinement
-// does not prove the writes disjoint. Pairwise hash comparison is the
-// arbiter — walk order is not a fork-choice oracle.
-//
-// extraTips augments the starting set with NewTip[key] offsets of
-// binds the caller discovered on other closure keys. Without them, a
-// snapshot on `key` between the current tipset and a bind B would
-// truncate dag.walk before B and silently miss B's competitors here.
-// Returns the loser set and the count of effects walked, which the
-// caller folds into reconstruct's chain length so the existing
-// compaction trigger fires when cross-key walks accumulate.
-func (e *Engine) losersOnKey(key string, extraTips []Tip) (map[string]struct{}, int) {
+// losersOnKey returns the txnIDs of binds on `key` that lost fork choice,
+// plus the count of effects walked. Binds with a LOST verdict in any
+// reachable snapshot (or in snapshotVerdicts from the caller) bypass the
+// pairwise hash comparison; binds with a WON verdict skip the pass
+// entirely. The unadjudicated tail still runs pairwise hash + predicate
+// refinement. extraTips augments the starting set with NewTip[key] offsets
+// the caller harvested on other closure keys.
+func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdictMap, txCutoff keytrie.KeyIndex) (map[string]struct{}, int) {
 	losers := make(map[string]struct{})
 	tipSet := e.index.Contains(key)
 	if tipSet == nil && len(extraTips) == 0 {
@@ -783,129 +847,228 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip) (map[string]struct{}, 
 	if len(startTips) == 0 {
 		return losers, 0
 	}
-	d := newDag(e, key, "")
-
-	// Collect every bind visible on this key. We can't decide winners
-	// during the walk — dag.walk's topo order isn't a hash-order, so
-	// the first bind we see isn't necessarily the lowest-hash one.
-	// Fork choice is over the hashes, period; we run it pairwise after
-	// the walk.
-	type seenBind struct {
-		txnID  string
-		newTip Tip
-		hash   []byte
-	}
-	var binds []seenBind
-
-	reaches := func(from, target Tip) bool {
-		if from == target {
-			return true
-		}
-		visited := make(map[Tip]bool)
-		stack := []Tip{from}
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if visited[cur] {
-				continue
-			}
-			visited[cur] = true
-			nodeEff, ok := d.nodes[cur]
-			if !ok {
-				continue
-			}
-			for _, dep := range nodeEff.Deps {
-				dt := r(dep)
-				if dt == target {
-					return true
-				}
-				if !visited[dt] {
-					stack = append(stack, dt)
-				}
-			}
-		}
-		return false
-	}
 
 	var isInvisible func(string) bool
 	if e.horizon != nil {
 		isInvisible = e.horizon.IsInvisible
 	}
 
+	// Local verdict map, seeded from any verdicts the caller harvested via
+	// bindKeyClosure on other closure keys. Extended as we encounter
+	// snapshots during our own walk on this key.
+	verdicts := make(verdictMap, len(snapshotVerdicts))
+	maps.Copy(verdicts, snapshotVerdicts)
+
+	type seenBind struct {
+		txnID      string
+		bindOffset Tip // bind anchor offset (the TransactionalBindEffect's own offset)
+		newTip     Tip
+		hash       []byte
+		consumed   []Tip // ConsumedTips on this key
+	}
+	var binds []seenBind
+
+	visited := make(map[Tip]bool)
+	stack := append([]Tip(nil), startTips...)
 	walked := 0
-	err := d.walk(startTips, func(eff *pb.Effect) error {
-		walked++
-		bind := eff.GetTxnBind()
-		if bind == nil {
-			return nil
+	for len(stack) > 0 {
+		t := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[t] {
+			continue
 		}
-		if isInvisible != nil && isInvisible(eff.TxnId) {
-			return nil
+		visited[t] = true
+		eff, err := e.getEffect(t)
+		if err != nil {
+			continue
 		}
-		if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
-			return nil
-		}
-		var newTip Tip
-		for _, kb := range bind.Keys {
-			if string(kb.Key) == key {
-				newTip = r(kb.NewTip)
-				break
+		if txCutoff != nil {
+			if ts := txCutoff.Contains(string(eff.Key)); ts != nil && ts.Contains(t) {
+				continue
 			}
 		}
-		var zero Tip
-		if newTip == zero {
-			return nil
-		}
-		binds = append(binds, seenBind{
-			txnID:  eff.TxnId,
-			newTip: newTip,
-			hash:   eff.ForkChoiceHash,
-		})
-		return nil
-	})
+		walked++
 
-	// Pairwise fork choice. A bind B loses iff there exists another
-	// bind B' on this key such that:
-	//   1. neither reaches the other (concurrent siblings on K), AND
-	//   2. B' has the lower ForkChoiceHash, AND
-	//   3. predicate refinement doesn't prove the writes disjoint.
-	for i := range binds {
-		b := &binds[i]
-		for j := range binds {
+		if snap := eff.GetSnapshot(); snap != nil {
+			verdicts.harvest(t, snap)
+			if snap.PrevSnapshot != nil {
+				stack = append(stack, r(snap.PrevSnapshot))
+			}
+			for _, dep := range eff.Deps {
+				stack = append(stack, r(dep))
+			}
+			continue
+		}
+
+		if bind := eff.GetTxnBind(); bind != nil {
+			if isInvisible == nil || !isInvisible(eff.TxnId) {
+				var newTip Tip
+				var consumed []Tip
+				for _, kb := range bind.Keys {
+					if string(kb.Key) == key {
+						newTip = r(kb.NewTip)
+						consumed = fromPbRefs(kb.ConsumedTips)
+						break
+					}
+				}
+				var zero Tip
+				if newTip != zero {
+					binds = append(binds, seenBind{
+						txnID:      eff.TxnId,
+						bindOffset: t,
+						newTip:     newTip,
+						hash:       eff.ForkChoiceHash,
+						consumed:   consumed,
+					})
+				}
+			}
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					stack = append(stack, r(kb.NewTip))
+					break
+				}
+			}
+			continue
+		}
+
+		for _, dep := range eff.Deps {
+			stack = append(stack, r(dep))
+		}
+	}
+
+	type bindWithSource struct {
+		seenBind
+		verdictSrc Tip
+	}
+	var unadjudicated []seenBind
+	verdictAdjudicated := make(map[string]bindWithSource)
+	for _, b := range binds {
+		if entry, ok := verdicts[b.txnID]; ok {
+			if entry.verdict == pb.Verdict_LOST {
+				losers[b.txnID] = struct{}{}
+			}
+			verdictAdjudicated[b.txnID] = bindWithSource{seenBind: b, verdictSrc: entry.snapshotTip}
+			continue
+		}
+		unadjudicated = append(unadjudicated, b)
+	}
+
+	// Chain detection: if every unadjudicated bind's ConsumedTips on this
+	// key contains another unadjudicated bind's anchor offset, the binds
+	// form a total order via consumed-bind edges (each bind explicitly
+	// built on its predecessor's committed bind). No two can be
+	// DAG-concurrent on this key, so no losers — skip the O(N²) pairwise
+	// and ancestor work entirely. Common in sequential single-writer
+	// workloads (XADD, LPUSH, INCR), where this is the difference
+	// between O(N²) and O(N).
+	if len(unadjudicated) > 1 {
+		bindOffsetToIdx := make(map[Tip]int, len(unadjudicated))
+		for i := range unadjudicated {
+			bindOffsetToIdx[unadjudicated[i].bindOffset] = i
+		}
+		rootBinds := 0
+		chained := true
+		for i := range unadjudicated {
+			consumesSibling := false
+			for _, ct := range unadjudicated[i].consumed {
+				if _, ok := bindOffsetToIdx[ct]; ok {
+					consumesSibling = true
+					break
+				}
+			}
+			if !consumesSibling {
+				rootBinds++
+				if rootBinds > 1 {
+					chained = false
+					break
+				}
+			}
+		}
+		if chained {
+			return losers, walked
+		}
+	}
+
+	// Ancestor closures computed lazily on first reach query. Cached so
+	// each bind's parent DAG is walked at most once across all pairs.
+	// Fetches via e.getEffect (CloxCache-backed) instead of holding a
+	// separate nodes map, so the discovery walk doesn't pay for an
+	// extra map slot per visited effect when chain-detect short-circuits.
+	ancestorsOf := make(map[Tip]map[Tip]struct{})
+	buildAncestors := func(start Tip) map[Tip]struct{} {
+		if cached, ok := ancestorsOf[start]; ok {
+			return cached
+		}
+		seen := make(map[Tip]struct{})
+		seen[start] = struct{}{}
+		stack := []Tip{start}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			eff, err := e.getEffect(cur)
+			if err != nil {
+				continue
+			}
+			for _, dep := range eff.Deps {
+				dt := r(dep)
+				if _, dup := seen[dt]; dup {
+					continue
+				}
+				seen[dt] = struct{}{}
+				stack = append(stack, dt)
+			}
+		}
+		ancestorsOf[start] = seen
+		return seen
+	}
+	reaches := func(from, target Tip) bool {
+		if from == target {
+			return true
+		}
+		_, found := buildAncestors(from)[target]
+		return found
+	}
+
+	// Pairwise fork choice over the unadjudicated tail.
+	for i := range unadjudicated {
+		b := &unadjudicated[i]
+		for j := range unadjudicated {
 			if i == j {
 				continue
 			}
-			other := &binds[j]
+			other := &unadjudicated[j]
 			if reaches(b.newTip, other.newTip) || reaches(other.newTip, b.newTip) {
-				continue // serializable, not competing
+				continue
 			}
 			if !ForkChoiceLess(other.hash, b.hash) {
-				continue // they don't beat us; check next
+				continue
 			}
-			// They beat us by hash. Predicate refinement is the only out.
 			if other.txnID != "" && b.txnID != "" {
 				conflict, bothHadEvidence := e.hasPredicateConflict(
 					other.txnID, b.txnID, key,
 					[]Tip{other.newTip}, []Tip{b.newTip})
 				if bothHadEvidence && !conflict {
-					continue // disjoint predicates, coexist
+					continue
 				}
 			}
 			losers[b.txnID] = struct{}{}
 			break
 		}
 	}
-	if err != nil {
-		slog.Debug("losersOnKey: walk failed", "key", key, "error", err)
-	}
-	if len(binds) > 0 {
+
+	if len(binds) > 0 && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		seen := make([]string, 0, len(binds))
 		for _, b := range binds {
 			hashPrefix := ""
 			if len(b.hash) >= 4 {
 				hashPrefix = fmt.Sprintf("%x", b.hash[:4])
 			}
-			seen = append(seen, fmt.Sprintf("%s@%v#%s", b.txnID, b.newTip, hashPrefix))
+			suffix := ""
+			if adj, ok := verdictAdjudicated[b.txnID]; ok {
+				v := verdicts[b.txnID].verdict
+				suffix = fmt.Sprintf(" verdict=%s src=%v", v.String(), adj.verdictSrc)
+			}
+			seen = append(seen, fmt.Sprintf("%s@%v#%s%s", b.txnID, b.newTip, hashPrefix, suffix))
 		}
 		loserList := make([]string, 0, len(losers))
 		for txn := range losers {
@@ -914,7 +1077,9 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip) (map[string]struct{}, 
 		slog.Debug("losersOnKey: verdict",
 			"key", key,
 			"binds_seen", seen,
-			"losers", loserList)
+			"losers", loserList,
+			"snapshot_adjudicated", len(verdictAdjudicated),
+			"pairwise_candidates", len(unadjudicated))
 	}
 	return losers, walked
 }

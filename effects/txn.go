@@ -272,6 +272,41 @@ func findPendingKey(ptxn *pendingTxn, key string) *pendingTxnKey {
 	return nil
 }
 
+// defeatedCompetitor returns the txnID of a competing bind that the local
+// pendingTxn beat in fork-choice on the given key, or "" if `detail` is not
+// a competing bind, names our own tx, is predicate-disjoint (coexists), or
+// has a strictly-lower hash than ours. flushTx's NACK loop calls this after
+// isRealConflict returns false to gather verdicts for the winner-commit
+// snapshot. Mirrors isRealConflict's filtering structure exactly so the two
+// classifications stay aligned.
+func (e *Engine) defeatedCompetitor(ptxn *pendingTxn, key string, detail *pb.NackTipDetail) string {
+	if !detail.IsBind || detail.Ref == nil {
+		return ""
+	}
+	theirBindOffset := r(detail.Ref)
+	var theirTxnID string
+	if theirEff, err := e.getEffect(theirBindOffset); err == nil {
+		theirTxnID = theirEff.TxnId
+	}
+	if theirTxnID == "" || theirTxnID == ptxn.txnID {
+		return ""
+	}
+	if ptxn.txnID != "" {
+		ourStart := collectOurBindTips(ptxn, key)
+		conflict, bothHadEvidence := e.hasPredicateConflict(
+			ptxn.txnID, theirTxnID, key,
+			ourStart,
+			[]Tip{theirBindOffset})
+		if bothHadEvidence && !conflict {
+			return ""
+		}
+	}
+	if !ForkChoiceLess(ptxn.forkChoiceHash, detail.BindForkChoiceHash) {
+		return ""
+	}
+	return theirTxnID
+}
+
 // commitPendingTxn CAS-sets the state to committed and closes the done channel.
 func commitPendingTxn(ptxn *pendingTxn) bool {
 	if ptxn.state.CompareAndSwap(txnStatePending, txnStateCommitted) {

@@ -21,6 +21,7 @@ package effects
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -80,6 +81,11 @@ type Engine struct {
 	pendingTxTips *xsync.Map[keytrie.EffectRef, []Tip]
 	txAbortCounts *xsync.Map[string, *atomic.Int32]
 
+	// In-flight tx snapshots, keyed by txnID. Populated by Context.BeginTx
+	// so reconstruct can bound bind discovery / verdict harvest to the
+	// caller's pre-tx view without round-tripping through the Context.
+	txSnapshots *xsync.Map[string, keytrie.KeyIndex]
+
 	// Adaptive serialization state (§5)
 	rttProvider        PeerRTTProvider
 	serializationState *xsync.Map[string, *keySerializationState]
@@ -125,13 +131,13 @@ type Engine struct {
 	// Horizon wait for bind visibility
 	horizon *HorizonSet
 
-	// Voided binds — txnIDs whose binds lost fork-choice or were
-	// SSI-invalidated. Checked by filterTentativeEffects to skip
-	// these binds without per-read DAG walks.
-	// Backed by a low-capacity CloxCache to bound memory; eviction
-	// is safe because reconstruct's wonTips map independently
-	// resolves competing binds.
-	voidedBinds *clox.CloxCache[string, struct{}]
+	// ConsumedTips of remote binds we have ACKed/NACKed. flushTx's
+	// pre-flight aborts when a new local bind's pre-tx tip is in here:
+	// emitting from that fork point would commit DAG-concurrent with the
+	// remote bind we already took a position on. Cache eviction is safe
+	// because the stale-tip / new-foreign-tip checks in flushTx catch
+	// the same divergence structurally.
+	spokenBinds *clox.CloxCache[Tip, struct{}]
 
 	// Anti-entropy
 	antiEntropyStop chan struct{}
@@ -141,6 +147,7 @@ type Engine struct {
 	// into a single background anti-entropy pass.
 	reconvergeTrigger chan struct{}
 }
+
 
 // subscriptionState tracks a subscription's readiness.
 // The ready channel is closed once bootstrapping completes.
@@ -272,6 +279,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxns:        xsync.NewMap[keytrie.EffectRef, *pendingTxn](),
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
+		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:      xsync.NewMap[string, struct{}](),
 		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
@@ -279,7 +287,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 			c.CollectStats = true
 			return c
 		}()),
-		voidedBinds: clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(8192)),
+		spokenBinds: clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
 		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
@@ -464,6 +472,123 @@ func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
 		return tips
 	}
 	return resolved
+}
+
+// txCutoff returns the snapshot bounding bind-discovery walks for a
+// tx-context reconstruct. Walks ask the snapshot per-(key, tip) whether
+// a tip is in the caller's pre-tx view; if yes, the tip is a boundary
+// (walk doesn't descend past it). Returns nil if no tx is registered,
+// in which case walks proceed unbounded back to snapshot LCAs.
+func (e *Engine) txCutoff(txID string) keytrie.KeyIndex {
+	if txID == "" || e.txSnapshots == nil {
+		return nil
+	}
+	snap, _ := e.txSnapshots.Load(txID)
+	return snap
+}
+
+// emitSnapshot writes a verdict-carrying SnapshotEffect on `key`, chained
+// via prev_snapshot to the latest existing snapshot tip. Deps are the
+// current tips with pending-tx tips substituted; the index is updated
+// and the effect is broadcast.
+func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error {
+	hlc := timestamppb.New(e.clock.Now())
+	eff := &pb.Effect{
+		Key:            []byte(key),
+		Hlc:            hlc,
+		NodeId:         uint64(e.nodeID),
+		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: verdicts,
+		}},
+	}
+
+	currentSet := e.index.Contains(key)
+	if currentSet != nil {
+		tips := currentSet.Tips()
+		for _, t := range tips {
+			cached, err := e.getEffect(t)
+			if err != nil {
+				continue
+			}
+			if cached.GetSnapshot() != nil {
+				eff.GetSnapshot().PrevSnapshot = toPbRef(t)
+				break
+			}
+		}
+		eff.Deps = toPbRefs(e.resolveTipDeps(tips))
+	}
+
+	data, err := MarshalEffect(eff)
+	if err != nil {
+		return err
+	}
+	offset := e.nextOffset()
+	if e.effectCache != nil {
+		e.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+	}
+	e.updateIndex(key, currentSet, offset)
+
+	if e.broadcaster != nil {
+		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
+		e.broadcaster.BroadcastWithData(notify, data)
+	}
+
+	slog.Debug("emitSnapshot",
+		"key", key,
+		"offset", offset,
+		"verdicts", len(verdicts),
+		"prev_snapshot", eff.GetSnapshot().PrevSnapshot)
+	return nil
+}
+
+// lookupSnapshotVerdict walks the snapshot chain on `key` for `txnID`'s
+// adjudication outcome. Used by arrival-time fork-choice sites to skip a
+// competing bind a prior snapshot already locked in as LOST.
+func (e *Engine) lookupSnapshotVerdict(key, txnID string) (pb.Verdict, bool) {
+	tipSet := e.index.Contains(key)
+	if tipSet == nil {
+		return pb.Verdict_VERDICT_UNSPECIFIED, false
+	}
+	visited := make(map[Tip]bool)
+	stack := append([]Tip(nil), tipSet.Tips()...)
+	for len(stack) > 0 {
+		t := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[t] {
+			continue
+		}
+		visited[t] = true
+		eff, err := e.getEffect(t)
+		if err != nil {
+			continue
+		}
+		if snap := eff.GetSnapshot(); snap != nil {
+			if v, ok := snap.TxnVerdicts[txnID]; ok && v != pb.Verdict_VERDICT_UNSPECIFIED {
+				return v, true
+			}
+			if snap.PrevSnapshot != nil {
+				stack = append(stack, r(snap.PrevSnapshot))
+			}
+			for _, dep := range eff.Deps {
+				stack = append(stack, r(dep))
+			}
+			continue
+		}
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					stack = append(stack, r(kb.NewTip))
+					break
+				}
+			}
+			continue
+		}
+		for _, dep := range eff.Deps {
+			stack = append(stack, r(dep))
+		}
+	}
+	return pb.Verdict_VERDICT_UNSPECIFIED, false
 }
 
 // HandleRemote processes a remote effect notification: stores the effect
@@ -976,6 +1101,17 @@ func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset T
 			return true
 		})
 	}
+
+	// Cache every consumed tip this bind forked from so flushTx's
+	// pre-flight will abort a future local emit that forks from the
+	// same point.
+	if e.spokenBinds != nil {
+		for _, kb := range bind.Keys {
+			for _, ct := range kb.ConsumedTips {
+				e.spokenBinds.Put(r(ct), struct{}{})
+			}
+		}
+	}
 }
 
 // checkCompetingBinds checks if any bind in the local index shares a causal
@@ -998,8 +1134,9 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 			if otherBind == nil {
 				continue
 			}
-			// Skip voided binds (already lost fork-choice)
-			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
+			// Skip binds a prior winner-commit snapshot on this key
+			// already locked in as LOST.
+			if v, ok := e.lookupSnapshotVerdict(k, eff.TxnId); ok && v == pb.Verdict_LOST {
 				continue
 			}
 			// Check if they share a consumed tip on any overlapping key.
@@ -1051,11 +1188,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 // originator's commit point against any existing competitor on its keys
 // (hash-based fork choice with predicate-refinement and shared-base
 // gating) or against a concurrent non-tx data effect (SSI). flushTx
-// uses this to abort before emitting. The check is local-arrival-time
-// only — it does NOT write to voidedBinds, because arrival-time
-// visibility is partial (multi-step competitor flips, unsubscribed
-// cross-keys), and a wrong-but-trusted voidedBinds entry would cause
-// reconstruct to skip a winner. reconstruct is the canonical writer.
+// uses this to abort before emitting.
 func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOffset Tip, bindHash []byte, txnID string) bool {
 	newEntry := &forkChoiceBindEntry{
 		offset: bindOffset,
@@ -1091,8 +1224,8 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 				if eff.TxnId == txnID {
 					continue // same transaction
 				}
-				// Already voided? skip
-				if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
+				// Already adjudicated as LOST by a snapshot? skip
+				if v, ok := e.lookupSnapshotVerdict(k, eff.TxnId); ok && v == pb.Verdict_LOST {
 					continue
 				}
 
@@ -1407,8 +1540,8 @@ func (e *Engine) Close() error {
 		close(e.antiEntropyStop)
 		e.antiEntropyWg.Wait()
 	}
-	if e.voidedBinds != nil {
-		e.voidedBinds.Close()
+	if e.spokenBinds != nil {
+		e.spokenBinds.Close()
 	}
 	return nil
 }

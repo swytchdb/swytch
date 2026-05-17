@@ -118,7 +118,7 @@ func newSnapshotEngine(log *snapshotLog, cache StateCache) *Engine {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	return e
@@ -1153,7 +1153,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	remoteEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -1196,7 +1196,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	localEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -1281,7 +1281,7 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -1345,7 +1345,7 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -1399,7 +1399,7 @@ func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -1462,7 +1462,7 @@ func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 
@@ -2595,7 +2595,7 @@ func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
 
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(bindHi, bindLo))
 
-	losers, _ := e.losersOnKey("el-2", nil)
+	losers, _ := e.losersOnKey("el-2", nil, nil, nil)
 	if _, ok := losers["txn-hi"]; !ok {
 		t.Fatalf("expected higher-hash bind 'txn-hi' to be in losers, got %v", losers)
 	}
@@ -2746,7 +2746,7 @@ func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 	// consume it because X.ConsumedTips on el-2 didn't include it), nodeA:28=xBind}.
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(Tip{nodeB, 10}, yBind, x26, xBind))
 
-	losers, _ := e.losersOnKey("el-2", nil)
+	losers, _ := e.losersOnKey("el-2", nil, nil, nil)
 	t.Logf("losersOnKey(el-2) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("expected X (txn-X) to be marked as loser; production observed 53 surfacing on el-3 means X must be a loser on el-2. Got losers=%v", losers)
@@ -2871,7 +2871,7 @@ func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers, _ := e.losersOnKey("el-1", nil)
+	losers, _ := e.losersOnKey("el-1", nil, nil, nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("BUG: expected X (higher hash) to be marked as loser. X and Y are concurrent siblings around shared non-tx ancestor — neither reaches the other. Got losers=%v", losers)
@@ -3001,7 +3001,7 @@ func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers, _ := e.losersOnKey("el-1", nil)
+	losers, _ := e.losersOnKey("el-1", nil, nil, nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if len(losers) != 0 {
 		t.Fatalf("X reaches Y via side-channel noop — they are sequential, not concurrent. losersOnKey must return no losers. Got %v", losers)
@@ -3163,7 +3163,7 @@ func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 	})
 	e.index.Insert("el-3", nil, keytrie.NewTipSet(bind))
 
-	closure, _, err := e.bindKeyClosure("el-3")
+	closure, _, _, err := e.bindKeyClosure("el-3", nil)
 	if err != nil {
 		t.Fatalf("bindKeyClosure: %v", err)
 	}
@@ -3171,5 +3171,143 @@ func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 		if _, ok := closure[want]; !ok {
 			t.Fatalf("bindKeyClosure(el-3) missing %q; got %v", want, closure)
 		}
+	}
+}
+
+// TestReconstruct_VerdictSnapshotSurvivesCompaction is the structural fix
+// for Jepsen run 25974301888's G1a. The original failure: T_lost (cross-key
+// bind keyset {K1, K2}) loses to T_won on K1 via hash. A read-triggered
+// compaction snapshot on K1 then trims T_lost's bind out of K1's
+// dag-reachable past. Later reads of K2 cannot derive T_lost's loss from
+// the DAG anymore (T_lost on K1 is invisible), voidedBinds has evicted the
+// txnID, and reconstruct(K2) includes T_lost's data — G1a.
+//
+// With this fix: T_won's commit emits a verdict-snapshot on K1 recording
+// {T_won=WON, T_lost=LOST}. After the read-triggered state-compaction snap
+// is added on top, the verdict-snapshot is still walked through by
+// bindKeyClosure (not stopped at) and its verdicts are harvested into
+// snapshotVerdicts. reconstruct(K2) seeds atomicallyLost with T_lost from
+// the harvested map and skips T_lost's data. K2's read is correct.
+func TestReconstruct_VerdictSnapshotSurvivesCompaction(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	const (
+		nodeA uint64 = 7639866581326252873
+		nodeB uint64 = 7639866583178718270
+	)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		if len(eff.ForkChoiceHash) == 0 {
+			eff.ForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+		}
+		data, _ := proto.Marshal(eff)
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	hashHigh := []byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	hashLow := []byte{0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+
+	// T_lost (higher hash → loses fork choice). Cross-key {el-0, el-2}.
+	// Data effect on el-2 inserts element "loser-elem" — should not appear
+	// in any read after fork choice.
+	tLost := "txn-lost"
+	lostDataEl2 := putAt(Tip{nodeA, 10}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(100), NodeId: nodeA, TxnId: tLost,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "loser-elem", []byte("loser-elem"))},
+	})
+	lostDataEl0 := putAt(Tip{nodeA, 11}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(101), NodeId: nodeA, TxnId: tLost,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "loser-el0", []byte("loser-el0"))},
+	})
+	lostBind := putAt(Tip{nodeA, 12}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(102), NodeId: nodeA, TxnId: tLost,
+		ForkChoiceHash: hashHigh,
+		Deps:           []*pb.EffectRef{toPbRef(lostDataEl0), toPbRef(lostDataEl2)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(102),
+			OriginatorNodeId: nodeA,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-0"), NewTip: toPbRef(lostDataEl0)},
+				{Key: []byte("el-2"), NewTip: toPbRef(lostDataEl2)},
+			},
+		}},
+	})
+
+	// T_won (lower hash → wins fork choice on el-0).
+	tWon := "txn-won"
+	wonDataEl0 := putAt(Tip{nodeB, 20}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(110), NodeId: nodeB, TxnId: tWon,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "winner-el0", []byte("winner-el0"))},
+	})
+	wonBind := putAt(Tip{nodeB, 21}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(111), NodeId: nodeB, TxnId: tWon,
+		ForkChoiceHash: hashLow,
+		Deps:           []*pb.EffectRef{toPbRef(wonDataEl0)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           sTs(111),
+			OriginatorNodeId: nodeB,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-0"), NewTip: toPbRef(wonDataEl0)},
+			},
+		}},
+	})
+
+	// Verdict-snapshot from T_won's commit on el-0: records
+	// {T_won=WON, T_lost=LOST}. Deps include wonBind and lostBind so
+	// later trim won't accidentally orphan it.
+	verdictSnap := putAt(Tip{nodeB, 22}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(112), NodeId: nodeB,
+		Deps: []*pb.EffectRef{toPbRef(wonBind), toPbRef(lostBind)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: map[string]pb.Verdict{
+				tWon:  pb.Verdict_WON,
+				tLost: pb.Verdict_LOST,
+			},
+		}},
+	})
+
+	// Read-triggered state-compaction snapshot on top of the verdict-
+	// snapshot. This is the snapshot that buries everything below it in
+	// state-reconstruction's LCA semantics. Its deps include the
+	// verdict-snapshot, so dag.walk's LCA logic on el-0 would terminate
+	// here and trimAncestorsOfLCA would remove verdictSnap from d.nodes
+	// — which is exactly the original G1a mechanism if we relied only on
+	// dag.walk.
+	stateSnap := putAt(Tip{nodeB, 23}, &pb.Effect{
+		Key: []byte("el-0"), Hlc: sTs(113), NodeId: nodeB,
+		Deps: []*pb.EffectRef{toPbRef(verdictSnap)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			PrevSnapshot: toPbRef(verdictSnap),
+			State: &pb.ReducedEffect{
+				Collection: pb.CollectionKind_ORDERED,
+				OrderedElements: []*pb.ReducedElement{
+					{Data: orderedInsert(pb.Placement_PLACE_TAIL, "winner-el0", []byte("winner-el0"))},
+				},
+			},
+		}},
+	})
+
+	// el-0 index has the state-snapshot as the only tip.
+	e.index.Insert("el-0", nil, keytrie.NewTipSet(stateSnap))
+	// el-2 index has T_lost's bind as a tip (cross-key bind also indexed
+	// on el-2 — the originator's reach point). lostDataEl2 is also a tip
+	// pre-bind.
+	e.index.Insert("el-2", nil, keytrie.NewTipSet(lostBind, lostDataEl2))
+
+	// Reconstruct el-2. losersOnKey on el-0 would historically miss
+	// lostBind because it's behind stateSnap. With verdict-snapshot
+	// chain, bindKeyClosure walks through stateSnap → verdictSnap and
+	// harvests {tLost=LOST, tWon=WON}.
+	r, _, _, err := e.GetSnapshot("el-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := orderedValues(r)
+	if slices.Contains(got, "loser-elem") {
+		t.Fatalf("G1a: T_lost's data 'loser-elem' visible in el-2 after compaction: %v", got)
 	}
 }

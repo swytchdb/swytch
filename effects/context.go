@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 	"github.com/swytchdb/swytch/tracing"
@@ -207,18 +208,29 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		// Compact long chains by emitting a snapshot into this context
+		// Compact long chains by emitting a state snapshot into this context.
 		if chainLen >= 20+rand.IntN(31) {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
 				"tips", tips)
+			snapEff := &pb.SnapshotEffect{
+				Collection: result.Collection,
+				State:      result,
+			}
+			for _, t := range tips {
+				cached, err := c.engine.getEffect(t)
+				if err != nil {
+					continue
+				}
+				if cached.GetSnapshot() != nil {
+					snapEff.PrevSnapshot = toPbRef(t)
+					break
+				}
+			}
 			if err := c.Emit(&pb.Effect{
-				Key: []byte(key),
-				Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
-					Collection: result.Collection,
-					State:      result,
-				}},
+				Key:  []byte(key),
+				Kind: &pb.Effect_Snapshot{Snapshot: snapEff},
 			}, tips); err != nil {
 				slog.Error("compaction: snapshot emit failed",
 					"key", key,
@@ -368,6 +380,7 @@ func (c *Context) Watch(key string) {
 func (c *Context) ClearWatches() {
 	clear(c.watchedKeys)
 	if !c.inTx {
+		c.dropTxRegistration()
 		c.txnID = ""
 	}
 }
@@ -390,6 +403,31 @@ func (c *Context) BeginTx() {
 	// the txn sees a consistent committed state.
 	if c.txSnapshot == nil {
 		c.txSnapshot = c.engine.index.Snapshot()
+	}
+	// Register the snapshot with the engine so reconstruct can derive
+	// the pre-tx walk cutoff from txID alone.
+	if c.txSnapshots() != nil && c.txnID != "" {
+		c.txSnapshots().Store(c.txnID, c.txSnapshot)
+	}
+}
+
+// txSnapshots is a tiny wrapper to make the engine-side per-tx snapshot
+// map easier to access from Context.
+func (c *Context) txSnapshots() *xsync.Map[string, keytrie.KeyIndex] {
+	if c.engine == nil {
+		return nil
+	}
+	return c.engine.txSnapshots
+}
+
+// dropTxRegistration removes this Context's tx snapshot from the engine.
+// Safe to call with empty txnID. Call before clearing c.txnID.
+func (c *Context) dropTxRegistration() {
+	if c.txnID == "" {
+		return
+	}
+	if m := c.txSnapshots(); m != nil {
+		m.Delete(c.txnID)
 	}
 }
 
@@ -426,6 +464,7 @@ func (c *Context) CheckWatches() bool {
 		// Key was modified — abort
 		clear(c.watchedKeys)
 		c.inTx = false
+		c.dropTxRegistration()
 		c.txnID = ""
 		c.txSnapshot = nil
 		return false
@@ -442,6 +481,7 @@ func (c *Context) CheckWatches() bool {
 			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
 			clear(c.watchedKeys)
 			c.inTx = false
+			c.dropTxRegistration()
 			c.txnID = ""
 			c.txSnapshot = nil
 			return false
@@ -461,6 +501,7 @@ func (c *Context) Abort() {
 	clear(c.keys)
 	clear(c.watchedKeys)
 	c.inTx = false
+	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
@@ -793,6 +834,19 @@ func (c *Context) flushTx() error {
 				c.reset()
 				return ErrTxnAborted
 			}
+			// Abort if we already ACKed/NACKed a remote bind that consumed
+			// this tip — emitting now would commit DAG-concurrent with it.
+			if c.engine.spokenBinds != nil {
+				if _, spoken := c.engine.spokenBinds.Get(t, 0); spoken {
+					slog.Debug("flushTx: pre-flight aborting, spoke on consumed tip",
+						"key", key, "tip", t)
+					for _, ck3 := range c.keys {
+						c.engine.pendingTxTips.Delete(ck3.lastOffset)
+					}
+					c.reset()
+					return ErrTxnAborted
+				}
+			}
 		}
 		for t := range currentSet {
 			if initialSet[t] {
@@ -995,10 +1049,6 @@ func (c *Context) flushTx() error {
 		c.engine.updateIndex(key, keytrie.NewTipSet(ck.lastOffset), bindOffset)
 	}
 
-	// Evaluate fork-choice against existing binds on all keys.
-	// Returns true if our bind lost — abort immediately without
-	// re-reading voidedBinds (the cache write is still done for
-	// cross-transaction visibility in reconstruct/checkCompetingBinds).
 	if c.engine.evaluateBindForkChoice(bind, bindOffset, bindEff.ForkChoiceHash, c.txnID) {
 		slog.Debug("flushTx: voided by concurrent bind, aborting",
 			"bind_offset", bindOffset, "txn", c.txnID)
@@ -1090,6 +1140,9 @@ func (c *Context) flushTx() error {
 			}
 			wg.Wait()
 
+			// Competitor txnIDs we beat during the NACK loop.
+			defeatedSet := make(map[string]struct{})
+
 			responseCount := 0
 			for _, res := range results {
 				if res.err != nil {
@@ -1121,6 +1174,9 @@ func (c *Context) flushTx() error {
 								"detail_is_tx", detail.IsTransactional)
 							abortPendingTxn(ptxn)
 							break
+						}
+						if beaten := c.engine.defeatedCompetitor(ptxn, string(nack.Key), detail); beaten != "" {
+							defeatedSet[beaten] = struct{}{}
 						}
 					}
 					if ptxn.state.Load() == txnStateAborted {
@@ -1154,6 +1210,23 @@ func (c *Context) flushTx() error {
 					c.engine.horizon.Abort(c.txnID)
 				} else {
 					c.engine.horizon.MakeVisible(c.txnID)
+				}
+			}
+
+			if ptxn.state.Load() == txnStateCommitted {
+				verdicts := make(map[string]pb.Verdict, 1+len(defeatedSet))
+				verdicts[c.txnID] = pb.Verdict_WON
+				for beaten := range defeatedSet {
+					verdicts[beaten] = pb.Verdict_LOST
+				}
+				for _, kb := range bind.Keys {
+					key := string(kb.Key)
+					if err := c.engine.emitSnapshot(key, verdicts); err != nil {
+						slog.Warn("flushTx: emitSnapshot for verdict failed",
+							"key", key,
+							"bind_offset", bindOffset,
+							"error", err)
+					}
 				}
 			}
 		}
@@ -1292,6 +1365,7 @@ func (c *Context) emitSerializationEffect(key string) {
 func (c *Context) reset() {
 	clear(c.keys)
 	c.inTx = false
+	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
