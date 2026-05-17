@@ -291,6 +291,25 @@ func (e *Engine) defeatedCompetitor(ptxn *pendingTxn, key string, detail *pb.Nac
 	if theirTxnID == "" || theirTxnID == ptxn.txnID {
 		return ""
 	}
+	// Reachability filters mirror isRealConflict: a foreign bind that is
+	// causally ordered relative to our pending tx is not a competitor and
+	// must not enter defeatedSet. Without these, our post-commit snapshot
+	// records LOST for a transaction that committed cleanly elsewhere
+	// and propagates the wrong verdict.
+	for _, dep := range detail.Deps {
+		if r(dep) == ptxn.bindOffset {
+			return ""
+		}
+		for _, pk := range ptxn.keys {
+			if r(dep) == pk.newTip {
+				return ""
+			}
+		}
+	}
+	var zero Tip
+	if theirBindOffset != zero && e.reachesFromTx(ptxn, theirBindOffset) {
+		return ""
+	}
 	if ptxn.txnID != "" {
 		ourStart := collectOurBindTips(ptxn, key)
 		conflict, bothHadEvidence := e.hasPredicateConflict(
