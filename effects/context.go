@@ -209,7 +209,10 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			return nil, nil, err
 		}
 		// Compact long chains by emitting a state snapshot into this context.
-		if chainLen >= 20+rand.IntN(31) {
+		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
+		// when result is nil, but the check is defensive against future
+		// regressions in that contract.
+		if result != nil && chainLen >= 20+rand.IntN(31) {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,

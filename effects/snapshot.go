@@ -200,6 +200,13 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		(result.Op == pb.EffectOp_UNKNOWN_OP || result.Op == pb.EffectOp_REMOVE_OP) {
 		return nil, snapshotTips, 0, nil
 	}
+	// reconstruct may return a nil result with a non-zero chainLen when the
+	// walk visits a verdict-only snapshot at the LCA, an all-lost bind set,
+	// or a chain of NoopEffects. The caller's compaction branch keys on
+	// chainLen and dereferences result; zero chainLen here so it doesn't.
+	if result == nil {
+		return nil, snapshotTips, 0, nil
+	}
 	return result, snapshotTips, chainLen, nil
 }
 

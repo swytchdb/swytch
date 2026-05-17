@@ -3311,3 +3311,104 @@ func TestReconstruct_VerdictSnapshotSurvivesCompaction(t *testing.T) {
 		t.Fatalf("G1a: T_lost's data 'loser-elem' visible in el-2 after compaction: %v", got)
 	}
 }
+
+// reconstruct can return (nil result, non-zero chainLen) — a chain of
+// NoopEffects, a verdict-only snapshot at the LCA, or an all-lost bind set
+// all produce that shape. Engine.GetSnapshot must zero chainLen in that
+// case so the caller's compaction branch doesn't dereference nil.
+//
+// Regression for Jepsen run 25997599769: n71 panicked at
+// effects/context.go:218 during compaction of an el-3 read whose reconstruct
+// returned result_nil=true with chainLen=193 (one verdict-only snapshot at
+// the LCA, cross-key walked 192). The process crash cascaded into the writer
+// on n3 hitting peer-unavailable and aborting, which surfaced as :G1a.
+func TestGetSnapshot_NilResultZeroesChainLen(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	// Pre-mark "k" subscribed so ensureSubscribed inside GetSnapshot
+	// doesn't install a SubscriptionEffect — we want the walk to see
+	// only our Noop chain so result genuinely stays nil.
+	sub := &subscriptionState{ready: make(chan struct{})}
+	sub.markReady()
+	e.subscriptions.Store("k", sub)
+
+	const nodeA uint64 = 1
+	hlc := func(n int64) *timestamppb.Timestamp { return sTs(n) }
+
+	// 25 NoopEffects in a linear chain on key "k". Noops are skipped by
+	// ReduceChain (no Data/Meta/Sub/Ser), so result stays nil. Walk visits
+	// all 25 nodes, count=25, chainLen=25.
+	var prev Tip
+	for i := range 25 {
+		eff := &pb.Effect{
+			Key:    []byte("k"),
+			Hlc:    hlc(int64(100 + i)),
+			NodeId: nodeA,
+			Kind:   &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+		}
+		var zero Tip
+		if prev != zero {
+			eff.Deps = []*pb.EffectRef{toPbRef(prev)}
+		}
+		prev = log.putEffect(eff)
+	}
+	e.index.Insert("k", nil, keytrie.NewTipSet(prev))
+
+	r, _, chainLen, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatalf("GetSnapshot returned error: %v", err)
+	}
+	if r != nil {
+		t.Fatalf("expected nil result for a Noop-only chain; got %+v", r)
+	}
+	if chainLen != 0 {
+		t.Fatalf("chainLen must be zero when result is nil so callers don't dereference; got %d", chainLen)
+	}
+}
+
+// Companion to TestGetSnapshot_NilResultZeroesChainLen: the panic site
+// itself. Context.GetSnapshot must not crash when engine.GetSnapshot
+// returns nil result, regardless of whether the snapshot.go contract
+// is being honored. Defensive guard at context.go:212.
+func TestContextGetSnapshot_NilResultDoesNotPanicCompaction(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log, nil)
+
+	sub := &subscriptionState{ready: make(chan struct{})}
+	sub.markReady()
+	e.subscriptions.Store("k", sub)
+
+	const nodeA uint64 = 1
+	hlc := func(n int64) *timestamppb.Timestamp { return sTs(n) }
+
+	var prev Tip
+	for i := range 60 {
+		eff := &pb.Effect{
+			Key:    []byte("k"),
+			Hlc:    hlc(int64(100 + i)),
+			NodeId: nodeA,
+			Kind:   &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+		}
+		var zero Tip
+		if prev != zero {
+			eff.Deps = []*pb.EffectRef{toPbRef(prev)}
+		}
+		prev = log.putEffect(eff)
+	}
+	e.index.Insert("k", nil, keytrie.NewTipSet(prev))
+
+	ctx := e.NewContext()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Context.GetSnapshot panicked on nil result during compaction: %v", r)
+		}
+	}()
+	r, _, err := ctx.GetSnapshot("k")
+	if err != nil {
+		t.Fatalf("Context.GetSnapshot returned error: %v", err)
+	}
+	if r != nil {
+		t.Fatalf("expected nil result; got %+v", r)
+	}
+}
