@@ -804,6 +804,176 @@ func TestFlushTx_FakeConflict_Commits(t *testing.T) {
 	}
 }
 
+// TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys is the regression test
+// for the G1a observed in Jepsen run 26163122703 (swytch-elle-causal):
+// op 75 read element 1931 — written by op 55, which :fail'd with
+// :watch-conflict. Op 55's bind touched el-1 and el-2; its competitor on
+// .68 (which beat op 55) touched only el-1. The winner's commit emitted
+// the verdict snapshot only on its own bind.Keys (el-1), so el-2 — a key
+// the loser wrote but the winner didn't — was left without an
+// authoritative LOST record for op 55. A subsequent tx-context
+// reconstruct of el-2 whose bindKeyClosure truncated at a pre-tx
+// snapshot boundary therefore failed to discover op 55's bind as
+// atomically_lost and surfaced its element.
+//
+// The fix: verdict snapshots emit on the union of {winner's keys} ∪
+// {each beaten loser's keys}. Every key a LOST txn touched now carries
+// a direct verdict record, independent of closure expansion.
+func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
+	const (
+		sharedKey    = "shared"
+		loserOnlyKey = "loser-only"
+		peerNodeID   = pb.NodeID(99)
+		loserNodeID  = pb.NodeID(5)
+		loserTxnID   = "loser-tx"
+	)
+
+	loserBindOffset := Tip{uint64(loserNodeID), 100}
+	loserDataShared := Tip{uint64(loserNodeID), 98}
+	loserDataLoserOnly := Tip{uint64(loserNodeID), 99}
+
+	// Loser's hash maxed so any HLC-derived hash from our engine wins
+	// the ForkChoiceLess(ours, theirs) check inside defeatedCompetitor.
+	loserHash := make([]byte, 32)
+	for i := range loserHash {
+		loserHash[i] = 0xff
+	}
+
+	bc := &txnMockBroadcaster{
+		replicateToResults: map[pb.NodeID]*pb.NackNotify{
+			peerNodeID: {
+				Key: []byte(sharedKey),
+				TipDetails: []*pb.NackTipDetail{
+					{
+						Ref:                toPbRef(loserBindOffset),
+						Hlc:                timestamppb.New(time.Unix(0, 50)),
+						IsBind:             true,
+						IsTransactional:    true,
+						BindHlc:            timestamppb.New(time.Unix(0, 50)),
+						BindNodeId:         uint64(loserNodeID),
+						BindForkChoiceHash: loserHash,
+						BindConsumedTips: []*pb.KeyConsumedTips{
+							{Key: []byte(sharedKey), ConsumedTips: []*pb.EffectRef{}},
+						},
+					},
+				},
+			},
+		},
+	}
+	e := newTxnTestEngine(bc)
+
+	// Pre-stuff the cache with the loser bind. flushTx's commit path
+	// fetches this via getEffect to read its keyset for the verdict
+	// snapshot's emit set. Independent NodeId so reachesFromTx returns
+	// false (loser is not in our DAG ancestry).
+	loserBindHlc := timestamppb.New(time.Unix(0, 50))
+	e.effectCache.Put(loserBindOffset, &pb.Effect{
+		TxnId:          loserTxnID,
+		NodeId:         uint64(loserNodeID),
+		Hlc:            loserBindHlc,
+		ForkChoiceHash: loserHash,
+		Key:            []byte(sharedKey),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           loserBindHlc,
+			OriginatorNodeId: uint64(loserNodeID),
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte(sharedKey), NewTip: toPbRef(loserDataShared)},
+				{Key: []byte(loserOnlyKey), NewTip: toPbRef(loserDataLoserOnly)},
+			},
+		}},
+	})
+
+	// Subscribe peer 99 to the shared key so flushTx replicates our
+	// bind to peer 99 and processes its NACK response.
+	subCtx := e.NewContext()
+	if err := subCtx.Emit(&pb.Effect{
+		Key: []byte(sharedKey),
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+			SubscriberNodeId: uint64(peerNodeID),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := subCtx.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reset broadcasts so we only see effects emitted during our txn.
+	bc.mu.Lock()
+	bc.broadcasts = nil
+	bc.mu.Unlock()
+
+	// Our winning txn writes only the shared key.
+	ctx := e.NewContext()
+	ctx.BeginTx()
+	if err := ctx.Emit(dataEffect(sharedKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatalf("expected commit, got %v", err)
+	}
+
+	// Locate the verdict-snapshot emitted on the loser-only key. The
+	// key did not exist before flushTx; if the fix is working, emit
+	// landed there and the index now has the snapshot as its sole tip.
+	loserOnlyTips := e.index.Contains(loserOnlyKey)
+	if loserOnlyTips == nil {
+		t.Fatalf("no verdict snapshot emitted on loser-only key %q — "+
+			"emit set is missing the loser's non-shared keyset", loserOnlyKey)
+	}
+
+	foundLoserOnlyVerdict := false
+	for _, tip := range loserOnlyTips.Tips() {
+		eff, ok := e.effectCache.Get(tip, 0)
+		if !ok {
+			continue
+		}
+		snap := eff.GetSnapshot()
+		if snap == nil {
+			continue
+		}
+		v, ok := snap.TxnVerdicts[loserTxnID]
+		if !ok {
+			t.Fatalf("verdict snapshot on %q is missing the loser txn %q in TxnVerdicts (got %v)",
+				loserOnlyKey, loserTxnID, snap.TxnVerdicts)
+		}
+		if v != pb.Verdict_LOST {
+			t.Fatalf("verdict snapshot on %q records loser %q as %v, want LOST",
+				loserOnlyKey, loserTxnID, v)
+		}
+		foundLoserOnlyVerdict = true
+	}
+	if !foundLoserOnlyVerdict {
+		t.Fatalf("loser-only key %q has tips but none are a SnapshotEffect carrying TxnVerdicts", loserOnlyKey)
+	}
+
+	// The shared key must also have a verdict snapshot — winner's own
+	// keyset is the historical baseline that the fix extends, not
+	// replaces.
+	sharedTips := e.index.Contains(sharedKey)
+	if sharedTips == nil {
+		t.Fatalf("shared key %q has no tips after commit", sharedKey)
+	}
+	foundSharedVerdict := false
+	for _, tip := range sharedTips.Tips() {
+		eff, ok := e.effectCache.Get(tip, 0)
+		if !ok {
+			continue
+		}
+		snap := eff.GetSnapshot()
+		if snap == nil {
+			continue
+		}
+		if v, ok := snap.TxnVerdicts[loserTxnID]; ok && v == pb.Verdict_LOST {
+			foundSharedVerdict = true
+			break
+		}
+	}
+	if !foundSharedVerdict {
+		t.Fatalf("no verdict snapshot on shared key %q records the loser as LOST", sharedKey)
+	}
+}
+
 func TestEmit_ExcludesInProgressTxTips(t *testing.T) {
 	e := newTxnTestEngine(nil)
 

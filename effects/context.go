@@ -1143,8 +1143,17 @@ func (c *Context) flushTx() error {
 			}
 			wg.Wait()
 
-			// Competitor txnIDs we beat during the NACK loop.
-			defeatedSet := make(map[string]struct{})
+			// Competitor txnIDs we beat during the NACK loop, keyed by
+			// txnID with the loser's bind anchor offset as value. The
+			// offset is needed at verdict-snapshot emit time so we can
+			// fetch the loser's bind and union its keyset with ours —
+			// otherwise the verdict for `beaten` is only published on
+			// keys WE touched, leaving any key the loser touched alone
+			// without an authoritative LOST record. A subsequent reader
+			// of such a key would have to rely on cross-key closure
+			// expansion to discover the verdict, which is fragile under
+			// tx-context reconstructs with pre-tx snapshot cutoffs.
+			defeatedSet := make(map[string]Tip)
 
 			responseCount := 0
 			for _, res := range results {
@@ -1179,7 +1188,7 @@ func (c *Context) flushTx() error {
 							break
 						}
 						if beaten := c.engine.defeatedCompetitor(ptxn, string(nack.Key), detail); beaten != "" {
-							defeatedSet[beaten] = struct{}{}
+							defeatedSet[beaten] = r(detail.Ref)
 						}
 					}
 					if ptxn.state.Load() == txnStateAborted {
@@ -1219,11 +1228,47 @@ func (c *Context) flushTx() error {
 			if ptxn.state.Load() == txnStateCommitted {
 				verdicts := make(map[string]pb.Verdict, 1+len(defeatedSet))
 				verdicts[c.txnID] = pb.Verdict_WON
-				for beaten := range defeatedSet {
-					verdicts[beaten] = pb.Verdict_LOST
-				}
+
+				// Emit set: every key the winner touched, plus every key
+				// any beaten loser touched. The verdict for a LOST txn
+				// has to be findable on each key the loser wrote — that
+				// is the only way a future reconstruct on a loser-only
+				// key (one the winner never touched) can prove the bind
+				// is dead without re-running cross-key closure expansion
+				// from scratch. Recording LOST only on the winner's keys
+				// satisfies losersOnKey there but leaves loser-only keys
+				// dependent on closure widening, which can be truncated
+				// by a tx-context reconstruct's pre-tx cutoff and
+				// surface as G1a.
+				emitKeys := make(map[string]struct{}, len(bind.Keys))
 				for _, kb := range bind.Keys {
-					key := string(kb.Key)
+					emitKeys[string(kb.Key)] = struct{}{}
+				}
+				for beatenTxn, beatenOffset := range defeatedSet {
+					verdicts[beatenTxn] = pb.Verdict_LOST
+					loserEff, err := c.engine.getEffect(beatenOffset)
+					if err != nil {
+						slog.Warn("flushTx: cannot fetch beaten bind for verdict emit",
+							"loser_txn", beatenTxn,
+							"loser_offset", beatenOffset,
+							"bind_offset", bindOffset,
+							"error", err)
+						continue
+					}
+					loserBind := loserEff.GetTxnBind()
+					if loserBind == nil {
+						slog.Warn("flushTx: beaten effect is not a TxnBind",
+							"loser_txn", beatenTxn,
+							"loser_offset", beatenOffset,
+							"bind_offset", bindOffset)
+						continue
+					}
+					for _, kb := range loserBind.Keys {
+						emitKeys[string(kb.Key)] = struct{}{}
+					}
+				}
+
+				for key := range emitKeys {
 					if err := c.engine.emitSnapshot(key, verdicts); err != nil {
 						slog.Warn("flushTx: emitSnapshot for verdict failed",
 							"key", key,
