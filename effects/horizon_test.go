@@ -164,6 +164,71 @@ func TestHorizonSet_AbortRemovesEntryWithoutPromotion(t *testing.T) {
 	}
 }
 
+// applySnapshotVerdicts promotes every txn named in the verdict map out
+// of horizon as soon as the originator's verdict snapshot arrives,
+// without waiting for the crash-fallback timer.
+func TestHorizonSet_VerdictSnapshotEndsWaitEarly(t *testing.T) {
+	e := newHorizonTestEngine()
+	installFakeTimers(e.horizon) // fake timer never fires
+
+	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
+	e.pendingTxTips.Store(Tip{1, 40}, []Tip{{1, 10}})
+
+	winnerBind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 20},
+	)
+	loserBind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 40},
+	)
+
+	e.horizon.Add("winner", Tip{1, 30}, winnerBind)
+	e.horizon.Add("loser", Tip{1, 50}, loserBind)
+	e.horizon.ScheduleMakeVisible("winner", time.Hour)
+	e.horizon.ScheduleMakeVisible("loser", time.Hour)
+
+	if !e.horizon.IsInvisible("winner") || !e.horizon.IsInvisible("loser") {
+		t.Fatal("both txns should be invisible before snapshot arrives")
+	}
+
+	verdictEff := &pb.Effect{
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: map[string]pb.Verdict{
+				"winner": pb.Verdict_WON,
+				"loser":  pb.Verdict_LOST,
+			},
+		}},
+	}
+	e.applySnapshotVerdicts(verdictEff)
+
+	if e.horizon.IsInvisible("winner") {
+		t.Fatal("winner should be visible after verdict snapshot")
+	}
+	if e.horizon.IsInvisible("loser") {
+		t.Fatal("loser should be visible after verdict snapshot (DAG/snapshot will filter it on reconstruct)")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
+		t.Fatal("winner pendingTxTips should be cleaned after MakeVisible")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 40}); ok {
+		t.Fatal("loser pendingTxTips should be cleaned after MakeVisible")
+	}
+}
+
+// applySnapshotVerdicts is a no-op when the txn isn't in horizon (e.g.,
+// snapshot arrives before its bind, or bind was already promoted).
+func TestHorizonSet_VerdictSnapshotIsIdempotent(t *testing.T) {
+	e := newHorizonTestEngine()
+
+	verdictEff := &pb.Effect{
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: map[string]pb.Verdict{"unknown": pb.Verdict_WON},
+		}},
+	}
+	e.applySnapshotVerdicts(verdictEff) // must not panic
+}
+
 // ScheduleMakeVisible's timer fires MakeVisible (remote-arrival path).
 func TestHorizonSet_ScheduledTimerFiresMakesVisible(t *testing.T) {
 	e := newHorizonTestEngine()

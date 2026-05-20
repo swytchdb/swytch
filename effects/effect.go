@@ -542,6 +542,26 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	return nil
 }
 
+// applySnapshotVerdicts promotes every txn named in a SnapshotEffect's
+// verdict map out of horizon. The verdict snapshot is emitted by the
+// originator only after commitPendingTxn returns (every subscriber
+// responded, isRealConflict cleared), so its arrival is strictly stronger
+// evidence than the 1×RTT timer that any concurrent competitor has had
+// its chance. MakeVisible is idempotent — txns not in horizon are a
+// no-op, and the timer-driven path remains as a crash fallback.
+func (e *Engine) applySnapshotVerdicts(eff *pb.Effect) {
+	if e.horizon == nil {
+		return
+	}
+	snap := eff.GetSnapshot()
+	if snap == nil || len(snap.TxnVerdicts) == 0 {
+		return
+	}
+	for txnID := range snap.TxnVerdicts {
+		e.horizon.MakeVisible(txnID)
+	}
+}
+
 // lookupSnapshotVerdict walks the snapshot chain on `key` for `txnID`'s
 // adjudication outcome. Used by arrival-time fork-choice sites to skip a
 // competing bind a prior snapshot already locked in as LOST.
@@ -752,6 +772,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	if e.effectCache != nil {
 		e.effectCache.Put(r(notify.Origin), eff)
 	}
+
+	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
+	e.applySnapshotVerdicts(eff)
 
 	// Handle flush-all: wipe the entire index
 	if string(eff.Key) == FlushKey {
@@ -1012,6 +1035,9 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		e.effectCache.Put(r(notify.Origin), eff)
 	}
 
+	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
+	e.applySnapshotVerdicts(eff)
+
 	if eff.TxnId != "" && eff.GetTxnBind() == nil {
 		e.pendingTxTips.Store(r(notify.Origin), fromPbRefs(eff.Deps))
 	}
@@ -1065,19 +1091,14 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 // handleRemoteBind processes a TransactionalBindEffect received remotely.
 func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset Tip, txnID string) {
 	if e.horizon != nil {
-		// Remote-arrival: hold the bind invisible for ~1×RTT so any
-		// concurrently-broadcast competing bind has time to arrive at us
-		// before reads can observe this one. Without this wait, a reader
-		// sees the bind, then later a competitor arrives and reconstruct
-		// picks a different winner — the earlier read becomes a
-		// retroactive lie. The RTT is measured per-peer; we wait for the
-		// slowest currently-alive peer.
+		// Remote-arrival: hold the bind invisible until the originator's
+		// verdict snapshot arrives (applySnapshotVerdicts in the ingestion
+		// path), with a crash-fallback timer as backstop. Without this
+		// wait, a reader sees the bind, then later a competitor arrives
+		// and reconstruct picks a different winner — the earlier read
+		// becomes a retroactive lie.
 		e.horizon.Add(txnID, bindOffset, bind)
-		var peers []pb.NodeID
-		if e.broadcaster != nil {
-			peers = e.broadcaster.PeerIDs()
-		}
-		e.horizon.ScheduleMakeVisible(txnID, e.horizon.computeHorizonWait(peers))
+		e.horizon.ScheduleMakeVisible(txnID, e.horizon.computeHorizonWait())
 	} else {
 		// Standalone: remove bound key tips from pendingTxTips immediately
 		for _, kb := range bind.Keys {

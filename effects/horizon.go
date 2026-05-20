@@ -70,33 +70,21 @@ func newHorizonSet(engine *Engine) *HorizonSet {
 	}
 }
 
+// horizonFallbackWait is the crash-fallback duration used when the
+// originator's verdict-snapshot never arrives (e.g., originator died
+// between bind broadcast and snapshot emit). The primary signal is the
+// snapshot itself via applySnapshotVerdicts; this timer only fires when
+// that signal is lost. Generous on purpose — racing the snapshot risks
+// premature visibility, holding longer just delays the rare crash case.
+const horizonFallbackWait = 5 * time.Second
+
 // computeHorizonWait returns the duration the remote-arrival path should
-// hold a bind invisible before making it visible. Semantic: any competing
-// bind broadcast concurrently from another node reaches us within one
-// round-trip, so after 1×maxRTT we've seen anyone who's coming.
-//
-// Falls back to a fixed duration when RTT data is unavailable.
-func (h *HorizonSet) computeHorizonWait(peers []pb.NodeID) time.Duration {
-	const fallback = 500 * time.Millisecond
-	if h.engine == nil || h.engine.rttProvider == nil || len(peers) == 0 {
-		return fallback
-	}
-	var maxRTT time.Duration
-	haveData := false
-	for _, p := range peers {
-		r := h.engine.rttProvider.GetRTT(p)
-		if r <= 0 {
-			continue
-		}
-		haveData = true
-		if r > maxRTT {
-			maxRTT = r
-		}
-	}
-	if !haveData {
-		return fallback
-	}
-	return maxRTT
+// hold a bind invisible before making it visible, when no verdict snapshot
+// arrives. Returns horizonFallbackWait — long enough that the originator's
+// snapshot almost always wins the race and shortcuts the wait, but short
+// enough that a crashed originator doesn't hang reads indefinitely.
+func (h *HorizonSet) computeHorizonWait() time.Duration {
+	return horizonFallbackWait
 }
 
 // Add registers a Bind in the invisible set. The bind stays invisible
@@ -189,11 +177,13 @@ func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBin
 }
 
 // ScheduleMakeVisible schedules MakeVisible(txnID) to fire after `wait`.
-// Used by handleRemoteBind for the 1×RTT remote-arrival wait — long
-// enough that any concurrently-broadcast competing bind has time to
-// arrive before reads see this one. Resets any existing timer on the
-// group; a later-joining bind extends the wait so its own competitors
-// also have time to land.
+// Used by handleRemoteBind as a crash-fallback for the remote-arrival
+// wait — the primary signal is the originator's verdict-snapshot
+// arriving via applySnapshotVerdicts, which short-circuits this timer.
+// The timer only fires when the originator died between broadcasting
+// the bind and broadcasting the verdict; we keep it generous (~5s) to
+// avoid racing the snapshot under normal conditions. Resets any
+// existing timer on the group; a later-joining bind extends the wait.
 func (h *HorizonSet) ScheduleMakeVisible(txnID string, wait time.Duration) {
 	entry, ok := h.entries.Load(txnID)
 	if !ok {
