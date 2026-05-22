@@ -630,6 +630,16 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		c.engine.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
 	}
 
+	// Track foreign peer subscriptions so flushTx's collectSubscribers
+	// sees them. Self-subscribes are filtered inside addPeerSubscriber.
+	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
+		if sub.Unsubscribe {
+			c.engine.removePeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
+		} else {
+			c.engine.addPeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
+		}
+	}
+
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
 }
@@ -1348,30 +1358,26 @@ func (c *Context) flushTx() error {
 }
 
 // collectSubscribers gathers unique subscriber node IDs across all touched keys.
-// Uses reconstruct directly instead of GetSnapshot to avoid filterSnapshot
-// stripping metadata-only snapshots (which contain subscription info).
+// Reads from the engine's peerSubscribers map — maintained incrementally by
+// ensureSubscribed (peers that NACK back are subscribed) and HandleRemote
+// (foreign SubscriptionEffect arrival/unsubscribe). Reading the DAG via
+// reconstruct here was the prior implementation; it produced subscribers:0
+// whenever reconstruct legitimately returned a Subscribers-less result
+// (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
+// which silently dropped the bind broadcast and produced missing verdict
+// snapshots downstream.
 func (c *Context) collectSubscribers() []pb.NodeID {
 	seen := make(map[pb.NodeID]struct{})
 	for key := range c.keys {
-		tips := c.engine.index.Contains(key)
-		if tips == nil {
+		inner, ok := c.engine.peerSubscribers.Load(key)
+		if !ok {
 			continue
 		}
-		tipOffsets := c.engine.resolveTipDeps(tips.Tips())
-		if len(tipOffsets) == 0 {
-			continue
-		}
-		r, _, err := c.engine.reconstruct(key, tipOffsets)
-		if err != nil || r == nil {
-			continue
-		}
-		for subID := range r.Subscribers {
-			if subID != uint64(c.engine.nodeID) {
-				seen[pb.NodeID(subID)] = struct{}{}
-			}
-		}
+		inner.Range(func(id pb.NodeID, _ struct{}) bool {
+			seen[id] = struct{}{}
+			return true
+		})
 	}
-
 	result := make([]pb.NodeID, 0, len(seen))
 	for id := range seen {
 		result = append(result, id)

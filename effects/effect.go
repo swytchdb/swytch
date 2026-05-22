@@ -93,6 +93,17 @@ type Engine struct {
 	// Subscription bootstrapping: key → *bootstrapCollector
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
 
+	// Peer subscribers per canonical key. Maintained incrementally:
+	// populated by ensureSubscribed (peers that NACK back are subscribed)
+	// and HandleRemote (foreign SubscriptionEffect arrival/unsubscribe).
+	// Used by flushTx to address bind broadcast without re-deriving from
+	// the DAG — reconstruct's `Subscribers` accumulator can return empty
+	// for legitimate reasons (verdict-only snapshot at LCA, all-lost bind
+	// set, NoopEffect chain) which silently makes the bind broadcast
+	// degenerate to subscribers:0 and the commit fast-path skips the
+	// NACK round, producing missing verdict snapshots downstream.
+	peerSubscribers *xsync.Map[string, *xsync.Map[pb.NodeID, struct{}]]
+
 	// Per-key dedupe for handleEviction. Multiple effects on the
 	// same key can evict in close succession; only one goroutine
 	// should run the broadcast + teardown for any given key.
@@ -281,6 +292,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
 		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
+		peerSubscribers:    xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		unsubInFlight:      xsync.NewMap[string, struct{}](),
 		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
 			c := clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))
@@ -363,6 +375,53 @@ func (e *Engine) generateTxnID() string {
 // the fetch handler (serves effects from cache when the log is unavailable).
 func (e *Engine) EffectCache() *clox.CloxCache[Tip, *pb.Effect] {
 	return e.effectCache
+}
+
+// addPeerSubscriber records that peer is subscribed to key. Idempotent.
+// Called from ensureSubscribed (peers that NACK back during bootstrap)
+// and HandleRemote (foreign SubscriptionEffect arrival).
+func (e *Engine) addPeerSubscriber(key string, peer pb.NodeID) {
+	if peer == e.nodeID {
+		return
+	}
+	inner, _ := e.peerSubscribers.LoadOrCompute(key, func() (*xsync.Map[pb.NodeID, struct{}], bool) {
+		return xsync.NewMap[pb.NodeID, struct{}](), false
+	})
+	inner.Store(peer, struct{}{})
+}
+
+// removePeerSubscriber removes peer from the subscriber set for key.
+// Called from HandleRemote on a foreign unsubscribe SubscriptionEffect.
+func (e *Engine) removePeerSubscriber(key string, peer pb.NodeID) {
+	if inner, ok := e.peerSubscribers.Load(key); ok {
+		inner.Delete(peer)
+	}
+}
+
+// PeerSubscribers returns the current subscriber set for key. The returned
+// slice is a snapshot; callers may iterate without holding any lock.
+func (e *Engine) PeerSubscribers(key string) []pb.NodeID {
+	inner, ok := e.peerSubscribers.Load(key)
+	if !ok {
+		return nil
+	}
+	result := make([]pb.NodeID, 0, inner.Size())
+	inner.Range(func(id pb.NodeID, _ struct{}) bool {
+		result = append(result, id)
+		return true
+	})
+	return result
+}
+
+// DropPeerFromSubscribers removes peer from every key's subscriber set.
+// Wired into PeerManager.SetPeerLifecycleHooks on the onRemoved hook so
+// stale entries don't make flushTx address a dead peer (which would block
+// commit indefinitely waiting for an ACK that can't come).
+func (e *Engine) DropPeerFromSubscribers(peer pb.NodeID) {
+	e.peerSubscribers.Range(func(_ string, inner *xsync.Map[pb.NodeID, struct{}]) bool {
+		inner.Delete(peer)
+		return true
+	})
 }
 
 // SetBroadcaster sets the broadcaster for replicating effects to peers.
@@ -912,9 +971,18 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// Subscription bootstrapping: when a remote SubscriptionEffect arrives,
 	// always NACK back with our current tips so the subscriber can fetch state.
 	// Send pre-update tips (excluding the subscription itself).
-	if eff.GetSubscription() != nil && eff.NodeId != uint64(e.nodeID) {
+	//
+	// Also maintain the in-memory peerSubscribers map so flushTx doesn't
+	// have to re-derive the subscriber set from the DAG (where reconstruct
+	// can return Subscribers-less results for legitimate reasons).
+	if sub := eff.GetSubscription(); sub != nil && eff.NodeId != uint64(e.nodeID) {
+		if sub.Unsubscribe {
+			e.removePeerSubscriber(key, pb.NodeID(eff.NodeId))
+		} else {
+			e.addPeerSubscriber(key, pb.NodeID(eff.NodeId))
+		}
 		slog.Debug("HandleRemote: remote subscription, bootstrap NACK",
-			"key", key, "from_node", eff.NodeId)
+			"key", key, "from_node", eff.NodeId, "unsubscribe", sub.Unsubscribe)
 		var tipOffsets []Tip
 		if initialTips != nil {
 			tipOffsets = initialTips.Tips()

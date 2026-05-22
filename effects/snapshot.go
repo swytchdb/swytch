@@ -304,6 +304,13 @@ func (e *Engine) ensureSubscribed(key string) error {
 					return
 				}
 				ackCount.Add(1)
+				// A non-empty NACK list means the peer was authoritative on
+				// this key — i.e., the peer is subscribed. Record it so
+				// flushTx can address bind broadcast directly without
+				// re-deriving from the DAG.
+				if len(nacks) > 0 {
+					e.addPeerSubscriber(key, pid)
+				}
 				// Collect NACKs returned synchronously from ReplicateTo.
 				// HandleRemote on the peer generates these inline and
 				// returns them as the ReplicateTo response.
@@ -365,6 +372,9 @@ done:
 				nacks, err := e.broadcaster.ReplicateTo(notify, notify.EffectData, pid)
 				if err != nil {
 					return
+				}
+				if len(nacks) > 0 {
+					e.addPeerSubscriber(key, pid)
 				}
 				mu.Lock()
 				for _, nack := range nacks {
