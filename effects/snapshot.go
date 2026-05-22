@@ -545,6 +545,9 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	}
 
 	d := newDag(e, key, txID)
+	if err := d.prepare(tips); err != nil {
+		return nil, 0, err
+	}
 
 	var result *pb.ReducedEffect
 	var subRootEffects []*pb.Effect
@@ -555,7 +558,50 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 		isInvisible = e.horizon.IsInvisible
 	}
 
-	err = d.walk(tips, func(eff *pb.Effect) error {
+	// Propagate HorizonSet invisibility along DAG dep edges. A visible
+	// bind whose causal chain reaches an invisible bind cannot be
+	// honored: its writes describe a state that's only consistent if
+	// the ancestor's pending verdict resolves WON. Until that verdict
+	// lands, including the descendant while skipping the ancestor would
+	// surface a "future without its past" (Elle :incompatible-order).
+	// Walk d.topoOrder (parents before children, includes tx-data tips
+	// iterate filters from the processor stream) and mark every tip
+	// that transitively depends on an invisible bind.
+	var dependsOnInvisible map[Tip]struct{}
+	if isInvisible != nil {
+		invisibleBindTips := make(map[Tip]struct{})
+		dependsOnInvisible = make(map[Tip]struct{})
+		for _, t := range d.topoOrder {
+			eff := d.nodes[t]
+			var refs []*pb.EffectRef
+			if bind := eff.GetTxnBind(); bind != nil {
+				for _, kb := range bind.Keys {
+					if string(kb.Key) == key {
+						refs = []*pb.EffectRef{kb.NewTip}
+						break
+					}
+				}
+			} else {
+				refs = eff.GetDeps()
+			}
+			for _, ref := range refs {
+				dt := r(ref)
+				if _, ok := invisibleBindTips[dt]; ok {
+					dependsOnInvisible[t] = struct{}{}
+					break
+				}
+				if _, ok := dependsOnInvisible[dt]; ok {
+					dependsOnInvisible[t] = struct{}{}
+					break
+				}
+			}
+			if bind := eff.GetTxnBind(); bind != nil && isInvisible(eff.TxnId) {
+				invisibleBindTips[t] = struct{}{}
+			}
+		}
+	}
+
+	err = d.iterate(func(tip Tip, eff *pb.Effect) error {
 		count++
 
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
@@ -572,6 +618,13 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 			if isInvisible != nil && isInvisible(eff.TxnId) {
 				slog.Debug("reconstruct: skip bind (invisible)", "key", key, "txn", eff.TxnId)
 				return nil
+			}
+			if dependsOnInvisible != nil {
+				if _, ok := dependsOnInvisible[tip]; ok {
+					slog.Debug("reconstruct: skip bind (descends from invisible ancestor)",
+						"key", key, "txn", eff.TxnId)
+					return nil
+				}
 			}
 			if _, lost := atomicallyLost[eff.TxnId]; lost {
 				if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_LOST {
