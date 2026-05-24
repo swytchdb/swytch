@@ -175,6 +175,12 @@ func (d *dag) shouldEmit(t Tip, eff *pb.Effect) bool {
 // when either: (1) a dep we follow is already visited and is a snapshot
 // (paths converged), or (2) we dequeue a snapshot with an empty queue
 // (no concurrent paths). All visited nodes are stored in d.nodes.
+//
+// Only state-carrying snapshots terminate the walk. Verdict-only snapshots
+// (State == nil) are opaque markers for fork-choice adjudication; their
+// chain content is reachable only via their Deps, so we follow them like
+// any other effect. Treating them as LCAs would leave reconstruct with a
+// single dead-end tip and no way to recover the underlying chain.
 func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 	queue := make([]Tip, 0, len(tips)*2)
 
@@ -194,7 +200,7 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 
 		eff := d.nodes[cur]
 
-		if eff.GetSnapshot() != nil && len(queue) == 0 {
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
 			*lcaTip = cur
 			return nil
 		}
