@@ -1203,74 +1203,120 @@ func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset T
 	}
 }
 
-// checkCompetingBinds checks if any bind in the local index shares a causal
-// base with our transaction. A bind in the index — whether visible or still
-// in horizon wait — is a real competitor. If one exists, our transaction
-// is wrong by construction (stale snapshot) — return the competing txnID.
+// checkCompetingBinds walks the DAG fragment for each key the bind touches
+// and returns the txnID of any bind whose NewTip on that key is not a
+// structural ancestor of our ConsumedTips — i.e., a bind we know about
+// that's space-like concurrent with our forthcoming bind. Returns "" if
+// no such bind exists.
+//
+// Every bind in the DAG fragment counts: invisible (in-horizon), visible,
+// and prior LOST adjudications alike. By the time flushTx reaches this
+// check we've already ACK'd or NACK'd every bind we've ingested, and that
+// response is the cluster-visible promise that we won't emit a structural
+// competitor. Re-deriving "could I commit anyway?" from a partial view
+// (horizon-only, losers-only, or index-tips-only) would let us
+// retroactively change our mind — exactly what the "once you've spoken"
+// invariant forbids.
+//
+// The DAG walk is the source of truth because the per-key index can lose
+// in-horizon bind tips: emitSnapshot for an unrelated txn consumes all
+// current tips and replaces them with its own snapshot tip, so an
+// invisible bind that arrived between WATCH and EXEC can vanish from the
+// index even though it's still alive in the DAG (reachable as a dep of
+// the snapshot that consumed it).
+//
+// Predicate refinement: two binds whose row-write evidence proves disjoint
+// element IDs on a KEYED collection coexist without aborting either.
 func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID string) string {
 	for _, kb := range bind.Keys {
 		k := string(kb.Key)
-		tips := e.index.Contains(k)
-		if tips == nil {
+		ourNewTip := r(kb.NewTip)
+		consumedTips := make([]Tip, 0, len(kb.ConsumedTips))
+		for _, ct := range kb.ConsumedTips {
+			consumedTips = append(consumedTips, r(ct))
+		}
+
+		tipSet := e.index.Contains(k)
+		if tipSet == nil {
 			continue
 		}
-		for _, tipOff := range tips.Tips() {
-			eff, err := e.getEffect(tipOff)
+
+		// Ancestor closure of our consumed tips on this key. A bind whose
+		// NewTip on `k` lands in this set is structurally in our past.
+		ourAncestors := make(map[Tip]struct{}, len(consumedTips)*8)
+		ancestorStack := make([]Tip, 0, len(consumedTips))
+		for _, t := range consumedTips {
+			if _, dup := ourAncestors[t]; dup {
+				continue
+			}
+			ourAncestors[t] = struct{}{}
+			ancestorStack = append(ancestorStack, t)
+		}
+		for len(ancestorStack) > 0 {
+			cur := ancestorStack[len(ancestorStack)-1]
+			ancestorStack = ancestorStack[:len(ancestorStack)-1]
+			eff, err := e.getEffect(cur)
 			if err != nil {
 				continue
 			}
-			otherBind := eff.GetTxnBind()
-			if otherBind == nil {
-				continue
-			}
-			// Skip binds a prior winner-commit snapshot on this key
-			// already locked in as LOST.
-			if v, ok := e.lookupSnapshotVerdict(k, eff.TxnId); ok && v == pb.Verdict_LOST {
-				continue
-			}
-			// Check if they share a consumed tip on any overlapping key.
-			shared := false
-			var theirNewTip Tip
-			for _, okb := range otherBind.Keys {
-				if string(okb.Key) != k {
+			for _, dep := range eff.Deps {
+				dt := r(dep)
+				if _, dup := ourAncestors[dt]; dup {
 					continue
 				}
-				ourSet := make(map[Tip]bool, len(kb.ConsumedTips))
-				for _, ct := range kb.ConsumedTips {
-					ourSet[r(ct)] = true
-				}
-				for _, ct := range okb.ConsumedTips {
-					if ourSet[r(ct)] {
-						shared = true
-						theirNewTip = r(okb.NewTip)
+				ourAncestors[dt] = struct{}{}
+				ancestorStack = append(ancestorStack, dt)
+			}
+		}
+
+		visited := make(map[Tip]bool)
+		walkStack := append([]Tip(nil), tipSet.Tips()...)
+		for len(walkStack) > 0 {
+			t := walkStack[len(walkStack)-1]
+			walkStack = walkStack[:len(walkStack)-1]
+			if visited[t] {
+				continue
+			}
+			visited[t] = true
+			eff, err := e.getEffect(t)
+			if err != nil {
+				continue
+			}
+
+			if otherBind := eff.GetTxnBind(); otherBind != nil {
+				for _, okb := range otherBind.Keys {
+					if string(okb.Key) != k {
+						continue
+					}
+					theirNewTip := r(okb.NewTip)
+					if _, inAncestors := ourAncestors[theirNewTip]; inAncestors {
+						walkStack = append(walkStack, theirNewTip)
 						break
 					}
+					if txnID != "" && eff.TxnId != "" {
+						conflict, bothHadEvidence := e.hasPredicateConflict(
+							txnID, eff.TxnId, k,
+							[]Tip{ourNewTip},
+							[]Tip{theirNewTip, t})
+						if bothHadEvidence && !conflict {
+							walkStack = append(walkStack, theirNewTip)
+							break
+						}
+					}
+					return eff.TxnId
 				}
-				if shared {
-					break
-				}
-			}
-			if !shared {
 				continue
 			}
-			// Predicate refinement: shared base alone is too coarse
-			// when both txs carry observation/row-write evidence on
-			// the key. If neither side's observations match the
-			// other's writes, the txs are genuinely disjoint — skip
-			// the abort. Falls back to the conservative shared-base
-			// conflict when either side lacks evidence (e.g. a bind
-			// that only mutated schema metadata).
-			conflict, bothHadEvidence := e.hasPredicateConflict(
-				txnID, eff.TxnId, k,
-				[]Tip{r(kb.NewTip)},
-				[]Tip{theirNewTip, tipOff})
-			if bothHadEvidence && !conflict {
-				continue
+
+			if snap := eff.GetSnapshot(); snap != nil && snap.PrevSnapshot != nil {
+				walkStack = append(walkStack, r(snap.PrevSnapshot))
 			}
-			return eff.TxnId // competing bind found
+			for _, dep := range eff.Deps {
+				walkStack = append(walkStack, r(dep))
+			}
 		}
 	}
-	return "" // no competing bind
+	return ""
 }
 
 // evaluateBindForkChoice returns true if the bind would lose at the
