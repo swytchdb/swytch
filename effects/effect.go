@@ -325,13 +325,16 @@ func NewEngine(cfg EngineConfig) *Engine {
 	})
 	e.cache = cache
 
-	// Percent-based memory limit: delegate to cloxcache's live
-	// enforcer rather than locking a static byte budget. The
-	// enforcer re-evaluates available memory each tick so cgroup /
-	// system changes propagate to cache capacity automatically.
+	// Memory enforcement: start a background loop that compares process
+	// RSS against the target and adjusts cache capacity accordingly.
+	// Percent-based uses a fraction of available memory; absolute uses
+	// the exact byte budget from --maxmemory. Both paths set GOMEMLIMIT
+	// so the Go GC cooperates with the target.
+	const avgEffectBytes = 512 // conservative; loop self-corrects from actual bytes
 	if cfg.MemoryLimitPercent > 0 && cfg.MemoryLimitPercent <= 1.0 {
-		const avgEffectBytes = 512 // conservative; loop self-corrects from actual bytes
 		e.effectCache.EnforceMemoryTarget(cfg.MemoryLimitPercent, avgEffectBytes)
+	} else if cfg.MemoryLimit > 0 {
+		e.effectCache.EnforceAbsoluteMemoryLimit(cfg.MemoryLimit, avgEffectBytes)
 	}
 
 	e.safety.Store(&safetyMap{

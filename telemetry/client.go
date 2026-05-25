@@ -137,6 +137,7 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 	if c.clusterID != "" {
 		params.Set("cluster_id", c.clusterID)
 	}
+	params.Set("ver", c.version)
 	params.Set("nodes", strconv.Itoa(stats.Nodes))
 	params.Set("uptime", strconv.Itoa(stats.UptimeSeconds))
 	if stats.MemoryAvail != 0 {

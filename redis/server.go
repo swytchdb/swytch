@@ -37,6 +37,8 @@ import (
 	"github.com/swytchdb/swytch/redis/pubsub"
 	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/swytchdb/swytch/tracing"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ServerConfig holds configuration for the Redis server
@@ -753,9 +755,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		cmd := result.cmd
 
-		// Start a lifecycle span that covers the full command processing
-		lifecycleCtx, lifecycleSpan := tracing.Tracer().Start(cs.conn.Ctx, "server.command_lifecycle")
-		cs.conn.Ctx = lifecycleCtx
+		lifecycleCtx := cs.conn.Ctx
+		var lifecycleSpan trace.Span
+		if tracing.Enabled() {
+			lifecycleCtx, lifecycleSpan = tracing.Tracer().Start(cs.conn.Ctx, "server.command_lifecycle")
+			cs.conn.Ctx = lifecycleCtx
+		}
 
 		// Track last command for CLIENT LIST
 		cmdName := cmd.Type.String()
@@ -774,7 +779,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if flushErr := cs.writer.Flush(); flushErr != nil {
 				connWriteMu.Unlock()
 				shared.PutCommand(cmd)
-				lifecycleSpan.End()
+				if lifecycleSpan != nil {
+					lifecycleSpan.End()
+				}
 				return
 			}
 			connWriteMu.Unlock()
@@ -899,22 +906,28 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Flush when no more pipelined data
 		if pendingWrites && !result.moreBuffered {
-			_, flushSpan := tracing.Tracer().Start(lifecycleCtx, "server.flush_response")
+			if tracing.Enabled() {
+				_, flushSpan := tracing.Tracer().Start(lifecycleCtx, "server.flush_response")
+				defer flushSpan.End()
+			}
 			connWriteMu.Lock()
 			if s.config.WriteTimeout > 0 {
 				_ = conn.SetWriteDeadline(time.Now().Add(s.config.WriteTimeout))
 			}
 			flushErr := cs.writer.Flush()
 			connWriteMu.Unlock()
-			flushSpan.End()
 			if flushErr != nil {
-				lifecycleSpan.End()
+				if lifecycleSpan != nil {
+					lifecycleSpan.End()
+				}
 				return
 			}
 			pendingWrites = false
 		}
 
-		lifecycleSpan.End()
+		if lifecycleSpan != nil {
+			lifecycleSpan.End()
+		}
 	}
 }
 
