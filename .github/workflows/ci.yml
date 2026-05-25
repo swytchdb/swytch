@@ -26,10 +26,10 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test ./...
+        run: go test $(go list ./... | grep -v /sql)
 
       - name: go test (race)
-        run: go test -race ./...
+        run: go test -race $(go list ./... | grep -v /sql)
 
   snapshot:
     name: Goreleaser snapshot

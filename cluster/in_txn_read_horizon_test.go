@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -55,8 +56,8 @@ import (
 type gatedPairedBus struct {
 	mu       sync.Mutex
 	engines  map[pb.NodeID]*effects.Engine
-	hold     map[pb.NodeID]bool                  // hold snapshot deliveries to this peer
-	heldSnap map[pb.NodeID][]heldSnapshot        // buffered (notify, data) per target
+	hold     map[pb.NodeID]bool           // hold snapshot deliveries to this peer
+	heldSnap map[pb.NodeID][]heldSnapshot // buffered (notify, data) per target
 	t        *testing.T
 }
 
@@ -246,9 +247,9 @@ func (g *gatedBroadcaster) Fetch(ref *pb.EffectRef) ([]byte, error) {
 	return g.FetchFromAny(ref)
 }
 
-func (g *gatedBroadcaster) PeerIDs() []pb.NodeID            { return g.peers }
-func (g *gatedBroadcaster) AllRegionPeersReachable() bool   { return true }
-func (g *gatedBroadcaster) InMajorityPartition() bool       { return true }
+func (g *gatedBroadcaster) PeerIDs() []pb.NodeID          { return g.peers }
+func (g *gatedBroadcaster) AllRegionPeersReachable() bool { return true }
+func (g *gatedBroadcaster) InMajorityPartition() bool     { return true }
 func (g *gatedBroadcaster) ForwardTransaction(_ context.Context, _ pb.NodeID, _ *pb.ForwardedTransaction) (*pb.ForwardedResponse, error) {
 	return nil, fmt.Errorf("gatedBroadcaster: ForwardTransaction not implemented")
 }
@@ -482,13 +483,7 @@ func TestInTxnReadObservesInconsistentSnapshotAcrossHorizon(t *testing.T) {
 		r, _, _, err := engB.GetSnapshot(key)
 		if err == nil {
 			ids := extractOrderedIDs(r)
-			containsXA := false
-			for _, id := range ids {
-				if id == idA {
-					containsXA = true
-					break
-				}
-			}
+			containsXA := slices.Contains(ids, idA)
 			if containsXA {
 				break
 			}

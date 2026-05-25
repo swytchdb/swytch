@@ -159,7 +159,6 @@ type Engine struct {
 	reconvergeTrigger chan struct{}
 }
 
-
 // subscriptionState tracks a subscription's readiness.
 // The ready channel is closed once bootstrapping completes.
 type subscriptionState struct {
