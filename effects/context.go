@@ -35,7 +35,6 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -216,7 +215,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		// regressions in that contract.
 		compactThreshold := 20 + rand.IntN(31)
 		if c.engine.broadcaster == nil {
-			compactThreshold = 1
+			compactThreshold = 5
 		}
 		if result != nil && chainLen >= compactThreshold {
 			slog.Debug("compaction: emitting snapshot",
@@ -630,18 +629,13 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	key := string(eff.Key)
 
-	data, err := MarshalEffect(eff)
-	if err != nil {
-		return Tip{}, nil, err
-	}
-
 	offset := c.engine.nextOffset()
 
 	slog.Debug("Emit: wrote effect",
 		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
 
 	if c.engine.effectCache != nil {
-		c.engine.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+		c.engine.effectCache.Put(offset, eff)
 	}
 
 	// Track foreign peer subscriptions so flushTx's collectSubscribers
@@ -652,6 +646,15 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		} else {
 			c.engine.addPeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
 		}
+	}
+
+	if c.engine.broadcaster == nil {
+		return offset, nil, nil
+	}
+
+	data, err := MarshalEffect(eff)
+	if err != nil {
+		return Tip{}, nil, err
 	}
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
@@ -706,15 +709,6 @@ func (c *Context) flushNonTx() error {
 		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
 
-		// Tip-count trigger: emit serialization request when tips exceed threshold
-		// and no leader is already active for this key.
-		if c.engine.CheckSerializationLeader(key) == nil {
-			if tips := c.engine.index.Contains(key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
-				slog.Info("adaptive serialization: tip count exceeded threshold",
-					"key", key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
-				c.emitSerializationEffect(key)
-			}
-		}
 
 		if c.engine.broadcaster != nil {
 			var bcastTrace []byte
@@ -1334,15 +1328,6 @@ func (c *Context) flushTx() error {
 		c.engine.resetAbortCount(pk.key)
 		if c.engine.horizon == nil && c.engine.cache != nil {
 			c.engine.cache.Evict(pk.key)
-		}
-		// Tip-count trigger: emit serialization request when tips exceed
-		// threshold and no leader is already active for this key.
-		if c.engine.CheckSerializationLeader(pk.key) == nil {
-			if tips := c.engine.index.Contains(pk.key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
-				slog.Info("adaptive serialization: tip count exceeded threshold (tx)",
-					"key", pk.key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
-				c.emitSerializationEffect(pk.key)
-			}
 		}
 	}
 

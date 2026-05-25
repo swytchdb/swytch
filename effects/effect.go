@@ -583,7 +583,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	}
 	offset := e.nextOffset()
 	if e.effectCache != nil {
-		e.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+		e.effectCache.Put(offset, eff)
 	}
 	e.updateIndex(key, currentSet, offset)
 

@@ -96,8 +96,15 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 	// Filter expired elements from KEYED collections
 	if len(result.NetAdds) > 0 {
 		now := time.Now()
+		cloned := false
 		for k, elem := range result.NetAdds {
 			if elem.ExpiresAt != nil && now.After(elem.ExpiresAt.AsTime()) {
+				if !cloned {
+					na := make(map[string]*pb.ReducedElement, len(result.NetAdds))
+					maps.Copy(na, result.NetAdds)
+					result.NetAdds = na
+					cloned = true
+				}
 				delete(result.NetAdds, k)
 			}
 		}
@@ -644,11 +651,20 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			}
 		}
 
+		resultFromSnapshot := false
+		ensureResultOwned := func() {
+			if resultFromSnapshot {
+				result = cloneReduced(result)
+				resultFromSnapshot = false
+			}
+		}
+
 		err = d.iterate(func(tip Tip, eff *pb.Effect) error {
 			count++
 
 			if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
-				result = cloneReduced(snap.State)
+				result = snap.State
+				resultFromSnapshot = true
 				return nil
 			}
 
@@ -699,6 +715,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 				} else {
 					slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
 				}
+				ensureResultOwned()
 				bindEffects, fetchErr := e.collectBindEffects(eff, key)
 				if fetchErr != nil {
 					return fetchErr
@@ -707,6 +724,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 				return nil
 			}
 
+			ensureResultOwned()
 			result = ReduceChain(result, []*pb.Effect{eff})
 			return nil
 		})
@@ -932,8 +950,10 @@ func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map
 				if snap.PrevSnapshot != nil {
 					stack = append(stack, r(snap.PrevSnapshot))
 				}
-				for _, dep := range eff.Deps {
-					stack = append(stack, r(dep))
+				if snap.State == nil {
+					for _, dep := range eff.Deps {
+						stack = append(stack, r(dep))
+					}
 				}
 				continue
 			}
@@ -1025,8 +1045,10 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 			if snap.PrevSnapshot != nil {
 				stack = append(stack, r(snap.PrevSnapshot))
 			}
-			for _, dep := range eff.Deps {
-				stack = append(stack, r(dep))
+			if snap.State == nil {
+				for _, dep := range eff.Deps {
+					stack = append(stack, r(dep))
+				}
 			}
 			continue
 		}
