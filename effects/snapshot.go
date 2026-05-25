@@ -512,16 +512,16 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 	cutoff := e.txCutoff(txID)
 
 	var (
-		result          *pb.ReducedEffect
-		subRootEffects  []*pb.Effect
-		count           int
-		crossKeyWalked  int
-		d               *dag
-		err             error
-		expandKeys      map[string]struct{}
-		bindsByKey      map[string][]Tip
+		result           *pb.ReducedEffect
+		subRootEffects   []*pb.Effect
+		count            int
+		crossKeyWalked   int
+		d                *dag
+		err              error
+		expandKeys       map[string]struct{}
+		bindsByKey       map[string][]Tip
 		snapshotVerdicts verdictMap
-		atomicallyLost  map[string]struct{}
+		atomicallyLost   map[string]struct{}
 	)
 
 	// Retry loop: every time iterate encounters an in-horizon bind on the

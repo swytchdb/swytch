@@ -20,6 +20,7 @@
 package effects
 
 import (
+	"slices"
 	"testing"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -74,13 +75,7 @@ func TestHandleRemote_Rule1_UnsubscribedCanonical_NoIndexUpdate(t *testing.T) {
 	if tips := e.index.Contains("el-1"); tips == nil {
 		t.Fatal("el-1: expected bind to be indexed under subscribed key")
 	} else {
-		found := false
-		for _, tp := range tips.Tips() {
-			if tp == bindOff {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(tips.Tips(), bindOff)
 		if !found {
 			t.Errorf("el-1: bind tip %v not in index tips %v", bindOff, tips.Tips())
 		}

@@ -2473,19 +2473,19 @@ func TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro(t *testing.T) {
 	// Bind X's tx-marked data effects.
 	txnX := "txn-X"
 	xDataEl2 := putAt(Tip{nodeWriter, 26}, &pb.Effect{
-		Key:   []byte("el-2"),
-		Hlc:   sTs(200),
+		Key:    []byte("el-2"),
+		Hlc:    sTs(200),
 		NodeId: nodeWriter,
-		TxnId: txnX,
-		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-2:52", []byte("52"))},
+		TxnId:  txnX,
+		Kind:   &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-2:52", []byte("52"))},
 	})
 	xDataEl3 := putAt(Tip{nodeWriter, 27}, &pb.Effect{
-		Key:   []byte("el-3"),
-		Hlc:   sTs(210),
+		Key:    []byte("el-3"),
+		Hlc:    sTs(210),
 		NodeId: nodeWriter,
-		TxnId: txnX,
-		Deps:  []*pb.EffectRef{toPbRef(xPrev)},
-		Kind:  &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-3:53", []byte("53"))},
+		TxnId:  txnX,
+		Deps:   []*pb.EffectRef{toPbRef(xPrev)},
+		Kind:   &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "el-3:53", []byte("53"))},
 	})
 
 	// Bind X itself. NewTip per key: el-2 → xDataEl2, el-3 → xDataEl3.
