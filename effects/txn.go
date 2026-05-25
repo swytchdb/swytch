@@ -26,7 +26,6 @@ import (
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // ErrTxnAborted is returned by Flush when a transaction loses FWW or
@@ -42,6 +41,15 @@ var ErrRegionPartitioned = errors.New("region partitioned: not all same-region p
 // A background retry continues until the chain is complete.
 var ErrBootstrapIncomplete = errors.New("bootstrap incomplete: some peers unreachable")
 
+// ErrAuthorityDropped signals that HandleRemote rejected the inbound
+// effect because this node has no authority over the key. The
+// transport layer interprets this as "do not respond" — neither ACK
+// nor NACK is sent — so the sender's tracked replication times out
+// rather than counting us as a successful first-ACK replica. The
+// sender's other peers (those with authority) still get the chance
+// to accept the write.
+var ErrAuthorityDropped = errors.New("authority dropped: not subscribed to this key")
+
 // DefaultSerializationThreshold is the number of consecutive aborts on a
 // key before escalating to serialized coordination.
 const DefaultSerializationThreshold = 3
@@ -55,13 +63,14 @@ const (
 
 // pendingTxn tracks a transaction awaiting NACK resolution.
 type pendingTxn struct {
-	txnID      string // transaction ID (matches TxnId on emitted effects)
-	txnHLC     time.Time
-	originNode pb.NodeID
-	bindOffset Tip             // offset of the TransactionalBindEffect
-	keys       []pendingTxnKey // read-only after creation
-	state      atomic.Uint32   // txnState*
-	done       chan struct{}   // closed on decision
+	txnID          string // transaction ID (matches TxnId on emitted effects)
+	txnHLC         time.Time
+	originNode     pb.NodeID
+	forkChoiceHash []byte          // precomputed ForkChoiceHash(originNode, txnHLC)
+	bindOffset     Tip             // offset of the TransactionalBindEffect
+	keys           []pendingTxnKey // read-only after creation
+	state          atomic.Uint32   // txnState*
+	done           chan struct{}   // closed on decision
 }
 
 type pendingTxnKey struct {
@@ -83,7 +92,6 @@ type pendingTxnKey struct {
 // node. All call sites must reach the same answer so the client's
 // abort/commit signal matches the cluster's view of the bind.
 func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTipDetail) bool {
-	// Effects whose deps include any of our tx offsets are sequential, not concurrent
 	for _, dep := range detail.Deps {
 		if r(dep) == ptxn.bindOffset {
 			return false
@@ -94,6 +102,13 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 			}
 		}
 	}
+	if detail.Ref != nil {
+		target := r(detail.Ref)
+		var zero Tip
+		if target != zero && e.reachesFromTx(ptxn, target) {
+			return false
+		}
+	}
 
 	// Commutative effects: never conflict
 	if !detail.IsData && !detail.IsBind {
@@ -101,41 +116,38 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 		return false
 	}
 
-	// Competing bind: only a conflict if they share a causal base on
-	// any overlapping key. Without shared consumed tips, the binds are
-	// independent and coexist — not competing.
+	// Competing bind: NACK tells us there's a competitor; fork-choice
+	// hash decides who's first. ForkChoiceHash is the cluster-wide
+	// arbiter — every observer's reconstruct uses the same rule, so
+	// origin's abort decision MUST match it. Local "they NACK'd me, so
+	// I lose" is wrong: space-like concurrency means there's no observer-
+	// independent "first"; the hash provides the deterministic order
+	// every observer agrees on. Predicate refinement is the only out:
+	// disjoint writes coexist regardless of hash.
 	if detail.IsBind {
-		sharedKey, shared := nackBindSharedBaseKey(ptxn, detail)
-		if !shared {
-			return false // different causal bases, not competing
-		}
-		// Predicate refinement: the peer will reach the same
-		// verdict via evaluateBindForkChoice when it processes the
-		// competing bind; we must get there too. Walk both sides'
-		// obs/rw on the shared key (the bind offset in detail.Ref
-		// is a valid entry point — allDeps inside the walker
-		// follows the bind's per-key NewTips). If either side
-		// lacks evidence, fall back to shared-base + tie-break.
 		theirBindOffset := r(detail.Ref)
+		var theirTxnID string
 		if theirEff, err := e.getEffect(theirBindOffset); err == nil {
-			theirTxnID := theirEff.TxnId
-			if ptxn.txnID != "" && theirTxnID != "" {
-				ourStart := collectOurBindTips(ptxn, sharedKey)
-				conflict, bothHadEvidence := e.hasPredicateConflict(
-					ptxn.txnID, theirTxnID, sharedKey,
-					ourStart,
-					[]Tip{theirBindOffset})
-				if bothHadEvidence && !conflict {
-					return false // predicates don't intersect; not a real conflict
-				}
+			theirTxnID = theirEff.TxnId
+		}
+		if theirTxnID != "" && theirTxnID == ptxn.txnID {
+			return false // our own bind
+		}
+		if ptxn.txnID != "" && theirTxnID != "" {
+			ourStart := collectOurBindTips(ptxn, key)
+			conflict, bothHadEvidence := e.hasPredicateConflict(
+				ptxn.txnID, theirTxnID, key,
+				ourStart,
+				[]Tip{theirBindOffset})
+			if bothHadEvidence && !conflict {
+				return false // disjoint predicates — can coexist
 			}
 		}
-		ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-		if ForkChoiceLess(detail.BindForkChoiceHash, ourHash) {
-			// Their hash is lower → they win, we lose
+		if ForkChoiceLess(detail.BindForkChoiceHash, ptxn.forkChoiceHash) {
+			// Their hash is lower → they win, we lose, abort.
 			return true
 		}
-		// Our hash is lower → we win
+		// Our hash is lower → we win, continue.
 		return false
 	}
 
@@ -156,6 +168,50 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 	return false
 }
 
+// reachesFromTx returns true if target is in the DAG ancestry of our
+// pending tx (its bind offset or any per-key NewTip), walking eff.Deps
+// via the local effect cache. Walks until the cache runs out — a miss
+// stops that branch rather than fetching, so an unreachable verdict is
+// "we can't confirm sequentiality from local state" not "they are
+// definitely concurrent."
+func (e *Engine) reachesFromTx(ptxn *pendingTxn, target Tip) bool {
+	var zero Tip
+	if target == zero {
+		return false
+	}
+	visited := make(map[Tip]struct{})
+	stack := make([]Tip, 0, 1+len(ptxn.keys))
+	push := func(t Tip) {
+		if t == zero {
+			return
+		}
+		if _, seen := visited[t]; seen {
+			return
+		}
+		visited[t] = struct{}{}
+		stack = append(stack, t)
+	}
+	push(ptxn.bindOffset)
+	for _, pk := range ptxn.keys {
+		push(pk.newTip)
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == target {
+			return true
+		}
+		eff, err := e.getEffect(cur)
+		if err != nil {
+			continue
+		}
+		for _, dep := range eff.Deps {
+			push(r(dep))
+		}
+	}
+	return false
+}
+
 // collectOurBindTips returns the local tx's start tips for the walk
 // on a specific key — our bind offset plus our NewTip on that key.
 func collectOurBindTips(ptxn *pendingTxn, key string) []Tip {
@@ -167,30 +223,6 @@ func collectOurBindTips(ptxn *pendingTxn, key string) []Tip {
 		}
 	}
 	return tips
-}
-
-// nackBindSharedBaseKey returns the first key on which the NACK'd
-// bind shares a consumed tip with our pending tx, plus a boolean for
-// whether any shared base exists at all. Used by isRealConflict to
-// scope the predicate walk to the specific key where overlap lives.
-func nackBindSharedBaseKey(ptxn *pendingTxn, detail *pb.NackTipDetail) (string, bool) {
-	for _, kct := range detail.BindConsumedTips {
-		detailKey := string(kct.Key)
-		pk := findPendingKey(ptxn, detailKey)
-		if pk == nil {
-			continue
-		}
-		ourSet := make(map[Tip]bool, len(pk.consumedTips))
-		for _, ct := range pk.consumedTips {
-			ourSet[ct] = true
-		}
-		for _, ct := range kct.ConsumedTips {
-			if ourSet[r(ct)] {
-				return detailKey, true
-			}
-		}
-	}
-	return "", false
 }
 
 // affectsSameData checks if a competing Tip affects the same data as our
@@ -230,29 +262,6 @@ func affectsSameData(pk *pendingTxnKey, detail *pb.NackTipDetail) bool {
 	return false
 }
 
-// nackBindSharesBase checks if a competing bind in a NACK shares a consumed
-// Tip with our pending transaction on any overlapping key.
-func nackBindSharesBase(ptxn *pendingTxn, detail *pb.NackTipDetail) bool {
-	for _, kct := range detail.BindConsumedTips {
-		detailKey := string(kct.Key)
-		pk := findPendingKey(ptxn, detailKey)
-		if pk == nil {
-			continue // our tx doesn't touch this key
-		}
-		// Check if any of our consumed tips overlap with theirs
-		ourSet := make(map[Tip]bool, len(pk.consumedTips))
-		for _, ct := range pk.consumedTips {
-			ourSet[ct] = true
-		}
-		for _, ct := range kct.ConsumedTips {
-			if ourSet[r(ct)] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // findPendingKey finds the pendingTxnKey for a given key name.
 func findPendingKey(ptxn *pendingTxn, key string) *pendingTxnKey {
 	for i := range ptxn.keys {
@@ -261,6 +270,60 @@ func findPendingKey(ptxn *pendingTxn, key string) *pendingTxnKey {
 		}
 	}
 	return nil
+}
+
+// defeatedCompetitor returns the txnID of a competing bind that the local
+// pendingTxn beat in fork-choice on the given key, or "" if `detail` is not
+// a competing bind, names our own tx, is predicate-disjoint (coexists), or
+// has a strictly-lower hash than ours. flushTx's NACK loop calls this after
+// isRealConflict returns false to gather verdicts for the winner-commit
+// snapshot. Mirrors isRealConflict's filtering structure exactly so the two
+// classifications stay aligned.
+func (e *Engine) defeatedCompetitor(ptxn *pendingTxn, key string, detail *pb.NackTipDetail) string {
+	if !detail.IsBind || detail.Ref == nil {
+		return ""
+	}
+	theirBindOffset := r(detail.Ref)
+	var theirTxnID string
+	if theirEff, err := e.getEffect(theirBindOffset); err == nil {
+		theirTxnID = theirEff.TxnId
+	}
+	if theirTxnID == "" || theirTxnID == ptxn.txnID {
+		return ""
+	}
+	// Reachability filters mirror isRealConflict: a foreign bind that is
+	// causally ordered relative to our pending tx is not a competitor and
+	// must not enter defeatedSet. Without these, our post-commit snapshot
+	// records LOST for a transaction that committed cleanly elsewhere
+	// and propagates the wrong verdict.
+	for _, dep := range detail.Deps {
+		if r(dep) == ptxn.bindOffset {
+			return ""
+		}
+		for _, pk := range ptxn.keys {
+			if r(dep) == pk.newTip {
+				return ""
+			}
+		}
+	}
+	var zero Tip
+	if theirBindOffset != zero && e.reachesFromTx(ptxn, theirBindOffset) {
+		return ""
+	}
+	if ptxn.txnID != "" {
+		ourStart := collectOurBindTips(ptxn, key)
+		conflict, bothHadEvidence := e.hasPredicateConflict(
+			ptxn.txnID, theirTxnID, key,
+			ourStart,
+			[]Tip{theirBindOffset})
+		if bothHadEvidence && !conflict {
+			return ""
+		}
+	}
+	if !ForkChoiceLess(ptxn.forkChoiceHash, detail.BindForkChoiceHash) {
+		return ""
+	}
+	return theirTxnID
 }
 
 // commitPendingTxn CAS-sets the state to committed and closes the done channel.

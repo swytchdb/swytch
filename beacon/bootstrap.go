@@ -106,13 +106,16 @@ func (b *Beacon) waitForMembershipConverged(ctx context.Context) error {
 
 // readMembershipWithRetry polls GetSnapshot(MembershipKey) until the
 // cluster has enough same-region peers reachable to satisfy SafeMode
-// AND the parsed membership contains at least expectedPeers entries
-// (the number of DNS-discovered non-self candidates — self's entry
-// may or may not be reflected yet, so "at least" is deliberate), or
-// ctx is cancelled.
+// AND the parsed membership contains at least expectedPeers non-self
+// entries (matching the DNS-discovered non-self candidate count), or
+// ctx is cancelled. parseMembership returns the full member set
+// including self; the threshold must compare apples-to-apples or the
+// loop returns early with a partial topology that drops a slow
+// registrant.
 func (b *Beacon) readMembershipWithRetry(ctx context.Context, expectedPeers int) ([]Member, error) {
 	backoff := 100 * time.Millisecond
 	const maxBackoff = 1 * time.Second
+	selfID := uint64(b.cfg.NodeID)
 
 	for {
 		ectx := b.engine.NewContext()
@@ -120,11 +123,17 @@ func (b *Beacon) readMembershipWithRetry(ctx context.Context, expectedPeers int)
 		ectx.Flush()
 		if err == nil {
 			members := parseMembership(snapshot)
-			if len(members) >= expectedPeers {
+			nonSelf := 0
+			for _, m := range members {
+				if m.NodeID != selfID {
+					nonSelf++
+				}
+			}
+			if nonSelf >= expectedPeers {
 				return members, nil
 			}
 			slog.Debug("beacon: membership not fully converged",
-				"have", len(members), "want", expectedPeers, "backoff", backoff)
+				"have", nonSelf, "want", expectedPeers, "backoff", backoff)
 		} else if errors.Is(err, effects.ErrRegionPartitioned) {
 			slog.Debug("beacon: membership read waiting for peers",
 				"error", err, "backoff", backoff)

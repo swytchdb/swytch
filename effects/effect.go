@@ -21,6 +21,7 @@ package effects
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,16 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// systemKeyPrefix is the reserved namespace for cluster-operational
+// keys (membership, pubsub routing, etc.). Effects on these keys are
+// pinned in the effect cache and bypass the inbound authority gate
+// because they're load-bearing for protocol operation, not user data.
+var systemKeyPrefix = []byte("__swytch:")
+
+func isSystemKey(key []byte) bool {
+	return bytes.HasPrefix(key, systemKeyPrefix)
+}
 
 // bootstrapCollector collects NACKs during subscription bootstrapping.
 // ensureSubscribed registers one per key and waits for NACKs from peers.
@@ -70,12 +81,33 @@ type Engine struct {
 	pendingTxTips *xsync.Map[keytrie.EffectRef, []Tip]
 	txAbortCounts *xsync.Map[string, *atomic.Int32]
 
+	// In-flight tx snapshots, keyed by txnID. Populated by Context.BeginTx
+	// so reconstruct can bound bind discovery / verdict harvest to the
+	// caller's pre-tx view without round-tripping through the Context.
+	txSnapshots *xsync.Map[string, keytrie.KeyIndex]
+
 	// Adaptive serialization state (§5)
 	rttProvider        PeerRTTProvider
 	serializationState *xsync.Map[string, *keySerializationState]
 
 	// Subscription bootstrapping: key → *bootstrapCollector
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
+
+	// Peer subscribers per canonical key. Maintained incrementally:
+	// populated by ensureSubscribed (peers that NACK back are subscribed)
+	// and HandleRemote (foreign SubscriptionEffect arrival/unsubscribe).
+	// Used by flushTx to address bind broadcast without re-deriving from
+	// the DAG — reconstruct's `Subscribers` accumulator can return empty
+	// for legitimate reasons (verdict-only snapshot at LCA, all-lost bind
+	// set, NoopEffect chain) which silently makes the bind broadcast
+	// degenerate to subscribers:0 and the commit fast-path skips the
+	// NACK round, producing missing verdict snapshots downstream.
+	peerSubscribers *xsync.Map[string, *xsync.Map[pb.NodeID, struct{}]]
+
+	// Per-key dedupe for handleEviction. Multiple effects on the
+	// same key can evict in close succession; only one goroutine
+	// should run the broadcast + teardown for any given key.
+	unsubInFlight *xsync.Map[string, struct{}]
 
 	// Deserialized effect cache — effects are immutable once written
 	effectCache *clox.CloxCache[keytrie.EffectRef, *pb.Effect]
@@ -110,13 +142,13 @@ type Engine struct {
 	// Horizon wait for bind visibility
 	horizon *HorizonSet
 
-	// Voided binds — txnIDs whose binds lost fork-choice or were
-	// SSI-invalidated. Checked by filterTentativeEffects to skip
-	// these binds without per-read DAG walks.
-	// Backed by a low-capacity CloxCache to bound memory; eviction
-	// is safe because reconstruct's wonTips map independently
-	// resolves competing binds.
-	voidedBinds *clox.CloxCache[string, struct{}]
+	// ConsumedTips of remote binds we have ACKed/NACKed. flushTx's
+	// pre-flight aborts when a new local bind's pre-tx tip is in here:
+	// emitting from that fork point would commit DAG-concurrent with the
+	// remote bind we already took a position on. Cache eviction is safe
+	// because the stale-tip / new-foreign-tip checks in flushTx catch
+	// the same divergence structurally.
+	spokenBinds *clox.CloxCache[Tip, struct{}]
 
 	// Anti-entropy
 	antiEntropyStop chan struct{}
@@ -127,11 +159,28 @@ type Engine struct {
 	reconvergeTrigger chan struct{}
 }
 
+
 // subscriptionState tracks a subscription's readiness.
 // The ready channel is closed once bootstrapping completes.
 type subscriptionState struct {
 	ready      chan struct{}
 	incomplete atomic.Bool // true if bootstrap saw unreachable effects
+	closeOnce  sync.Once   // guards close(ready)
+}
+
+// markReady unblocks any waiters on this subscription state. Safe to
+// call multiple times; subsequent calls are no-ops.
+func (s *subscriptionState) markReady() {
+	s.closeOnce.Do(func() { close(s.ready) })
+}
+
+// markFailed flips the state to incomplete and unblocks waiters. They
+// re-check incomplete after the wait and return ErrBootstrapIncomplete
+// rather than incorrectly interpreting a closed ready channel as
+// success.
+func (s *subscriptionState) markFailed() {
+	s.incomplete.Store(true)
+	s.markReady()
 }
 
 // NewTestEngine creates a minimal Engine for use in tests outside this package.
@@ -184,7 +233,10 @@ func (e *Engine) nextOffset() Tip {
 }
 
 // FlushKey is the special key used to signal a full index wipe (FLUSHDB/FLUSHALL).
-const FlushKey = "\x00"
+// Lives under the __swytch: namespace so isSystemKey recognizes it as
+// cluster-operational and the authority gate bypasses it on inbound,
+// and so it can't collide with a user-chosen key.
+const FlushKey = "__swytch:flush"
 
 // FlushIndex deletes all keys from the index and evicts all cache entries.
 func (e *Engine) FlushIndex() {
@@ -238,16 +290,39 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxns:        xsync.NewMap[keytrie.EffectRef, *pendingTxn](),
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
+		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
+		peerSubscribers:    xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
+		unsubInFlight:      xsync.NewMap[string, struct{}](),
 		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
 			c := clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))
 			c.CollectStats = true
 			return c
 		}()),
-		voidedBinds: clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(8192)),
+		spokenBinds: clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
 		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
+	})
+	// Pin cluster-operational keys (any "__swytch:" prefix). Membership,
+	// pubsub channel routing, pubsub pattern routing, and any future
+	// system-owned key shares this namespace. Eviction of one of these
+	// effects silently breaks cluster invariants (index claims a tip
+	// we no longer hold bytes for), so the cache must skip them
+	// during victim selection.
+	e.effectCache.SetEvictDecider(func(_ keytrie.EffectRef, eff *pb.Effect) bool {
+		if eff == nil {
+			return true
+		}
+		return !isSystemKey(eff.Key)
+	})
+	// After-eviction hook: the cache lost the bytes for an effect, so
+	// the local index can no longer honestly claim authority over its
+	// tip. Drop the key + unsubscribe cluster-wide. Dispatched on a
+	// fresh goroutine because evictNotify runs under shard.mu and
+	// handleEviction takes other locks + does a network broadcast.
+	e.effectCache.SetEvictNotify(func(ref keytrie.EffectRef, eff *pb.Effect) {
+		go e.handleEviction(ref, eff)
 	})
 	e.cache = cache
 
@@ -266,11 +341,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	})
 
 	if cfg.Broadcaster != nil {
-		timeout := cfg.HorizonTimeout
-		if timeout <= 0 {
-			timeout = 500 * time.Millisecond
-		}
-		e.horizon = newHorizonSet(e, timeout)
+		e.horizon = newHorizonSet(e)
 	}
 
 	return e
@@ -306,6 +377,53 @@ func (e *Engine) EffectCache() *clox.CloxCache[Tip, *pb.Effect] {
 	return e.effectCache
 }
 
+// addPeerSubscriber records that peer is subscribed to key. Idempotent.
+// Called from ensureSubscribed (peers that NACK back during bootstrap)
+// and HandleRemote (foreign SubscriptionEffect arrival).
+func (e *Engine) addPeerSubscriber(key string, peer pb.NodeID) {
+	if peer == e.nodeID {
+		return
+	}
+	inner, _ := e.peerSubscribers.LoadOrCompute(key, func() (*xsync.Map[pb.NodeID, struct{}], bool) {
+		return xsync.NewMap[pb.NodeID, struct{}](), false
+	})
+	inner.Store(peer, struct{}{})
+}
+
+// removePeerSubscriber removes peer from the subscriber set for key.
+// Called from HandleRemote on a foreign unsubscribe SubscriptionEffect.
+func (e *Engine) removePeerSubscriber(key string, peer pb.NodeID) {
+	if inner, ok := e.peerSubscribers.Load(key); ok {
+		inner.Delete(peer)
+	}
+}
+
+// PeerSubscribers returns the current subscriber set for key. The returned
+// slice is a snapshot; callers may iterate without holding any lock.
+func (e *Engine) PeerSubscribers(key string) []pb.NodeID {
+	inner, ok := e.peerSubscribers.Load(key)
+	if !ok {
+		return nil
+	}
+	result := make([]pb.NodeID, 0, inner.Size())
+	inner.Range(func(id pb.NodeID, _ struct{}) bool {
+		result = append(result, id)
+		return true
+	})
+	return result
+}
+
+// DropPeerFromSubscribers removes peer from every key's subscriber set.
+// Wired into PeerManager.SetPeerLifecycleHooks on the onRemoved hook so
+// stale entries don't make flushTx address a dead peer (which would block
+// commit indefinitely waiting for an ACK that can't come).
+func (e *Engine) DropPeerFromSubscribers(peer pb.NodeID) {
+	e.peerSubscribers.Range(func(_ string, inner *xsync.Map[pb.NodeID, struct{}]) bool {
+		inner.Delete(peer)
+		return true
+	})
+}
+
 // SetBroadcaster sets the broadcaster for replicating effects to peers.
 // Must be called before any Emit/Flush if cluster mode is desired.
 //
@@ -321,7 +439,7 @@ func (e *Engine) EffectCache() *clox.CloxCache[Tip, *pb.Effect] {
 func (e *Engine) SetBroadcaster(b Broadcaster) {
 	e.broadcaster = b
 	if e.horizon == nil && b != nil {
-		e.horizon = newHorizonSet(e, 500*time.Millisecond)
+		e.horizon = newHorizonSet(e)
 	}
 }
 
@@ -372,39 +490,184 @@ func fromPbRefs(refs []*pb.EffectRef) []Tip {
 	return tips
 }
 
-// resolveTipDeps substitutes pre-tx deps for in-progress transaction tips.
-// For each Tip, if it's tracked in pendingTxTips (an in-progress tx effect),
-// replace it with the pre-tx deps so we never depend on uncommitted state.
+// resolveTipDeps walks each tip back through pendingTxTips until it
+// lands on a committed ancestor (a bind or a non-tx effect). SSI
+// requires that every dep we hand a new effect references state that
+// has already been committed somewhere in the cluster — never a tip
+// belonging to a foreign in-flight transaction. Single-level
+// substitution would leave us pointing at another tx-tipped offset of
+// the same in-flight txn, which is what we're trying to avoid.
 func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
+	seen := make(map[Tip]struct{}, len(tips))
 	var resolved []Tip
 	changed := false
-	for _, tp := range tips {
-		if deps, ok := e.pendingTxTips.Load(tp); ok {
-			if len(deps) == 0 {
-				// Empty deps means the tx created this key — the tip is
-				// the only reference to that causal history; keep it.
-				resolved = append(resolved, tp)
-			} else {
-				resolved = append(resolved, deps...)
-			}
-			changed = true
-		} else {
-			resolved = append(resolved, tp)
+	var walk func(Tip)
+	walk = func(tp Tip) {
+		if _, dup := seen[tp]; dup {
+			return
 		}
+		seen[tp] = struct{}{}
+		deps, ok := e.pendingTxTips.Load(tp)
+		if !ok {
+			resolved = append(resolved, tp)
+			return
+		}
+		changed = true
+		if len(deps) == 0 {
+			// First write on this key; no committed predecessor exists.
+			// Keep the tx tip — the new emit has nothing else to anchor
+			// on, and reconstruct's tx-skip filtering handles it.
+			resolved = append(resolved, tp)
+			return
+		}
+		for _, d := range deps {
+			walk(d)
+		}
+	}
+	for _, tp := range tips {
+		walk(tp)
 	}
 	if !changed {
 		return tips
 	}
-	// Deduplicate
-	seen := make(map[Tip]struct{}, len(resolved))
-	deduped := resolved[:0]
-	for _, v := range resolved {
-		if _, ok := seen[v]; !ok {
-			seen[v] = struct{}{}
-			deduped = append(deduped, v)
+	return resolved
+}
+
+// txCutoff returns the snapshot bounding bind-discovery walks for a
+// tx-context reconstruct. Walks ask the snapshot per-(key, tip) whether
+// a tip is in the caller's pre-tx view; if yes, the tip is a boundary
+// (walk doesn't descend past it). Returns nil if no tx is registered,
+// in which case walks proceed unbounded back to snapshot LCAs.
+func (e *Engine) txCutoff(txID string) keytrie.KeyIndex {
+	if txID == "" || e.txSnapshots == nil {
+		return nil
+	}
+	snap, _ := e.txSnapshots.Load(txID)
+	return snap
+}
+
+// emitSnapshot writes a verdict-carrying SnapshotEffect on `key`, chained
+// via prev_snapshot to the latest existing snapshot tip. Deps are the
+// current tips with pending-tx tips substituted; the index is updated
+// and the effect is broadcast.
+func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error {
+	hlc := timestamppb.New(e.clock.Now())
+	eff := &pb.Effect{
+		Key:            []byte(key),
+		Hlc:            hlc,
+		NodeId:         uint64(e.nodeID),
+		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: verdicts,
+		}},
+	}
+
+	currentSet := e.index.Contains(key)
+	if currentSet != nil {
+		tips := currentSet.Tips()
+		for _, t := range tips {
+			cached, err := e.getEffect(t)
+			if err != nil {
+				continue
+			}
+			if cached.GetSnapshot() != nil {
+				eff.GetSnapshot().PrevSnapshot = toPbRef(t)
+				break
+			}
+		}
+		eff.Deps = toPbRefs(e.resolveTipDeps(tips))
+	}
+
+	data, err := MarshalEffect(eff)
+	if err != nil {
+		return err
+	}
+	offset := e.nextOffset()
+	if e.effectCache != nil {
+		e.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+	}
+	e.updateIndex(key, currentSet, offset)
+
+	if e.broadcaster != nil {
+		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
+		e.broadcaster.BroadcastWithData(notify, data)
+	}
+
+	slog.Debug("emitSnapshot",
+		"key", key,
+		"offset", offset,
+		"verdicts", len(verdicts),
+		"prev_snapshot", eff.GetSnapshot().PrevSnapshot)
+	return nil
+}
+
+// applySnapshotVerdicts promotes every txn named in a SnapshotEffect's
+// verdict map out of horizon. The verdict snapshot is emitted by the
+// originator only after commitPendingTxn returns (every subscriber
+// responded, isRealConflict cleared), so its arrival is strictly stronger
+// evidence than the 1×RTT timer that any concurrent competitor has had
+// its chance. MakeVisible is idempotent — txns not in horizon are a
+// no-op, and the timer-driven path remains as a crash fallback.
+func (e *Engine) applySnapshotVerdicts(eff *pb.Effect) {
+	if e.horizon == nil {
+		return
+	}
+	snap := eff.GetSnapshot()
+	if snap == nil || len(snap.TxnVerdicts) == 0 {
+		return
+	}
+	for txnID := range snap.TxnVerdicts {
+		e.horizon.MakeVisible(txnID)
+	}
+}
+
+// lookupSnapshotVerdict walks the snapshot chain on `key` for `txnID`'s
+// adjudication outcome. Used by arrival-time fork-choice sites to skip a
+// competing bind a prior snapshot already locked in as LOST.
+func (e *Engine) lookupSnapshotVerdict(key, txnID string) (pb.Verdict, bool) {
+	tipSet := e.index.Contains(key)
+	if tipSet == nil {
+		return pb.Verdict_VERDICT_UNSPECIFIED, false
+	}
+	visited := make(map[Tip]bool)
+	stack := append([]Tip(nil), tipSet.Tips()...)
+	for len(stack) > 0 {
+		t := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[t] {
+			continue
+		}
+		visited[t] = true
+		eff, err := e.getEffect(t)
+		if err != nil {
+			continue
+		}
+		if snap := eff.GetSnapshot(); snap != nil {
+			if v, ok := snap.TxnVerdicts[txnID]; ok && v != pb.Verdict_VERDICT_UNSPECIFIED {
+				return v, true
+			}
+			if snap.PrevSnapshot != nil {
+				stack = append(stack, r(snap.PrevSnapshot))
+			}
+			for _, dep := range eff.Deps {
+				stack = append(stack, r(dep))
+			}
+			continue
+		}
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					stack = append(stack, r(kb.NewTip))
+					break
+				}
+			}
+			continue
+		}
+		for _, dep := range eff.Deps {
+			stack = append(stack, r(dep))
 		}
 	}
-	return deduped
+	return pb.Verdict_VERDICT_UNSPECIFIED, false
 }
 
 // HandleRemote processes a remote effect notification: stores the effect
@@ -512,6 +775,49 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
+	// Authority gate: accept the effect only if we already track the
+	// key locally — either subscribed to it, or the index already has
+	// tips (a previous local write installed them). System keys are
+	// exempt because cluster bootstrap depends on them arriving before
+	// any subscription exists.
+	//
+	// SubscriptionEffects are exempt and respond with an empty ACK so
+	// ensureSubscribed isn't deadlocked when nobody yet has authority
+	// for a brand-new key.
+	//
+	// TxnBinds touch multiple keys; collectSubscribers replicates them
+	// to peers subscribed to any touched key, so the gate must accept
+	// the bind when authority holds for any key in bind.Keys (not just
+	// eff.Key, the canonical first key).
+	if !isSystemKey(eff.Key) {
+		key := string(eff.Key)
+		_, subscribed := e.subscriptions.Load(key)
+		authoritative := subscribed || e.index.Contains(key) != nil
+
+		if !authoritative {
+			if bind := eff.GetTxnBind(); bind != nil {
+				for _, kb := range bind.Keys {
+					kbKey := string(kb.Key)
+					if _, sub := e.subscriptions.Load(kbKey); sub || e.index.Contains(kbKey) != nil {
+						authoritative = true
+						break
+					}
+				}
+			}
+		}
+
+		if !authoritative {
+			if sub := eff.GetSubscription(); sub != nil {
+				slog.Debug("HandleRemote: empty bootstrap response for no-authority subscription",
+					"key", key, "offset", notify.Origin, "unsubscribe", sub.Unsubscribe)
+				return nil, nil
+			}
+			slog.Info("HandleRemote: dropping notify for key with no local authority",
+				"key", key, "offset", notify.Origin)
+			return []*pb.NackNotify{{Key: eff.Key, NotSubscribed: true}}, nil
+		}
+	}
+
 	// Validate fork_choice_hash: must be present and correct on all effects.
 	// This hash is the global tiebreaker for ALL effect ordering (merges,
 	// winner selection, DAG sort, FWW). Rejecting missing or incorrect
@@ -525,6 +831,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	if e.effectCache != nil {
 		e.effectCache.Put(r(notify.Origin), eff)
 	}
+
+	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
+	e.applySnapshotVerdicts(eff)
 
 	// Handle flush-all: wipe the entire index
 	if string(eff.Key) == FlushKey {
@@ -556,12 +865,10 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		"key", key, "offset", notify.Origin.Offset,
 		"deps", eff.Deps)
 
-	// Use the per-key striped lock (same lock the redis handler holds
-	// during command execution) so we can safely read-modify-write the
-	// tip set without CAS loops.
-	mu := e.GetLock(key)
-	mu.Lock()
 	initialTips := e.index.Contains(key)
+
+	_, subscribedCanonical := e.subscriptions.Load(key)
+	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
 
 	// Consume deps: any dep that is a current tip becomes an ancestor.
 	deps := eff.Deps
@@ -573,39 +880,39 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 			}
 		}
 	}
-	if len(deps) > 0 {
-		e.index.RemoveTips(key, fromPbRefs(deps))
+	if canonicalIndexable {
+		if len(deps) > 0 {
+			e.index.RemoveTips(key, fromPbRefs(deps))
+		}
+		e.updateIndex(key, nil, r(notify.Origin))
 	}
 
-	e.updateIndex(key, nil, r(notify.Origin))
-	mu.Unlock()
-
-	// Bind effects must be indexed under ALL keys they touch, not just
-	// the canonical key. Otherwise NACKs for non-canonical keys won't
-	// include the bind in their tip details, and competing transactions
-	// won't detect the conflict via fork-choice.
 	if bind := eff.GetTxnBind(); bind != nil {
 		for _, kb := range bind.Keys {
 			kbKey := string(kb.Key)
-			if kbKey != key { // already indexed above
-				preTips := e.index.Contains(kbKey)
-				var preOffsets []Tip
-				if preTips != nil {
-					preOffsets = preTips.Tips()
-				}
-				slog.Debug("HandleRemote: indexing bind for additional key (before)",
-					"key", kbKey, "bind_offset", notify.Origin,
-					"pre_tips", preOffsets)
-				e.updateIndex(kbKey, nil, r(notify.Origin))
-				postTips := e.index.Contains(kbKey)
-				var postOffsets []Tip
-				if postTips != nil {
-					postOffsets = postTips.Tips()
-				}
-				slog.Debug("HandleRemote: indexing bind for additional key (after)",
-					"key", kbKey, "bind_offset", notify.Origin,
-					"post_tips", postOffsets)
+			if kbKey == key { // canonical handled above
+				continue
 			}
+			if _, ok := e.subscriptions.Load(kbKey); !ok {
+				continue
+			}
+			preTips := e.index.Contains(kbKey)
+			var preOffsets []Tip
+			if preTips != nil {
+				preOffsets = preTips.Tips()
+			}
+			slog.Debug("HandleRemote: indexing bind for additional key (before)",
+				"key", kbKey, "bind_offset", notify.Origin,
+				"pre_tips", preOffsets)
+			e.updateIndex(kbKey, nil, r(notify.Origin))
+			postTips := e.index.Contains(kbKey)
+			var postOffsets []Tip
+			if postTips != nil {
+				postOffsets = postTips.Tips()
+			}
+			slog.Debug("HandleRemote: indexing bind for additional key (after)",
+				"key", kbKey, "bind_offset", notify.Origin,
+				"post_tips", postOffsets)
 		}
 	}
 
@@ -664,9 +971,18 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// Subscription bootstrapping: when a remote SubscriptionEffect arrives,
 	// always NACK back with our current tips so the subscriber can fetch state.
 	// Send pre-update tips (excluding the subscription itself).
-	if eff.GetSubscription() != nil && eff.NodeId != uint64(e.nodeID) {
+	//
+	// Also maintain the in-memory peerSubscribers map so flushTx doesn't
+	// have to re-derive the subscriber set from the DAG (where reconstruct
+	// can return Subscribers-less results for legitimate reasons).
+	if sub := eff.GetSubscription(); sub != nil && eff.NodeId != uint64(e.nodeID) {
+		if sub.Unsubscribe {
+			e.removePeerSubscriber(key, pb.NodeID(eff.NodeId))
+		} else {
+			e.addPeerSubscriber(key, pb.NodeID(eff.NodeId))
+		}
 		slog.Debug("HandleRemote: remote subscription, bootstrap NACK",
-			"key", key, "from_node", eff.NodeId)
+			"key", key, "from_node", eff.NodeId, "unsubscribe", sub.Unsubscribe)
 		var tipOffsets []Tip
 		if initialTips != nil {
 			tipOffsets = initialTips.Tips()
@@ -720,28 +1036,143 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	return nacks, nil
 }
 
+// handleBackfill ingests an effect we've learned about indirectly — via a
+// NACK's tip details, a recursive dep fetch, or anti-entropy. It does the
+// index work HandleRemote does (cache, pendingTxTips, canonical update,
+// cross-key bind indexing) but skips the horizon-wait entry: the bind has
+// already been adjudicated at its originator and is past its wait at the
+// peer that named it to us. Routing it through horizon would re-enter
+// HorizonSet.Add for an already-visible txn, which is non-idempotent and
+// makes the bind invisible again until the next timer fires.
+func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
+	if notify == nil || notify.Origin == nil {
+		return nil
+	}
+
+	effectData := notify.EffectData
+	if len(effectData) == 0 {
+		if e.broadcaster == nil {
+			return nil
+		}
+		var err error
+		effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+		if err != nil {
+			return err
+		}
+	}
+
+	protoData := effectData
+	if len(effectData) > 4 {
+		keyLen := binary.LittleEndian.Uint32(effectData[:4])
+		if keyLen > 0 && uint32(len(effectData)) >= 4+keyLen {
+			protoData = effectData[4+keyLen:]
+		}
+	}
+
+	eff := &pb.Effect{}
+	if err := UnmarshalEffect(protoData, eff); err != nil {
+		return err
+	}
+
+	if !isSystemKey(eff.Key) {
+		key := string(eff.Key)
+		_, subscribed := e.subscriptions.Load(key)
+		authoritative := subscribed || e.index.Contains(key) != nil
+		if !authoritative {
+			if bind := eff.GetTxnBind(); bind != nil {
+				for _, kb := range bind.Keys {
+					kbKey := string(kb.Key)
+					if _, sub := e.subscriptions.Load(kbKey); sub || e.index.Contains(kbKey) != nil {
+						authoritative = true
+						break
+					}
+				}
+			}
+		}
+		if !authoritative {
+			return nil
+		}
+	}
+
+	expected := ComputeForkChoiceHash(pb.NodeID(eff.NodeId), eff.Hlc)
+	if !bytes.Equal(eff.ForkChoiceHash, expected) {
+		return fmt.Errorf("fork_choice_hash missing or mismatch for offset %v", notify.Origin)
+	}
+
+	if e.effectCache != nil {
+		e.effectCache.Put(r(notify.Origin), eff)
+	}
+
+	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
+	e.applySnapshotVerdicts(eff)
+
+	if eff.TxnId != "" && eff.GetTxnBind() == nil {
+		e.pendingTxTips.Store(r(notify.Origin), fromPbRefs(eff.Deps))
+	}
+
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			e.pendingTxTips.Delete(r(kb.NewTip))
+		}
+	}
+
+	key := string(eff.Key)
+	_, subscribedCanonical := e.subscriptions.Load(key)
+	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+
+	deps := eff.Deps
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			if string(kb.Key) == key {
+				deps = []*pb.EffectRef{kb.NewTip}
+				break
+			}
+		}
+	}
+	if canonicalIndexable {
+		if len(deps) > 0 {
+			e.index.RemoveTips(key, fromPbRefs(deps))
+		}
+		e.updateIndex(key, nil, r(notify.Origin))
+	}
+
+	if bind := eff.GetTxnBind(); bind != nil {
+		for _, kb := range bind.Keys {
+			kbKey := string(kb.Key)
+			if kbKey == key {
+				continue
+			}
+			if _, ok := e.subscriptions.Load(kbKey); !ok {
+				continue
+			}
+			e.updateIndex(kbKey, nil, r(notify.Origin))
+		}
+	}
+
+	if e.cache != nil {
+		e.cache.Evict(key)
+	}
+
+	return nil
+}
+
 // handleRemoteBind processes a TransactionalBindEffect received remotely.
 func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset Tip, txnID string) {
 	if e.horizon != nil {
-		// Defer visibility: add to horizon set instead of deleting pendingTxTips.
-		// The wait scopes to all alive peers — any of them could hold a
-		// competing bind we haven't received yet.
-		var peers []pb.NodeID
-		if e.broadcaster != nil {
-			peers = e.broadcaster.PeerIDs()
-		}
-		e.horizon.Add(txnID, bindOffset, bind, peers)
+		// Remote-arrival: hold the bind invisible until the originator's
+		// verdict snapshot arrives (applySnapshotVerdicts in the ingestion
+		// path), with a crash-fallback timer as backstop. Without this
+		// wait, a reader sees the bind, then later a competitor arrives
+		// and reconstruct picks a different winner — the earlier read
+		// becomes a retroactive lie.
+		e.horizon.Add(txnID, bindOffset, bind)
+		e.horizon.ScheduleMakeVisible(txnID, e.horizon.computeHorizonWait())
 	} else {
 		// Standalone: remove bound key tips from pendingTxTips immediately
 		for _, kb := range bind.Keys {
 			e.pendingTxTips.Delete(r(kb.NewTip))
 		}
 	}
-
-	// Evaluate fork-choice against existing binds on all keys.
-	// Losers are marked in voidedBinds for filterTentativeEffects.
-	e.evaluateBindForkChoice(bind, bindOffset,
-		ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc), txnID)
 
 	// Process abort_deps: remove those offsets and abort any local pending txn
 	for _, abortedOffset := range bind.AbortDeps {
@@ -759,83 +1190,140 @@ func (e *Engine) handleRemoteBind(bind *pb.TransactionalBindEffect, bindOffset T
 			return true
 		})
 	}
+
+	// Cache every consumed tip this bind forked from so flushTx's
+	// pre-flight will abort a future local emit that forks from the
+	// same point.
+	if e.spokenBinds != nil {
+		for _, kb := range bind.Keys {
+			for _, ct := range kb.ConsumedTips {
+				e.spokenBinds.Put(r(ct), struct{}{})
+			}
+		}
+	}
 }
 
-// checkCompetingBinds checks if any bind in the local index shares a causal
-// base with our transaction. A bind in the index — whether visible or still
-// in horizon wait — is a real competitor. If one exists, our transaction
-// is wrong by construction (stale snapshot) — return the competing txnID.
+// checkCompetingBinds walks the DAG fragment for each key the bind touches
+// and returns the txnID of any bind whose NewTip on that key is not a
+// structural ancestor of our ConsumedTips — i.e., a bind we know about
+// that's space-like concurrent with our forthcoming bind. Returns "" if
+// no such bind exists.
+//
+// Every bind in the DAG fragment counts: invisible (in-horizon), visible,
+// and prior LOST adjudications alike. By the time flushTx reaches this
+// check we've already ACK'd or NACK'd every bind we've ingested, and that
+// response is the cluster-visible promise that we won't emit a structural
+// competitor. Re-deriving "could I commit anyway?" from a partial view
+// (horizon-only, losers-only, or index-tips-only) would let us
+// retroactively change our mind — exactly what the "once you've spoken"
+// invariant forbids.
+//
+// The DAG walk is the source of truth because the per-key index can lose
+// in-horizon bind tips: emitSnapshot for an unrelated txn consumes all
+// current tips and replaces them with its own snapshot tip, so an
+// invisible bind that arrived between WATCH and EXEC can vanish from the
+// index even though it's still alive in the DAG (reachable as a dep of
+// the snapshot that consumed it).
+//
+// Predicate refinement: two binds whose row-write evidence proves disjoint
+// element IDs on a KEYED collection coexist without aborting either.
 func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID string) string {
 	for _, kb := range bind.Keys {
 		k := string(kb.Key)
-		tips := e.index.Contains(k)
-		if tips == nil {
+		ourNewTip := r(kb.NewTip)
+		consumedTips := make([]Tip, 0, len(kb.ConsumedTips))
+		for _, ct := range kb.ConsumedTips {
+			consumedTips = append(consumedTips, r(ct))
+		}
+
+		tipSet := e.index.Contains(k)
+		if tipSet == nil {
 			continue
 		}
-		for _, tipOff := range tips.Tips() {
-			eff, err := e.getEffect(tipOff)
+
+		// Ancestor closure of our consumed tips on this key. A bind whose
+		// NewTip on `k` lands in this set is structurally in our past.
+		ourAncestors := make(map[Tip]struct{}, len(consumedTips)*8)
+		ancestorStack := make([]Tip, 0, len(consumedTips))
+		for _, t := range consumedTips {
+			if _, dup := ourAncestors[t]; dup {
+				continue
+			}
+			ourAncestors[t] = struct{}{}
+			ancestorStack = append(ancestorStack, t)
+		}
+		for len(ancestorStack) > 0 {
+			cur := ancestorStack[len(ancestorStack)-1]
+			ancestorStack = ancestorStack[:len(ancestorStack)-1]
+			eff, err := e.getEffect(cur)
 			if err != nil {
 				continue
 			}
-			otherBind := eff.GetTxnBind()
-			if otherBind == nil {
-				continue
-			}
-			// Skip voided binds (already lost fork-choice)
-			if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
-				continue
-			}
-			// Check if they share a consumed tip on any overlapping key.
-			shared := false
-			var theirNewTip Tip
-			for _, okb := range otherBind.Keys {
-				if string(okb.Key) != k {
+			for _, dep := range eff.Deps {
+				dt := r(dep)
+				if _, dup := ourAncestors[dt]; dup {
 					continue
 				}
-				ourSet := make(map[Tip]bool, len(kb.ConsumedTips))
-				for _, ct := range kb.ConsumedTips {
-					ourSet[r(ct)] = true
-				}
-				for _, ct := range okb.ConsumedTips {
-					if ourSet[r(ct)] {
-						shared = true
-						theirNewTip = r(okb.NewTip)
+				ourAncestors[dt] = struct{}{}
+				ancestorStack = append(ancestorStack, dt)
+			}
+		}
+
+		visited := make(map[Tip]bool)
+		walkStack := append([]Tip(nil), tipSet.Tips()...)
+		for len(walkStack) > 0 {
+			t := walkStack[len(walkStack)-1]
+			walkStack = walkStack[:len(walkStack)-1]
+			if visited[t] {
+				continue
+			}
+			visited[t] = true
+			eff, err := e.getEffect(t)
+			if err != nil {
+				continue
+			}
+
+			if otherBind := eff.GetTxnBind(); otherBind != nil {
+				for _, okb := range otherBind.Keys {
+					if string(okb.Key) != k {
+						continue
+					}
+					theirNewTip := r(okb.NewTip)
+					if _, inAncestors := ourAncestors[theirNewTip]; inAncestors {
+						walkStack = append(walkStack, theirNewTip)
 						break
 					}
+					if txnID != "" && eff.TxnId != "" {
+						conflict, bothHadEvidence := e.hasPredicateConflict(
+							txnID, eff.TxnId, k,
+							[]Tip{ourNewTip},
+							[]Tip{theirNewTip, t})
+						if bothHadEvidence && !conflict {
+							walkStack = append(walkStack, theirNewTip)
+							break
+						}
+					}
+					return eff.TxnId
 				}
-				if shared {
-					break
-				}
-			}
-			if !shared {
 				continue
 			}
-			// Predicate refinement: shared base alone is too coarse
-			// when both txs carry observation/row-write evidence on
-			// the key. If neither side's observations match the
-			// other's writes, the txs are genuinely disjoint — skip
-			// the abort. Falls back to the conservative shared-base
-			// conflict when either side lacks evidence (e.g. a bind
-			// that only mutated schema metadata).
-			conflict, bothHadEvidence := e.hasPredicateConflict(
-				txnID, eff.TxnId, k,
-				[]Tip{r(kb.NewTip)},
-				[]Tip{theirNewTip, tipOff})
-			if bothHadEvidence && !conflict {
-				continue
+
+			if snap := eff.GetSnapshot(); snap != nil && snap.PrevSnapshot != nil {
+				walkStack = append(walkStack, r(snap.PrevSnapshot))
 			}
-			return eff.TxnId // competing bind found
+			for _, dep := range eff.Deps {
+				walkStack = append(walkStack, r(dep))
+			}
 		}
 	}
-	return "" // no competing bind
+	return ""
 }
 
-// evaluateBindForkChoice checks a newly arrived bind against all existing
-// binds on its keys. Losers are added to voidedBinds for cross-transaction
-// visibility. Also checks for concurrent non-transactional data effects
-// (SSI invalidation). Returns true if txnID itself was voided.
-// Called at bind arrival time (HandleRemote or flushTx) so the check
-// happens once, not on every read.
+// evaluateBindForkChoice returns true if the bind would lose at the
+// originator's commit point against any existing competitor on its keys
+// (hash-based fork choice with predicate-refinement and shared-base
+// gating) or against a concurrent non-tx data effect (SSI). flushTx
+// uses this to abort before emitting.
 func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOffset Tip, bindHash []byte, txnID string) bool {
 	newEntry := &forkChoiceBindEntry{
 		offset: bindOffset,
@@ -871,8 +1359,8 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 				if eff.TxnId == txnID {
 					continue // same transaction
 				}
-				// Already voided? skip
-				if _, voided := e.voidedBinds.Get(eff.TxnId, 0); voided {
+				// Already adjudicated as LOST by a snapshot? skip
+				if v, ok := e.lookupSnapshotVerdict(k, eff.TxnId); ok && v == pb.Verdict_LOST {
 					continue
 				}
 
@@ -902,18 +1390,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 					if bothHadEvidence && !conflict {
 						continue
 					}
-					if ForkChoiceLess(newEntry.hash, otherEntry.hash) {
-						// We win, they lose
-						slog.Debug("evaluateBindForkChoice: voiding loser",
-							"winner_txn", txnID, "loser_txn", eff.TxnId,
-							"key", k)
-						e.voidedBinds.Put(eff.TxnId, struct{}{})
-					} else {
-						// They win, we lose
-						slog.Debug("evaluateBindForkChoice: voiding loser",
-							"winner_txn", eff.TxnId, "loser_txn", txnID,
-							"key", k)
-						e.voidedBinds.Put(txnID, struct{}{})
+					if !ForkChoiceLess(newEntry.hash, otherEntry.hash) {
 						return true
 					}
 				}
@@ -952,10 +1429,6 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 						stack = append(stack, fromPbRefs(depEff.Deps)...)
 					}
 					if !isDescendant {
-						slog.Debug("evaluateBindForkChoice: SSI invalidation",
-							"txn", txnID, "key", k,
-							"concurrent_offset", tipOff)
-						e.voidedBinds.Put(txnID, struct{}{})
 						return true
 					}
 				}
@@ -982,6 +1455,10 @@ func (e *Engine) HandleNack(nack *pb.NackNotify) error {
 		default: // channel full, drop
 		}
 	}
+
+	// Pull every tip the peer mentions into our local DAG before deciding
+	// anything else. The NACK is informational; we must consume it.
+	e.ingestNackTips(nack)
 
 	// Check if this NACK is for a transactional key
 	var matchedTxn *pendingTxn
@@ -1012,46 +1489,55 @@ func (e *Engine) HandleNack(nack *pb.NackNotify) error {
 	return nil
 }
 
-// buildEnrichedNack constructs a NackNotify with Tip details for smart
-// conflict detection.
+// buildEnrichedNack constructs a NackNotify advertising the subset
+// of `tips` for which this node holds the bytes locally. A NACK is
+// an authority claim that the receiver will walk, so tips whose
+// bytes we don't hold are dropped — advertising them would propagate
+// an unresolvable reference.
+//
+// Lookup is local-only: a remote fetch fallback would synchronously
+// block the receive path with network I/O for every tip in every
+// NACK.
 func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips []keytrie.EffectRef) *pb.NackNotify {
 	nack := &pb.NackNotify{
 		Key:         []byte(key),
 		Conflicting: conflicting,
 	}
 
+	if e.effectCache == nil {
+		return nack
+	}
+
 	for _, tp := range tips {
+		eff, ok := e.effectCache.Get(tp, 0)
+		if !ok {
+			continue
+		}
+
 		nack.Tips = append(nack.Tips, toPbRef(tp))
 
-		// Read the effect for metadata via getEffect (uses effect cache
-		// first, then log, then remote fetch). Using the effect cache is
-		// critical — binds written via rawEmit are cached there but may
-		// not be readable from the log directly.
 		detail := &pb.NackTipDetail{
-			Ref: toPbRef(tp),
+			Ref:             toPbRef(tp),
+			Hlc:             eff.Hlc,
+			IsTransactional: eff.TxnId != "",
+			Deps:            eff.Deps,
 		}
-		if eff, err := e.getEffect(tp); err == nil {
-			detail.Hlc = eff.Hlc
-			detail.IsTransactional = eff.TxnId != ""
-			detail.Deps = eff.Deps
-
-			if data := eff.GetData(); data != nil {
-				detail.IsData = true
-				detail.Collection = data.Collection
-				detail.ElementId = data.Id
-				detail.Op = data.Op
-			}
-			if bind := eff.GetTxnBind(); bind != nil {
-				detail.IsBind = true
-				detail.BindHlc = bind.TxnHlc
-				detail.BindNodeId = bind.OriginatorNodeId
-				detail.BindForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc)
-				for _, kb := range bind.Keys {
-					detail.BindConsumedTips = append(detail.BindConsumedTips, &pb.KeyConsumedTips{
-						Key:          kb.Key,
-						ConsumedTips: kb.ConsumedTips,
-					})
-				}
+		if data := eff.GetData(); data != nil {
+			detail.IsData = true
+			detail.Collection = data.Collection
+			detail.ElementId = data.Id
+			detail.Op = data.Op
+		}
+		if bind := eff.GetTxnBind(); bind != nil {
+			detail.IsBind = true
+			detail.BindHlc = bind.TxnHlc
+			detail.BindNodeId = bind.OriginatorNodeId
+			detail.BindForkChoiceHash = ComputeForkChoiceHash(pb.NodeID(bind.OriginatorNodeId), bind.TxnHlc)
+			for _, kb := range bind.Keys {
+				detail.BindConsumedTips = append(detail.BindConsumedTips, &pb.KeyConsumedTips{
+					Key:          kb.Key,
+					ConsumedTips: kb.ConsumedTips,
+				})
 			}
 		}
 		nack.TipDetails = append(nack.TipDetails, detail)
@@ -1060,18 +1546,137 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	return nack
 }
 
+// ingestNackTips fetches and processes every effect referenced in a NACK's
+// tip details so the local DAG catches up with the peer's view. A NACK
+// is the cluster telling us "you missed these tips"; ignoring the payload
+// leaves us permanently behind and the cluster never converges.
+//
+// Walks each tip's dep chain (BFS) and pulls any effect we don't already
+// have via FetchFromAny + HandleRemote. Idempotent — effects we already
+// hold are skipped.
+func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
+	if nack == nil || e.broadcaster == nil {
+		return
+	}
+	var zero Tip
+	visited := make(map[Tip]bool)
+	var stack []Tip
+	for _, d := range nack.TipDetails {
+		if d == nil || d.Ref == nil {
+			continue
+		}
+		stack = append(stack, r(d.Ref))
+	}
+	for len(stack) > 0 {
+		off := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if off == zero || visited[off] {
+			continue
+		}
+		visited[off] = true
+		notify := &pb.OffsetNotify{
+			Origin: toPbRef(off),
+			Key:    nack.Key,
+		}
+		if err := e.handleBackfill(notify); err != nil {
+			slog.Debug("ingestNackTips: handleBackfill failed",
+				"ref", off, "error", err)
+			continue
+		}
+		if e.effectCache != nil {
+			if cached, ok := e.effectCache.Get(off, 0); ok {
+				stack = append(stack, fromPbRefs(cached.Deps)...)
+			}
+		}
+	}
+}
+
+// handleEviction restores the "tip ⇒ fetchable bytes" invariant when
+// the cache loses the bytes behind a tip. Emits an unsubscribe
+// SubscriptionEffect as a proper DAG element — real offset from
+// nextOffset, Deps consuming the current tips so peers reduce us out
+// of the subscribers map — then drops local state. Future reads
+// re-subscribe and bootstrap fresh.
+//
+// The broadcast goes out BEFORE local teardown so this node remains
+// authoritative for any still-cached effects on the key (other tips
+// in the same chain) during the round-trip. We deliberately do NOT
+// add the unsub to our own effectCache; we're giving up authority,
+// not retaining its trail.
+//
+// Per-key idempotency via unsubInFlight: multiple effects on the
+// same key can evict in close succession, but only one goroutine
+// runs the broadcast + teardown. Invoked on a fresh goroutine
+// because evictNotify runs under cache shard.mu.
+func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
+	if e.closed.Load() || evictedEffect == nil {
+		return
+	}
+	if isSystemKey(evictedEffect.Key) {
+		// evictDecider should have pinned these; reaching here means
+		// the pin invariant was bypassed.
+		slog.Warn("handleEviction: system key evicted; pin invariant violated",
+			"key", string(evictedEffect.Key), "ref", evictedRef)
+		return
+	}
+
+	key := string(evictedEffect.Key)
+
+	if _, claimed := e.unsubInFlight.LoadOrStore(key, struct{}{}); claimed {
+		return
+	}
+	defer e.unsubInFlight.Delete(key)
+
+	// Atomically take the deletion: any concurrent updateIndex with a
+	// stale non-nil old will fail its tips.CAS once tips is cleared,
+	// and the snapshot we broadcast matches the tips we actually drop.
+	tipSet := e.index.DeleteAndSnapshot(key)
+	if tipSet == nil {
+		// Already torn down or never installed.
+		e.subscriptions.Delete(key)
+		return
+	}
+
+	if e.broadcaster != nil {
+		hlc := timestamppb.New(e.clock.Now())
+		offset := e.nextOffset()
+		// Substitute pre-tx deps for any in-progress txn tips so the
+		// unsub doesn't reference uncommitted state.
+		deps := e.resolveTipDeps(tipSet.Tips())
+		unsub := &pb.Effect{
+			Key:            []byte(key),
+			Hlc:            hlc,
+			NodeId:         uint64(e.nodeID),
+			Deps:           toPbRefs(deps),
+			ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+			Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+				SubscriberNodeId: uint64(e.nodeID),
+				Unsubscribe:      true,
+			}},
+		}
+		if data, err := MarshalEffect(unsub); err == nil {
+			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
+			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
+		} else {
+			slog.Error("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
+		}
+	}
+
+	e.subscriptions.Delete(key)
+
+	slog.Debug("handleEviction: dropped key and unsubscribed",
+		"key", key, "ref", evictedRef)
+}
+
 // Close performs graceful shutdown of the engine and its background components.
 func (e *Engine) Close() error {
 	e.closed.Store(true)
-	if e.horizon != nil {
-		e.horizon.StopAll()
-	}
 	if e.antiEntropyStop != nil {
 		close(e.antiEntropyStop)
 		e.antiEntropyWg.Wait()
 	}
-	if e.voidedBinds != nil {
-		e.voidedBinds.Close()
+	if e.spokenBinds != nil {
+		e.spokenBinds.Close()
 	}
 	return nil
 }
@@ -1295,7 +1900,11 @@ func (e *Engine) probeAndFetchKey(key string) {
 
 	slog.Debug("anti-entropy: found missing tips", "key", key, "missing", len(missing))
 
-	// Fetch full chain from missing tips
+	// Fetch full chain from missing tips and route each effect through
+	// handleBackfill so the cross-key bind indexing runs. HandleRemote
+	// would re-enter HorizonSet for already-visible binds, making them
+	// invisible again until the next 1×RTT timer fires; backfilled effects
+	// have already been adjudicated at their originator.
 	fetched := make(map[Tip]bool)
 	fetchStack := make([]Tip, len(missing))
 	copy(fetchStack, missing)
@@ -1308,7 +1917,6 @@ func (e *Engine) probeAndFetchKey(key string) {
 		}
 		fetched[off] = true
 
-		// Check effect cache first
 		if e.effectCache != nil {
 			if cached, ok := e.effectCache.Get(off, 0); ok {
 				fetchStack = append(fetchStack, fromPbRefs(cached.Deps)...)
@@ -1320,23 +1928,23 @@ func (e *Engine) probeAndFetchKey(key string) {
 		if fetchErr != nil {
 			continue
 		}
-		if err := e.storeWireData(off, fetchedData); err != nil {
+		fetchedEff, parseErr := parseWireEffect(fetchedData)
+		if parseErr != nil {
 			continue
 		}
-		if eff, err := parseWireEffect(fetchedData); err == nil {
-			if e.effectCache != nil {
-				e.effectCache.Put(off, eff)
-			}
-			fetchStack = append(fetchStack, fromPbRefs(eff.Deps)...)
+		notify := &pb.OffsetNotify{
+			Origin:     toPbRef(off),
+			Key:        fetchedEff.Key,
+			EffectData: fetchedData,
 		}
+		if herr := e.handleBackfill(notify); herr != nil {
+			slog.Debug("anti-entropy: handleBackfill failed",
+				"ref", off, "error", herr)
+			continue
+		}
+		fetchStack = append(fetchStack, fromPbRefs(fetchedEff.Deps)...)
 	}
 
-	// Add missing tips to index
-	for _, off := range missing {
-		e.updateIndex(key, nil, off)
-	}
-
-	// Invalidate cache
 	if e.cache != nil {
 		e.cache.Evict(key)
 	}

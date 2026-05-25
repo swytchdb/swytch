@@ -46,12 +46,14 @@ func testIsRealConflict(t *testing.T, ptxn *pendingTxn, key string, detail *pb.N
 }
 
 func newTestPendingTxn(txnHLCNanos int64, keys ...pendingTxnKey) *pendingTxn {
+	txnHLC := time.Unix(0, txnHLCNanos)
 	return &pendingTxn{
-		txnHLC:     time.Unix(0, txnHLCNanos),
-		originNode: 1,
-		bindOffset: Tip{1, 9999},
-		keys:       keys,
-		done:       make(chan struct{}),
+		txnHLC:         txnHLC,
+		originNode:     1,
+		forkChoiceHash: ComputeForkChoiceHash(1, timestamppb.New(txnHLC)),
+		bindOffset:     Tip{1, 9999},
+		keys:           keys,
+		done:           make(chan struct{}),
 	}
 }
 
@@ -158,101 +160,66 @@ func TestIsRealConflict_DependentEffect_NotConflict(t *testing.T) {
 	}
 }
 
-func TestIsRealConflict_CompetingTxn_FWW_WeWin(t *testing.T) {
+// A NACK carrying a competing bind from another txn is resolved by
+// ForkChoiceHash, the same arbiter reconstruct uses. We abort iff their
+// hash is lower than ours; otherwise we win and continue.
+func TestIsRealConflict_CompetingBind_TheirHashLower_WeAbort(t *testing.T) {
 	ptxn := newTestPendingTxn(100, pendingTxnKey{
-		key:          "k",
-		newTip:       Tip{1, 500},
-		consumedTips: []Tip{{1, 300}}, // shared causal base
-		collection:   pb.CollectionKind_SCALAR,
-	})
-
-	// Their bind hash must be higher (worse) than ours for us to win
-	ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-	// Find a nodeID/HLC combo whose hash is higher than ours
-	theirNode := pb.NodeID(99)
-	theirHLC := tTs(200)
-	theirHash := ComputeForkChoiceHash(theirNode, theirHLC)
-	for ForkChoiceLess(theirHash, ourHash) {
-		theirNode++
-		theirHash = ComputeForkChoiceHash(theirNode, tTs(200))
-	}
-	theirHLC = tTs(200)
-
-	detail := &pb.NackTipDetail{
-		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:                theirHLC,
-		IsBind:             true,
-		BindHlc:            theirHLC,
-		BindNodeId:         uint64(theirNode),
-		BindForkChoiceHash: theirHash,
-		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 300}}}, // shared base
-		},
-	}
-
-	if testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("we should win FWW (our hash < their hash)")
-	}
-}
-
-func TestIsRealConflict_CompetingTxn_FWW_WeLose(t *testing.T) {
-	ptxn := newTestPendingTxn(200, pendingTxnKey{
-		key:          "k",
-		newTip:       Tip{1, 500},
-		consumedTips: []Tip{{1, 300}}, // shared causal base
-		collection:   pb.CollectionKind_SCALAR,
-	})
-
-	// Their bind hash must be lower (better) than ours for them to win
-	ourHash := ComputeForkChoiceHash(ptxn.originNode, timestamppb.New(ptxn.txnHLC))
-	theirNode := pb.NodeID(5)
-	theirHLC := tTs(100)
-	theirHash := ComputeForkChoiceHash(theirNode, theirHLC)
-	for !ForkChoiceLess(theirHash, ourHash) {
-		theirNode++
-		theirHash = ComputeForkChoiceHash(theirNode, tTs(100))
-	}
-	theirHLC = tTs(100)
-
-	detail := &pb.NackTipDetail{
-		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
-		Hlc:                theirHLC,
-		IsBind:             true,
-		BindHlc:            theirHLC,
-		BindNodeId:         uint64(theirNode),
-		BindForkChoiceHash: theirHash,
-		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 300}}}, // shared base
-		},
-	}
-
-	if !testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("we should lose FWW (their hash < our hash)")
-	}
-}
-
-func TestIsRealConflict_CompetingTxn_DifferentBase_NotConflict(t *testing.T) {
-	ptxn := newTestPendingTxn(200, pendingTxnKey{
 		key:          "k",
 		newTip:       Tip{1, 500},
 		consumedTips: []Tip{{1, 300}},
 		collection:   pb.CollectionKind_SCALAR,
 	})
-
+	// Find a (nodeID, hlc) pair whose hash sorts below ours.
+	theirNode := pb.NodeID(2)
+	theirHash := ComputeForkChoiceHash(theirNode, tTs(100))
+	for !ForkChoiceLess(theirHash, ptxn.forkChoiceHash) {
+		theirNode++
+		theirHash = ComputeForkChoiceHash(theirNode, tTs(100))
+	}
 	detail := &pb.NackTipDetail{
 		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
 		Hlc:                tTs(100),
 		IsBind:             true,
 		BindHlc:            tTs(100),
-		BindNodeId:         5,
-		BindForkChoiceHash: ComputeForkChoiceHash(5, tTs(100)),
+		BindNodeId:         uint64(theirNode),
+		BindForkChoiceHash: theirHash,
 		BindConsumedTips: []*pb.KeyConsumedTips{
-			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}}, // different base
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}},
 		},
 	}
+	if !testIsRealConflict(t, ptxn, "k", detail) {
+		t.Fatal("their lower hash → we must abort")
+	}
+}
 
+func TestIsRealConflict_CompetingBind_OurHashLower_WeWin(t *testing.T) {
+	ptxn := newTestPendingTxn(100, pendingTxnKey{
+		key:          "k",
+		newTip:       Tip{1, 500},
+		consumedTips: []Tip{{1, 300}},
+		collection:   pb.CollectionKind_SCALAR,
+	})
+	// Find a (nodeID, hlc) pair whose hash sorts above ours.
+	theirNode := pb.NodeID(2)
+	theirHash := ComputeForkChoiceHash(theirNode, tTs(200))
+	for ForkChoiceLess(theirHash, ptxn.forkChoiceHash) {
+		theirNode++
+		theirHash = ComputeForkChoiceHash(theirNode, tTs(200))
+	}
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: 1, Offset: 600},
+		Hlc:                tTs(200),
+		IsBind:             true,
+		BindHlc:            tTs(200),
+		BindNodeId:         uint64(theirNode),
+		BindForkChoiceHash: theirHash,
+		BindConsumedTips: []*pb.KeyConsumedTips{
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{{NodeId: 1, Offset: 400}}},
+		},
+	}
 	if testIsRealConflict(t, ptxn, "k", detail) {
-		t.Fatal("binds with different causal bases should not conflict")
+		t.Fatal("our lower hash → we must win and continue")
 	}
 }
 
@@ -389,5 +356,183 @@ func TestIsRealConflict_DependsOnBindOffset_NotConflict(t *testing.T) {
 
 	if testIsRealConflict(t, ptxn, "k", detail) {
 		t.Fatal("effect depending on our bind should not conflict")
+	}
+}
+
+// defeatedCompetitor must apply the same reachability filters as
+// isRealConflict before declaring a foreign bind defeated. A NACK that
+// names a foreign bind which is causally-before our pending tx (i.e.,
+// reachable from our tx via deps) must NOT add that bind's txnID to
+// defeatedSet — otherwise the post-commit snapshot will record a LOST
+// verdict for a transaction that committed cleanly elsewhere, and the
+// wrong verdict propagates to every peer that harvests our snapshot.
+//
+// Jepsen run 25995596561 exhibited this: peer 11's commit at [11,39]
+// recorded op-15 (which committed at node 101 ~500ms earlier with
+// snapshot [101,18] = WON) as LOST. The cause was that defeatedCompetitor
+// went straight to the hash compare without checking whether op-15 was
+// reachable from peer 11's own bind chain.
+func TestDefeatedCompetitor_TheirBindReachableViaDeps_NotDefeated(t *testing.T) {
+	e := newTxnTestEngine(nil)
+
+	// Their bind: hash all-ones (higher than ours, all-zeros).
+	// Already committed in the past; lives in our effectCache.
+	theirTxnID := "their-already-committed-tx"
+	theirBindOffset := Tip{5, 100}
+	theirHash := make([]byte, 32)
+	for i := range theirHash {
+		theirHash[i] = 0xff
+	}
+	theirBindHLC := tTs(50)
+	e.effectCache.Put(theirBindOffset, &pb.Effect{
+		TxnId:          theirTxnID,
+		NodeId:         5,
+		Hlc:            theirBindHLC,
+		ForkChoiceHash: theirHash,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           theirBindHLC,
+			OriginatorNodeId: 5,
+		}},
+	})
+
+	// Our bind: causally-after theirs. Deps include theirBindOffset.
+	ourBindOffset := Tip{42, 200}
+	e.effectCache.Put(ourBindOffset, &pb.Effect{
+		Deps: []*pb.EffectRef{{NodeId: 5, Offset: 100}},
+	})
+
+	ptxn := &pendingTxn{
+		txnID:          "our-tx",
+		forkChoiceHash: make([]byte, 32), // all-zeros: lower than 0xff..
+		bindOffset:     ourBindOffset,
+		keys: []pendingTxnKey{
+			{key: "k", newTip: Tip{42, 199}},
+		},
+		done: make(chan struct{}),
+	}
+
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: 5, Offset: 100},
+		IsBind:             true,
+		IsTransactional:    true,
+		BindHlc:            theirBindHLC,
+		BindNodeId:         5,
+		BindForkChoiceHash: theirHash,
+		BindConsumedTips: []*pb.KeyConsumedTips{
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{}},
+		},
+	}
+
+	if defeated := e.defeatedCompetitor(ptxn, "k", detail); defeated != "" {
+		t.Fatalf("bind reachable from our tx via deps must not be marked defeated; got %q", defeated)
+	}
+}
+
+// Symmetric reachability case mirroring TestIsRealConflict_DependentEffect_NotConflict:
+// the foreign bind's own Deps reference one of our pending tx's tips,
+// so the foreign bind is causally-after us. Not concurrent — must not
+// be marked defeated regardless of hash.
+func TestDefeatedCompetitor_DetailDepsReferenceOurNewTip_NotDefeated(t *testing.T) {
+	e := newTxnTestEngine(nil)
+
+	theirTxnID := "their-tx"
+	theirBindOffset := Tip{5, 600}
+	theirHash := make([]byte, 32)
+	for i := range theirHash {
+		theirHash[i] = 0xff
+	}
+	theirBindHLC := tTs(200)
+	e.effectCache.Put(theirBindOffset, &pb.Effect{
+		TxnId:          theirTxnID,
+		NodeId:         5,
+		Hlc:            theirBindHLC,
+		ForkChoiceHash: theirHash,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           theirBindHLC,
+			OriginatorNodeId: 5,
+		}},
+	})
+
+	ptxn := &pendingTxn{
+		txnID:          "our-tx",
+		forkChoiceHash: make([]byte, 32),
+		bindOffset:     Tip{42, 9999},
+		keys: []pendingTxnKey{
+			{key: "k", newTip: Tip{42, 500}},
+		},
+		done: make(chan struct{}),
+	}
+
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: 5, Offset: 600},
+		IsBind:             true,
+		IsTransactional:    true,
+		BindHlc:            theirBindHLC,
+		BindNodeId:         5,
+		BindForkChoiceHash: theirHash,
+		Deps:               []*pb.EffectRef{{NodeId: 42, Offset: 500}},
+		BindConsumedTips: []*pb.KeyConsumedTips{
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{}},
+		},
+	}
+
+	if defeated := e.defeatedCompetitor(ptxn, "k", detail); defeated != "" {
+		t.Fatalf("bind whose deps reference our newTip is causally-after us, not defeated; got %q", defeated)
+	}
+}
+
+// Control: a truly concurrent foreign bind with a higher hash than ours
+// SHOULD still be marked defeated. The fix must not regress this case.
+func TestDefeatedCompetitor_ConcurrentHigherHash_Defeated(t *testing.T) {
+	e := newTxnTestEngine(nil)
+
+	theirTxnID := "their-concurrent-tx"
+	theirBindOffset := Tip{5, 100}
+	theirHash := make([]byte, 32)
+	for i := range theirHash {
+		theirHash[i] = 0xff
+	}
+	theirBindHLC := tTs(50)
+	e.effectCache.Put(theirBindOffset, &pb.Effect{
+		TxnId:          theirTxnID,
+		NodeId:         5,
+		Hlc:            theirBindHLC,
+		ForkChoiceHash: theirHash,
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           theirBindHLC,
+			OriginatorNodeId: 5,
+		}},
+	})
+
+	// Our bind: NOT reachable to theirs. Independent deps.
+	ourBindOffset := Tip{42, 200}
+	e.effectCache.Put(ourBindOffset, &pb.Effect{
+		Deps: []*pb.EffectRef{{NodeId: 7, Offset: 50}},
+	})
+
+	ptxn := &pendingTxn{
+		txnID:          "our-tx",
+		forkChoiceHash: make([]byte, 32),
+		bindOffset:     ourBindOffset,
+		keys: []pendingTxnKey{
+			{key: "k", newTip: Tip{42, 199}},
+		},
+		done: make(chan struct{}),
+	}
+
+	detail := &pb.NackTipDetail{
+		Ref:                &pb.EffectRef{NodeId: 5, Offset: 100},
+		IsBind:             true,
+		IsTransactional:    true,
+		BindHlc:            theirBindHLC,
+		BindNodeId:         5,
+		BindForkChoiceHash: theirHash,
+		BindConsumedTips: []*pb.KeyConsumedTips{
+			{Key: []byte("k"), ConsumedTips: []*pb.EffectRef{}},
+		},
+	}
+
+	if defeated := e.defeatedCompetitor(ptxn, "k", detail); defeated != theirTxnID {
+		t.Fatalf("concurrent foreign bind with higher hash should be marked defeated; got %q want %q", defeated, theirTxnID)
 	}
 }

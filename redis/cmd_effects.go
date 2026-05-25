@@ -157,7 +157,10 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 		)
 		engine.OnPubSubMessage = router.HandleInboundMessage
 		engine.OnEphemeralSubscribe = router.HandleEphemeralSubscribe
-		pm.SetPeerLifecycleHooks(router.OnPeerAdded, router.OnPeerRemoved)
+		pm.SetPeerLifecycleHooks(router.OnPeerAdded, func(id cluster.NodeId) {
+			router.OnPeerRemoved(id)
+			engine.DropPeerFromSubscribers(id)
+		})
 		shared.SetPubSubClusterRouter(router)
 	}
 

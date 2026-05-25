@@ -144,11 +144,31 @@ message ReducedEffect {
   bytes fork_choice_hash = 24;
 }
 
-// SnapshotEffect stores a materialized state that short-circuits DAG walking.
-// todo: DO NOT IMPLEMENT
+// Verdict is the adjudication outcome for a transaction recorded in a snapshot.
+// Populated only by winners (originators on commit). Aborters never emit.
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  WON = 1;
+  LOST = 2;
+}
+
+// SnapshotEffect stores a materialized state that short-circuits DAG walking,
+// and optionally records the verdicts adjudicated at the moment of emission so
+// cross-key reconstructs can derive winners/losers without re-walking past it.
 message SnapshotEffect {
   CollectionKind collection = 1;  // what kind of state is serialized
   ReducedEffect state = 2;       // materialized state
+
+  // Verdicts adjudicated when this snapshot was emitted. Populated only by
+  // winner-commit emissions: the committing txnID is WON, each competing bind
+  // it beat during flushTx is LOST. State-only compaction snapshots (read
+  // triggered) leave this empty.
+  map<string, Verdict> txn_verdicts = 3;
+
+  // Previous snapshot on this key, if any. Forms a chain so verdict-walks can
+  // traverse historical adjudications via snapshots without consulting tips.
+  // Zero-valued if no prior snapshot exists for this key.
+  EffectRef prev_snapshot = 4;
 }
 
 // TypedValue is a tagged literal used in Predicate comparisons and
@@ -348,6 +368,7 @@ message NackNotify {
   EffectRef conflicting = 2;         // the effect that triggered the conflict
   repeated EffectRef tips = 3;       // sender's full tip set for this key
   repeated NackTipDetail tip_details = 4;  // metadata per tip for smart conflict detection
+  bool not_subscribed = 5;           // receiver is not subscribed to this key, so it discarded the write
 }
 
 // ForwardedTransaction carries an entire transaction to be executed on

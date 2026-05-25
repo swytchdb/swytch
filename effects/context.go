@@ -20,13 +20,16 @@
 package effects
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"log/slog"
 	"math/rand/v2"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 	"github.com/swytchdb/swytch/tracing"
@@ -205,18 +208,32 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		// Compact long chains by emitting a snapshot into this context
-		if chainLen >= 20+rand.IntN(31) {
+		// Compact long chains by emitting a state snapshot into this context.
+		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
+		// when result is nil, but the check is defensive against future
+		// regressions in that contract.
+		if result != nil && chainLen >= 20+rand.IntN(31) {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
 				"tips", tips)
+			snapEff := &pb.SnapshotEffect{
+				Collection: result.Collection,
+				State:      result,
+			}
+			for _, t := range tips {
+				cached, err := c.engine.getEffect(t)
+				if err != nil {
+					continue
+				}
+				if cached.GetSnapshot() != nil {
+					snapEff.PrevSnapshot = toPbRef(t)
+					break
+				}
+			}
 			if err := c.Emit(&pb.Effect{
-				Key: []byte(key),
-				Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
-					Collection: result.Collection,
-					State:      result,
-				}},
+				Key:  []byte(key),
+				Kind: &pb.Effect_Snapshot{Snapshot: snapEff},
 			}, tips); err != nil {
 				slog.Error("compaction: snapshot emit failed",
 					"key", key,
@@ -234,22 +251,30 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 	// while a blocking XREADGROUP holds a compaction snapshot) are visible.
 	myTip := ck.lastOffset
 	reconTips := []Tip{myTip}
-	var indexed *keytrie.TipSet
+	var baseTips []Tip
 	if c.txSnapshot != nil {
-		indexed = c.txSnapshot.Contains(key)
-	} else {
-		indexed = c.engine.index.Contains(key)
+		if ts := c.txSnapshot.Contains(key); ts != nil {
+			// Match getSnapshotFromTx: resolve pending-tx tips to their
+			// pre-tx deps so a later read in the same txn walks the same
+			// committed-as-of-snapshot DAG as the first read did.
+			baseTips = c.engine.resolveTipDeps(ts.Tips())
+		}
+	} else if ts := c.engine.index.Contains(key); ts != nil {
+		baseTips = ts.Tips()
 	}
-	if indexed != nil {
-		for _, t := range indexed.Tips() {
-			if t != myTip {
-				reconTips = append(reconTips, t)
-			}
+	for _, t := range baseTips {
+		if t != myTip {
+			reconTips = append(reconTips, t)
 		}
 	}
 	slog.Debug("Context.GetSnapshot: hasPending reconstruct", "key", key,
 		"txn_id", c.txnID, "recon_tips", reconTips)
-	result, _, err := c.engine.reconstruct(key, reconTips, c.txnID)
+	// waitForHorizon=true: client-facing in-txn read. If the walk reaches
+	// an in-horizon bind on the ancestry, block on its resolution before
+	// returning. Without this the read can return a list that excludes a
+	// bind which the very next read (post-promotion) will include —
+	// :incompatible-order on a single key.
+	result, _, err := c.engine.reconstruct(key, reconTips, c.txnID, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +302,8 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 	if len(tipOffsets) == 0 {
 		return nil, nil, nil
 	}
-	result, _, err := c.engine.reconstruct(key, tipOffsets, c.txnID)
+	// waitForHorizon=true: SSI-snapshot read served back to the client.
+	result, _, err := c.engine.reconstruct(key, tipOffsets, c.txnID, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -301,19 +327,37 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 // causal log so all nodes can verify whether the key was modified
 // between WATCH and EXEC. The NOOP offset and post-flush TipSet pointer
 // are stored for comparison at BeginTx time.
+//
+// The noop is tx-marked with the upcoming transaction's id (generated
+// lazily here). This is what makes write-skew detection work across
+// nodes: a competing write on a watched key becomes a structural fork
+// sibling of the watching tx's bind, surfaced by reconstruct's
+// pairwise fork-choice on the key. Without the TxnId, the noop is an
+// anonymous committed effect that other writers can chain off,
+// producing false sequential relationships (the run-25890153673 G1a).
 func (c *Context) Watch(key string) {
 	if c.watchedKeys == nil {
 		c.watchedKeys = make(map[string]*watchedKeyState)
+	}
+
+	// Lazily materialize the txn id so the WATCH noop is tx-marked.
+	// The upcoming BeginTx (at MULTI/EXEC) inherits this id.
+	if c.txnID == "" {
+		c.txnID = c.engine.generateTxnID()
 	}
 
 	// Check if key has actual data BEFORE emitting the NOOP
 	snap, _, _, _ := c.engine.GetSnapshot(key)
 	hadData := snap != nil
 
-	// Emit NOOP to record the observation in the causal log
+	// Emit NOOP to record the observation in the causal log. We set
+	// TxnId explicitly because Emit only stamps it inside an active
+	// MULTI (c.inTx); WATCH is pre-MULTI but the noop still belongs
+	// to the upcoming tx.
 	if err := c.Emit(&pb.Effect{
-		Key:  []byte(key),
-		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+		Key:   []byte(key),
+		TxnId: c.txnID,
+		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 	}); err != nil {
 		slog.Error("Watch: NOOP emit failed", "key", key, "error", err)
 		return
@@ -336,9 +380,18 @@ func (c *Context) Watch(key string) {
 	}
 }
 
-// ClearWatches removes all watched keys without affecting transaction state.
+// ClearWatches removes all watched keys. Called from UNWATCH, DISCARD,
+// and EXEC's pre-BeginTx abort paths — all cases where the upcoming
+// transaction is being discarded. Also drops the lazily-generated
+// txnID so the next WATCH/MULTI starts fresh; if we're already inside
+// MULTI/EXEC (c.inTx) the id is load-bearing for in-flight effects
+// and must be preserved.
 func (c *Context) ClearWatches() {
 	clear(c.watchedKeys)
+	if !c.inTx {
+		c.dropTxRegistration()
+		c.txnID = ""
+	}
 }
 
 // BeginTx marks subsequent effects as transactional.
@@ -350,7 +403,41 @@ func (c *Context) BeginTx() {
 		return // nested transaction inherits outer
 	}
 	c.inTx = true
-	c.txnID = c.engine.generateTxnID()
+	// A prior WATCH may have already materialized our txn id; reuse it
+	// so the WATCH noop and the MULTI/EXEC effects share one tx.
+	if c.txnID == "" {
+		c.txnID = c.engine.generateTxnID()
+	}
+	// SSI: snapshot the index at txn start so every read/emit within
+	// the txn sees a consistent committed state.
+	if c.txSnapshot == nil {
+		c.txSnapshot = c.engine.index.Snapshot()
+	}
+	// Register the snapshot with the engine so reconstruct can derive
+	// the pre-tx walk cutoff from txID alone.
+	if c.txSnapshots() != nil && c.txnID != "" {
+		c.txSnapshots().Store(c.txnID, c.txSnapshot)
+	}
+}
+
+// txSnapshots is a tiny wrapper to make the engine-side per-tx snapshot
+// map easier to access from Context.
+func (c *Context) txSnapshots() *xsync.Map[string, keytrie.KeyIndex] {
+	if c.engine == nil {
+		return nil
+	}
+	return c.engine.txSnapshots
+}
+
+// dropTxRegistration removes this Context's tx snapshot from the engine.
+// Safe to call with empty txnID. Call before clearing c.txnID.
+func (c *Context) dropTxRegistration() {
+	if c.txnID == "" {
+		return
+	}
+	if m := c.txSnapshots(); m != nil {
+		m.Delete(c.txnID)
+	}
 }
 
 // CheckWatches validates WATCH observations and emits transactional NOOPs
@@ -360,9 +447,12 @@ func (c *Context) BeginTx() {
 // Returns false if any watched key was modified — the caller should abort
 // the transaction and return a null array to the client.
 func (c *Context) CheckWatches() bool {
-	// Capture index snapshot for SSI — all reads within the transaction
-	// will use this snapshot instead of the live index.
-	c.txSnapshot = c.engine.index.Snapshot()
+	// BeginTx already captured the SSI snapshot at txn start. Cover the
+	// case where CheckWatches is called without a prior BeginTx (no
+	// transactional emits before EXEC).
+	if c.txSnapshot == nil {
+		c.txSnapshot = c.engine.index.Snapshot()
+	}
 
 	if len(c.watchedKeys) == 0 {
 		return true
@@ -383,6 +473,8 @@ func (c *Context) CheckWatches() bool {
 		// Key was modified — abort
 		clear(c.watchedKeys)
 		c.inTx = false
+		c.dropTxRegistration()
+		c.txnID = ""
 		c.txSnapshot = nil
 		return false
 	}
@@ -398,6 +490,8 @@ func (c *Context) CheckWatches() bool {
 			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
 			clear(c.watchedKeys)
 			c.inTx = false
+			c.dropTxRegistration()
+			c.txnID = ""
 			c.txSnapshot = nil
 			return false
 		}
@@ -416,6 +510,7 @@ func (c *Context) Abort() {
 	clear(c.keys)
 	clear(c.watchedKeys)
 	c.inTx = false
+	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
@@ -539,6 +634,16 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 
 	if c.engine.effectCache != nil {
 		c.engine.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+	}
+
+	// Track foreign peer subscriptions so flushTx's collectSubscribers
+	// sees them. Self-subscribes are filtered inside addPeerSubscriber.
+	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
+		if sub.Unsubscribe {
+			c.engine.removePeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
+		} else {
+			c.engine.addPeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
+		}
 	}
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
@@ -709,18 +814,16 @@ func (c *Context) flushTx() error {
 		}
 	}
 
-	// Step 0.75: Pre-flight staleness check. Protocol invariant: once
-	// this node ACKs (or NACKs) a remote bind on key K, it must not
-	// emit its own bind consuming any tip that remote bind consumed.
-	// The per-key striped lock held by the caller serialises this
-	// flush against HandleRemote, so any remote bind on one of our
-	// keys has either been indexed already or hasn't been observed
-	// at all. If any of our initialTips is no longer a current tip,
-	// a remote bind has already consumed it locally — we're past
-	// the ACK/NACK commit point and the invariant forbids us from
-	// emitting. Abort without running fork-choice; that arbiter is
-	// reserved for truly concurrent competitors that neither side
-	// has observed yet.
+	// Protocol invariant: once this node has observed a remote bind on
+	// key K, it must not emit its own bind that's DAG-concurrent with
+	// the remote bind. Two ways that can happen, both caught here:
+	//  (a) the remote bind consumed one of our initialTips — our tip
+	//      is gone from current.
+	//  (b) the remote bind landed as a new tip after we captured
+	//      initialTips — current has a tip our initialTips never saw.
+	// In (b), our emit won't dep-reference the remote bind so the two
+	// commit DAG-concurrent. Abort here rather than let fork-choice
+	// surface the inconsistency as G1a / incompatible-order later.
 	for key, ck := range c.keys {
 		if ck.initialTips == nil {
 			continue // first write to a brand-new key
@@ -728,6 +831,10 @@ func (c *Context) flushTx() error {
 		initial := ck.initialTips.Tips()
 		if len(initial) == 0 {
 			continue
+		}
+		initialSet := make(map[Tip]bool, len(initial))
+		for _, t := range initial {
+			initialSet[t] = true
 		}
 		current := c.engine.index.Contains(key)
 		currentSet := make(map[Tip]bool)
@@ -746,6 +853,41 @@ func (c *Context) flushTx() error {
 				c.reset()
 				return ErrTxnAborted
 			}
+			// Abort if we already ACKed/NACKed a remote bind that consumed
+			// this tip — emitting now would commit DAG-concurrent with it.
+			if c.engine.spokenBinds != nil {
+				if _, spoken := c.engine.spokenBinds.Get(t, 0); spoken {
+					slog.Debug("flushTx: pre-flight aborting, spoke on consumed tip",
+						"key", key, "tip", t)
+					for _, ck3 := range c.keys {
+						c.engine.pendingTxTips.Delete(ck3.lastOffset)
+					}
+					c.reset()
+					return ErrTxnAborted
+				}
+			}
+		}
+		for t := range currentSet {
+			if initialSet[t] {
+				continue
+			}
+			// Subscription tips are commutative metadata, not bind writes
+			// — they can't be the "remote bind landed during txn window"
+			// case this axis exists to catch. ensureSubscribed installs
+			// the originator's own SubscriptionEffect into the index
+			// during flushTx, AFTER initialTips was captured at Emit
+			// time, so the originator's own subscription would otherwise
+			// look like a competitor and trigger a spurious abort.
+			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+				continue
+			}
+			slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
+				"key", key, "new_tip", t, "initial_tips", initial)
+			for _, ck3 := range c.keys {
+				c.engine.pendingTxTips.Delete(ck3.lastOffset)
+			}
+			c.reset()
+			return ErrTxnAborted
 		}
 	}
 
@@ -791,16 +933,27 @@ func (c *Context) flushTx() error {
 					break
 				}
 			}
-			if !isOurs {
-				// Concurrent effect on watched key → SSI conflict
-				slog.Debug("SSI conflict: concurrent write on watched key",
-					"tip", t, "our_tip", myTip)
-				for _, ck3 := range c.keys {
-					c.engine.pendingTxTips.Delete(ck3.lastOffset)
-				}
-				c.reset()
-				return ErrTxnAborted
+			if isOurs {
+				continue
 			}
+			// Subscription tips are commutative metadata, not data writes
+			// — they cannot create a data fork. ensureSubscribed installs
+			// the originator's own SubscriptionEffect into the index
+			// during flushTx, after the SSI snapshot was taken by
+			// BeginTx, so without this skip the originator's own
+			// subscription tip would look like a concurrent external
+			// write and trigger a spurious abort.
+			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+				continue
+			}
+			// Concurrent effect on watched key → SSI conflict
+			slog.Debug("SSI conflict: concurrent write on watched key",
+				"tip", t, "our_tip", myTip)
+			for _, ck3 := range c.keys {
+				c.engine.pendingTxTips.Delete(ck3.lastOffset)
+			}
+			c.reset()
+			return ErrTxnAborted
 		}
 	}
 
@@ -849,11 +1002,20 @@ func (c *Context) flushTx() error {
 		}
 		bind.Keys = append(bind.Keys, kb)
 	}
+	// Sort bind.Keys by key bytes so the canonical key (bind.Keys[0])
+	// and every observer's iteration order are deterministic — c.keys
+	// is a Go map, raw iteration is random. Any predicate or behavior
+	// that branches on eff.Key (or on bind.Keys ordering) needs this
+	// to be stable across runs.
+	sort.Slice(bind.Keys, func(i, j int) bool {
+		return bytes.Compare(bind.Keys[i].Key, bind.Keys[j].Key) < 0
+	})
 
 	// Bind deps: the last effect on each key in the transaction.
-	var bindDeps []*pb.EffectRef
-	for _, ck := range c.keys {
-		bindDeps = append(bindDeps, toPbRef(ck.lastOffset))
+	// Walk bind.Keys (already sorted) so eff.Deps is deterministic too.
+	bindDeps := make([]*pb.EffectRef, 0, len(bind.Keys))
+	for _, kb := range bind.Keys {
+		bindDeps = append(bindDeps, kb.NewTip)
 	}
 
 	// Pre-emission check: a bind that completed its horizon wait is a
@@ -906,10 +1068,6 @@ func (c *Context) flushTx() error {
 		c.engine.updateIndex(key, keytrie.NewTipSet(ck.lastOffset), bindOffset)
 	}
 
-	// Evaluate fork-choice against existing binds on all keys.
-	// Returns true if our bind lost — abort immediately without
-	// re-reading voidedBinds (the cache write is still done for
-	// cross-transaction visibility in reconstruct/checkCompetingBinds).
 	if c.engine.evaluateBindForkChoice(bind, bindOffset, bindEff.ForkChoiceHash, c.txnID) {
 		slog.Debug("flushTx: voided by concurrent bind, aborting",
 			"bind_offset", bindOffset, "txn", c.txnID)
@@ -922,11 +1080,12 @@ func (c *Context) flushTx() error {
 
 	// Step 4: Create pending txn for NACK tracking
 	ptxn := &pendingTxn{
-		txnID:      c.txnID,
-		txnHLC:     txnHLC,
-		originNode: c.engine.nodeID,
-		bindOffset: bindOffset,
-		done:       make(chan struct{}),
+		txnID:          c.txnID,
+		txnHLC:         txnHLC,
+		originNode:     c.engine.nodeID,
+		forkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		bindOffset:     bindOffset,
+		done:           make(chan struct{}),
 	}
 	for key, ck := range c.keys {
 		var consumedTips []Tip
@@ -963,19 +1122,22 @@ func (c *Context) flushTx() error {
 				"bind_offset", bindOffset)
 			commitPendingTxn(ptxn)
 		} else {
-			// Peers exist — keep the bind invisible while we wait
-			// for ACK/NACK. MakeVisible is called once the wait
-			// resolves (below). Horizon timer is RTT-scaled over
-			// the subscriber set — it only needs to be long enough
-			// that a concurrent competing bind from any of these
-			// peers would have reached us.
+			// Peers exist — bind stays invisible until we finish processing
+			// peer responses and explicitly call MakeVisible (commit) or
+			// Abort (abort) below. The decision must happen AFTER the NACK
+			// loop, otherwise the bind can briefly become visible while a
+			// concurrent reader picks up its effects before isRealConflict
+			// has had a chance to fire.
 			if c.engine.horizon != nil {
-				c.engine.horizon.Add(c.txnID, bindOffset, bind, subscribers)
+				c.engine.horizon.Add(c.txnID, bindOffset, bind)
 			}
 			// Replicate to all subscribers concurrently, collect responses.
-			// Track successes — we need a majority to commit.
-			// Network errors to individual peers don't abort unless
-			// we lose majority.
+			// Per the TLA+ spec (ExactlyOnce.CommitPop): commit requires
+			// every subscriber to respond (ACK or NACK). A peer that ACK'd
+			// has committed via the "once you've spoken" invariant to NACK
+			// any subsequent competing bind on this key. A peer we couldn't
+			// reach hasn't made that commitment, so we cannot rely on it
+			// to enforce AtMostOneCommit.
 			type replicaResult struct {
 				subID pb.NodeID
 				nacks []*pb.NackNotify
@@ -997,7 +1159,19 @@ func (c *Context) flushTx() error {
 			}
 			wg.Wait()
 
-			ackCount := 0
+			// Competitor txnIDs we beat during the NACK loop, keyed by
+			// txnID with the loser's bind anchor offset as value. The
+			// offset is needed at verdict-snapshot emit time so we can
+			// fetch the loser's bind and union its keyset with ours —
+			// otherwise the verdict for `beaten` is only published on
+			// keys WE touched, leaving any key the loser touched alone
+			// without an authoritative LOST record. A subsequent reader
+			// of such a key would have to rely on cross-key closure
+			// expansion to discover the verdict, which is fragile under
+			// tx-context reconstructs with pre-tx snapshot cutoffs.
+			defeatedSet := make(map[string]Tip)
+
+			responseCount := 0
 			for _, res := range results {
 				if res.err != nil {
 					slog.Warn("flushTx: ReplicateTo failed",
@@ -1006,13 +1180,17 @@ func (c *Context) flushTx() error {
 						"error", res.err)
 					continue
 				}
-				ackCount++
+				responseCount++
 				for _, nack := range res.nacks {
 					slog.Debug("flushTx: received NACK",
 						"bind_offset", bindOffset,
 						"target", res.subID,
 						"nack_key", string(nack.Key),
 						"tip_count", len(nack.TipDetails))
+					// Pull every tip the peer mentions into our DAG
+					// before deciding conflict — the NACK is informational
+					// and ignoring it would let the cluster diverge.
+					c.engine.ingestNackTips(nack)
 					for _, detail := range nack.TipDetails {
 						if c.engine.isRealConflict(ptxn, string(nack.Key), detail) {
 							slog.Debug("flushTx: real conflict detected, aborting",
@@ -1025,6 +1203,9 @@ func (c *Context) flushTx() error {
 							abortPendingTxn(ptxn)
 							break
 						}
+						if beaten := c.engine.defeatedCompetitor(ptxn, string(nack.Key), detail); beaten != "" {
+							defeatedSet[beaten] = r(detail.Ref)
+						}
 					}
 					if ptxn.state.Load() == txnStateAborted {
 						break
@@ -1036,40 +1217,80 @@ func (c *Context) flushTx() error {
 			}
 
 			if ptxn.state.Load() != txnStateAborted {
-				// +1 for ourselves — we always have our own bind
-				totalNodes := len(subscribers) + 1
-				reachable := ackCount + 1
-				if reachable > totalNodes/2 {
-					if commitPendingTxn(ptxn) {
-						slog.Debug("flushTx: majority responded, committed",
-							"bind_offset", bindOffset,
-							"acks", ackCount,
-							"subscribers", len(subscribers))
-					}
-				} else {
-					// The Bind is already broadcast and stored on peers.
-					// Aborting locally would leave tentative effects
-					// visible elsewhere (G1a). Commit and let fork-choice
-					// resolve any competing Binds on reconnect.
-					// The replication layer already marked unreachable
-					// peers dead, so subsequent pre-checks will block.
-					slog.Warn("flushTx: minority partition post-broadcast, committing holographically",
+				if responseCount < len(subscribers) {
+					slog.Warn("flushTx: not all subscribers responded, aborting",
 						"bind_offset", bindOffset,
-						"acks", ackCount,
+						"responses", responseCount,
 						"subscribers", len(subscribers))
-					commitPendingTxn(ptxn)
+					abortPendingTxn(ptxn)
+				} else if commitPendingTxn(ptxn) {
+					slog.Debug("flushTx: all subscribers responded, committed",
+						"bind_offset", bindOffset,
+						"subscribers", len(subscribers))
 				}
-				// We've heard back from every peer we waited on (wg.Wait
-				// completed above) and decided to commit. The bind is
-				// no longer tentative from our perspective — it IS the
-				// commit decision we're about to tell the client about.
-				// Make it visible now so the client's immediate next
-				// read sees its own write. Leaving it horizon-invisible
-				// here (the old all-ACK-no-NACK gate) causes lost-update
-				// anomalies: client hears COMMIT, next read returns
-				// stale state because horizon timer hasn't fired.
-				if c.engine.horizon != nil {
+			}
+
+			// Drive visibility from here, AFTER the NACK loop has had a
+			// chance to set txnStateAborted via isRealConflict. The bind
+			// must not become visible before this decision is made.
+			if c.engine.horizon != nil {
+				if ptxn.state.Load() == txnStateAborted {
+					c.engine.horizon.Abort(c.txnID)
+				} else {
 					c.engine.horizon.MakeVisible(c.txnID)
+				}
+			}
+
+			if ptxn.state.Load() == txnStateCommitted {
+				verdicts := make(map[string]pb.Verdict, 1+len(defeatedSet))
+				verdicts[c.txnID] = pb.Verdict_WON
+
+				// Emit set: every key the winner touched, plus every key
+				// any beaten loser touched. The verdict for a LOST txn
+				// has to be findable on each key the loser wrote — that
+				// is the only way a future reconstruct on a loser-only
+				// key (one the winner never touched) can prove the bind
+				// is dead without re-running cross-key closure expansion
+				// from scratch. Recording LOST only on the winner's keys
+				// satisfies losersOnKey there but leaves loser-only keys
+				// dependent on closure widening, which can be truncated
+				// by a tx-context reconstruct's pre-tx cutoff and
+				// surface as G1a.
+				emitKeys := make(map[string]struct{}, len(bind.Keys))
+				for _, kb := range bind.Keys {
+					emitKeys[string(kb.Key)] = struct{}{}
+				}
+				for beatenTxn, beatenOffset := range defeatedSet {
+					verdicts[beatenTxn] = pb.Verdict_LOST
+					loserEff, err := c.engine.getEffect(beatenOffset)
+					if err != nil {
+						slog.Warn("flushTx: cannot fetch beaten bind for verdict emit",
+							"loser_txn", beatenTxn,
+							"loser_offset", beatenOffset,
+							"bind_offset", bindOffset,
+							"error", err)
+						continue
+					}
+					loserBind := loserEff.GetTxnBind()
+					if loserBind == nil {
+						slog.Warn("flushTx: beaten effect is not a TxnBind",
+							"loser_txn", beatenTxn,
+							"loser_offset", beatenOffset,
+							"bind_offset", bindOffset)
+						continue
+					}
+					for _, kb := range loserBind.Keys {
+						emitKeys[string(kb.Key)] = struct{}{}
+					}
+				}
+
+				for key := range emitKeys {
+					if err := c.engine.emitSnapshot(key, verdicts); err != nil {
+						slog.Warn("flushTx: emitSnapshot for verdict failed",
+							"key", key,
+							"bind_offset", bindOffset,
+							"error", err)
+					}
 				}
 			}
 		}
@@ -1143,30 +1364,26 @@ func (c *Context) flushTx() error {
 }
 
 // collectSubscribers gathers unique subscriber node IDs across all touched keys.
-// Uses reconstruct directly instead of GetSnapshot to avoid filterSnapshot
-// stripping metadata-only snapshots (which contain subscription info).
+// Reads from the engine's peerSubscribers map — maintained incrementally by
+// ensureSubscribed (peers that NACK back are subscribed) and HandleRemote
+// (foreign SubscriptionEffect arrival/unsubscribe). Reading the DAG via
+// reconstruct here was the prior implementation; it produced subscribers:0
+// whenever reconstruct legitimately returned a Subscribers-less result
+// (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
+// which silently dropped the bind broadcast and produced missing verdict
+// snapshots downstream.
 func (c *Context) collectSubscribers() []pb.NodeID {
 	seen := make(map[pb.NodeID]struct{})
 	for key := range c.keys {
-		tips := c.engine.index.Contains(key)
-		if tips == nil {
+		inner, ok := c.engine.peerSubscribers.Load(key)
+		if !ok {
 			continue
 		}
-		tipOffsets := c.engine.resolveTipDeps(tips.Tips())
-		if len(tipOffsets) == 0 {
-			continue
-		}
-		r, _, err := c.engine.reconstruct(key, tipOffsets)
-		if err != nil || r == nil {
-			continue
-		}
-		for subID := range r.Subscribers {
-			if subID != uint64(c.engine.nodeID) {
-				seen[pb.NodeID(subID)] = struct{}{}
-			}
-		}
+		inner.Range(func(id pb.NodeID, _ struct{}) bool {
+			seen[id] = struct{}{}
+			return true
+		})
 	}
-
 	result := make([]pb.NodeID, 0, len(seen))
 	for id := range seen {
 		result = append(result, id)
@@ -1208,6 +1425,7 @@ func (c *Context) emitSerializationEffect(key string) {
 func (c *Context) reset() {
 	clear(c.keys)
 	c.inTx = false
+	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }

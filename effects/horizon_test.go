@@ -44,10 +44,12 @@ func newHorizonTestEngine() *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
-	e.horizon = newHorizonSet(e, 500*time.Millisecond)
+	e.horizon = newHorizonSet(e)
 	return e
 }
 
@@ -84,6 +86,8 @@ func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
+		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	if e.horizon != nil {
@@ -101,27 +105,26 @@ func testBind(consumedTips []*pb.EffectRef, newTip *pb.EffectRef) *pb.Transactio
 	}
 }
 
+// Add registers a bind as invisible. The originator's flushTx will later
+// call MakeVisible or Abort.
 func TestHorizonSet_AddMakesInvisible(t *testing.T) {
 	e := newHorizonTestEngine()
-	fireTimer := installFakeTimers(e.horizon)
-	_ = fireTimer
 
 	bind := testBind(
 		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
 
 	if !e.horizon.IsInvisible("tx1") {
 		t.Fatal("tx1 should be invisible after Add")
 	}
 }
 
+// MakeVisible promotes the entry and cleans pendingTxTips.
 func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 	e := newHorizonTestEngine()
-	fireTimer := installFakeTimers(e.horizon)
-	_ = fireTimer
 
 	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
 
@@ -130,19 +133,106 @@ func TestHorizonSet_MakeVisibleRemovesEntry(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
 	e.horizon.MakeVisible("tx1")
 
 	if e.horizon.IsInvisible("tx1") {
 		t.Fatal("tx1 should be visible after MakeVisible")
 	}
-
 	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
 		t.Fatal("pendingTxTips should be cleaned after MakeVisible")
 	}
 }
 
-func TestHorizonSet_TimerFiresMakesVisible(t *testing.T) {
+// Abort removes the entry without making it visible.
+func TestHorizonSet_AbortRemovesEntryWithoutPromotion(t *testing.T) {
+	e := newHorizonTestEngine()
+
+	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
+
+	bind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 20},
+	)
+
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
+	e.horizon.Abort("tx1")
+
+	if e.horizon.IsInvisible("tx1") {
+		t.Fatal("tx1 should no longer be in the invisible set after Abort")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
+		t.Fatal("pendingTxTips should be cleaned after Abort")
+	}
+}
+
+// applySnapshotVerdicts promotes every txn named in the verdict map out
+// of horizon as soon as the originator's verdict snapshot arrives,
+// without waiting for the crash-fallback timer.
+func TestHorizonSet_VerdictSnapshotEndsWaitEarly(t *testing.T) {
+	e := newHorizonTestEngine()
+	installFakeTimers(e.horizon) // fake timer never fires
+
+	e.pendingTxTips.Store(Tip{1, 20}, []Tip{{1, 10}})
+	e.pendingTxTips.Store(Tip{1, 40}, []Tip{{1, 10}})
+
+	winnerBind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 20},
+	)
+	loserBind := testBind(
+		[]*pb.EffectRef{{NodeId: 1, Offset: 10}},
+		&pb.EffectRef{NodeId: 1, Offset: 40},
+	)
+
+	e.horizon.Add("winner", Tip{1, 30}, winnerBind)
+	e.horizon.Add("loser", Tip{1, 50}, loserBind)
+	e.horizon.ScheduleMakeVisible("winner", time.Hour)
+	e.horizon.ScheduleMakeVisible("loser", time.Hour)
+
+	if !e.horizon.IsInvisible("winner") || !e.horizon.IsInvisible("loser") {
+		t.Fatal("both txns should be invisible before snapshot arrives")
+	}
+
+	verdictEff := &pb.Effect{
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: map[string]pb.Verdict{
+				"winner": pb.Verdict_WON,
+				"loser":  pb.Verdict_LOST,
+			},
+		}},
+	}
+	e.applySnapshotVerdicts(verdictEff)
+
+	if e.horizon.IsInvisible("winner") {
+		t.Fatal("winner should be visible after verdict snapshot")
+	}
+	if e.horizon.IsInvisible("loser") {
+		t.Fatal("loser should be visible after verdict snapshot (DAG/snapshot will filter it on reconstruct)")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
+		t.Fatal("winner pendingTxTips should be cleaned after MakeVisible")
+	}
+	if _, ok := e.pendingTxTips.Load(Tip{1, 40}); ok {
+		t.Fatal("loser pendingTxTips should be cleaned after MakeVisible")
+	}
+}
+
+// applySnapshotVerdicts is a no-op when the txn isn't in horizon (e.g.,
+// snapshot arrives before its bind, or bind was already promoted).
+func TestHorizonSet_VerdictSnapshotIsIdempotent(t *testing.T) {
+	e := newHorizonTestEngine()
+
+	verdictEff := &pb.Effect{
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			TxnVerdicts: map[string]pb.Verdict{"unknown": pb.Verdict_WON},
+		}},
+	}
+	e.applySnapshotVerdicts(verdictEff) // must not panic
+}
+
+// ScheduleMakeVisible's timer fires MakeVisible (remote-arrival path).
+func TestHorizonSet_ScheduledTimerFiresMakesVisible(t *testing.T) {
 	e := newHorizonTestEngine()
 	fireTimer := installFakeTimers(e.horizon)
 
@@ -153,7 +243,8 @@ func TestHorizonSet_TimerFiresMakesVisible(t *testing.T) {
 		&pb.EffectRef{NodeId: 1, Offset: 20},
 	)
 
-	e.horizon.Add("tx1", Tip{1, 30}, bind, nil)
+	e.horizon.Add("tx1", Tip{1, 30}, bind)
+	e.horizon.ScheduleMakeVisible("tx1", 100*time.Millisecond)
 
 	if !e.horizon.IsInvisible("tx1") {
 		t.Fatal("tx1 should be invisible before timer fires")
@@ -164,7 +255,6 @@ func TestHorizonSet_TimerFiresMakesVisible(t *testing.T) {
 	if e.horizon.IsInvisible("tx1") {
 		t.Fatal("tx1 should be visible after timer fires")
 	}
-
 	if _, ok := e.pendingTxTips.Load(Tip{1, 20}); ok {
 		t.Fatal("pendingTxTips should be cleaned after timer fires")
 	}

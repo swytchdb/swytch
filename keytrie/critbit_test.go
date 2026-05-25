@@ -180,11 +180,11 @@ func TestCritbitBasicOperations(t *testing.T) {
 		t.Error("Expected delete to return false for non-existent key")
 	}
 
-	// Re-insert after delete (revive tombstone) — old must match current pointer
-	// After delete, the leaf still holds ts200 but is marked deleted.
-	// CAS with old=ts200 should work to revive it.
+	// Re-insert after delete (revive tombstone). Delete atomically clears
+	// tips to nil, so revival uses old=nil — matching what Contains
+	// returns for a deleted key. A stale non-nil old would fail.
 	ts300 := NewTipSet(r(300))
-	conflict, ok = c.Insert("foo", ts200, ts300)
+	conflict, ok = c.Insert("foo", nil, ts300)
 	if !ok {
 		t.Fatalf("Insert revive failed, conflict=%v", conflict)
 	}

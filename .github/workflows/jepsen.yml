@@ -84,7 +84,7 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Defaults
-          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","none-counter","none-set","none-sorted-set","none-elle-causal"]'
+          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","none-counter","none-set","none-sorted-set","none-elle-causal","attrition-counter"]'
           TIME_LIMIT=60
           JEPSEN_REF=main
           SINGLE_WORKLOAD=""
@@ -99,7 +99,7 @@ jobs:
           # Tokenize on whitespace (no quoting support — we don't need it)
           read -r -a tokens <<<"$rest"
 
-          valid_workloads='safe-counter safe-set safe-sorted-set none-counter none-set none-sorted-set none-elle-causal'
+          valid_workloads='safe-counter safe-set safe-sorted-set none-counter none-set none-sorted-set none-elle-causal attrition-counter'
 
           for tok in "${tokens[@]}"; do
             case "$tok" in
@@ -309,6 +309,7 @@ jobs:
             none-set)         N=none; W=set ;;
             none-sorted-set)  N=none; W=sorted-set ;;
             none-elle-causal) N=none; W=elle-causal ;;
+            attrition-counter) N=attrition; W=counter ;;
             *) echo "::error::unknown workload $WORKLOAD"; exit 1 ;;
           esac
           echo "nemesis=$N"  >>"$GITHUB_OUTPUT"

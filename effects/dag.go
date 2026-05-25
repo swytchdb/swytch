@@ -52,6 +52,13 @@ type dag struct {
 	visited     map[Tip]bool
 	nodes       map[Tip]*pb.Effect
 	lcaTip      Tip
+	// topoOrder is the post-order DFS sequence of every tip reached
+	// during phase 2, including tx-data effects that iterate filters
+	// out of the processor stream. Callers that need to propagate
+	// per-tip state along dependency edges (e.g. HorizonSet
+	// invisibility propagation in reconstruct) read this between
+	// prepare and iterate.
+	topoOrder []Tip
 }
 
 func newDag(engine *Engine, key string, activeTxnID string) *dag {
@@ -70,11 +77,25 @@ func newDag(engine *Engine, key string, activeTxnID string) *dag {
 // Transactional effects (non-empty TxnId, not a bind) are skipped from the
 // processor output but their deps are still followed. Bind effects appear
 // in the sequence as envelopes.
+//
+// walk is a convenience wrapper over prepare + iterate; callers that need
+// to inspect d.topoOrder between BFS and the processor loop should call
+// prepare and iterate explicitly.
 func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
+	if err := d.prepare(tips); err != nil {
+		return err
+	}
+	return d.iterate(func(_ Tip, eff *pb.Effect) error {
+		return processor(eff)
+	})
+}
+
+// prepare runs BFS + LCA trim and builds d.topoOrder. Safe to read
+// d.nodes and d.topoOrder after this returns successfully.
+func (d *dag) prepare(tips []Tip) error {
 	d.visited = make(map[Tip]bool, len(tips)*8)
 	d.nodes = make(map[Tip]*pb.Effect, len(tips)*8)
 
-	// Phase 1: BFS to discover LCA snapshot and collect all nodes.
 	if err := d.bfs(tips, &d.lcaTip); err != nil {
 		return err
 	}
@@ -83,16 +104,23 @@ func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
 		return nil
 	}
 
+	// Phase 1.5: trim nodes already folded into the LCA snapshot. BFS may
+	// have walked into the snapshot's dep chain (because the snapshot was
+	// dequeued with a non-empty queue, so it wasn't terminal at that point).
+	// Those nodes are already represented in the snapshot's reduced state;
+	// leaving them in d.nodes makes ReduceChain process the same data
+	// effects twice — duplicates in list reads, double-counts in scalars.
+	d.trimAncestorsOfLCA()
+
 	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		slog.Debug("dag.walk", "key", d.key, "nodes", len(d.nodes),
 			"lca", d.lcaTip, "encoded", d.encode(tips))
 	}
 
 	// Phase 2: topo-order via DFS post-order within collected nodes.
-	ordered := make([]*pb.Effect, 0, len(d.nodes))
+	d.topoOrder = make([]Tip, 0, len(d.nodes))
 	topoVisited := make(map[Tip]bool, len(d.nodes))
 
-	// Sort tips by fork choice hash for deterministic starting order
 	type pair struct {
 		tip Tip
 		eff *pb.Effect
@@ -110,21 +138,49 @@ func (d *dag) walk(tips []Tip, processor func(*pb.Effect) error) error {
 	}
 
 	for _, p := range sortedTips {
-		d.topoCollect(p.tip, topoVisited, &ordered)
+		d.topoCollect(p.tip, topoVisited)
 	}
+	return nil
+}
 
-	for _, eff := range ordered {
-		if err := processor(eff); err != nil {
-			return err
+// iterate calls processor for each emitted tip in d.topoOrder, filtering
+// out tx-data effects (TxnId != "", not a bind, not the active txn) and
+// non-LCA snapshots. Requires prepare to have run.
+func (d *dag) iterate(processor func(Tip, *pb.Effect) error) error {
+	for _, t := range d.topoOrder {
+		eff := d.nodes[t]
+		if d.shouldEmit(t, eff) {
+			if err := processor(t, eff); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// shouldEmit returns true iff the effect at tip t should be passed to
+// the processor. Non-LCA snapshots and tx-data from non-active txns
+// participate in dependency walking but are not emitted.
+func (d *dag) shouldEmit(t Tip, eff *pb.Effect) bool {
+	if eff.GetSnapshot() != nil {
+		return t == d.lcaTip
+	}
+	if eff.TxnId != "" && eff.GetTxnBind() == nil && eff.TxnId != d.activeTxnID {
+		return false
+	}
+	return true
 }
 
 // bfs explores the graph from tips following deps. A snapshot is the LCA
 // when either: (1) a dep we follow is already visited and is a snapshot
 // (paths converged), or (2) we dequeue a snapshot with an empty queue
 // (no concurrent paths). All visited nodes are stored in d.nodes.
+//
+// Only state-carrying snapshots terminate the walk. Verdict-only snapshots
+// (State == nil) are opaque markers for fork-choice adjudication; their
+// chain content is reachable only via their Deps, so we follow them like
+// any other effect. Treating them as LCAs would leave reconstruct with a
+// single dead-end tip and no way to recover the underlying chain.
 func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 	queue := make([]Tip, 0, len(tips)*2)
 
@@ -144,7 +200,7 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 
 		eff := d.nodes[cur]
 
-		if eff.GetSnapshot() != nil && len(queue) == 0 {
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
 			*lcaTip = cur
 			return nil
 		}
@@ -178,11 +234,67 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 	return nil
 }
 
-// topoCollect does a post-order DFS within the collected nodes, producing
-// causal order (roots/snapshot first, tips last). At forks, deps are visited
-// in fork choice hash order. Txn effects are skipped from output.
-// Only the LCA snapshot is emitted; other snapshots are walked through.
-func (d *dag) topoCollect(t Tip, visited map[Tip]bool, ordered *[]*pb.Effect) {
+// trimAncestorsOfLCA removes from d.nodes every node in the transitive
+// dep-ancestry of the LCA snapshot. Those nodes' state is already folded
+// into the snapshot's reduced effect; including them in ReduceChain would
+// double-count their data effects (the symptom is duplicate elements in
+// a list-append read).
+//
+// Only nodes already in d.nodes are removed — we don't fetch additional
+// effects from the engine. The bfs that populated d.nodes is the only
+// source of folded-ancestor entries we need to clear.
+func (d *dag) trimAncestorsOfLCA() {
+	var zero Tip
+	if d.lcaTip == zero {
+		return
+	}
+	lcaEff, ok := d.nodes[d.lcaTip]
+	if !ok || lcaEff.GetSnapshot() == nil {
+		return
+	}
+	folded := make(map[Tip]struct{})
+	stack := make([]Tip, 0, len(lcaEff.Deps))
+	for _, dep := range lcaEff.Deps {
+		stack = append(stack, r(dep))
+	}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, seen := folded[cur]; seen {
+			continue
+		}
+		folded[cur] = struct{}{}
+		eff, ok := d.nodes[cur]
+		if !ok {
+			continue
+		}
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == d.key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.Deps
+		}
+		for _, dep := range refs {
+			stack = append(stack, r(dep))
+		}
+	}
+	for t := range folded {
+		delete(d.nodes, t)
+		delete(d.visited, t)
+	}
+}
+
+// topoCollect does a post-order DFS within the collected nodes, recording
+// every visited tip into d.topoOrder. At forks, deps are visited in fork
+// choice hash order. Filtering (tx-data effects, non-LCA snapshots) is
+// applied by iterate, not here — d.topoOrder is the complete causal order
+// of visited tips so callers can propagate per-tip state along dep edges.
+func (d *dag) topoCollect(t Tip, visited map[Tip]bool) {
 	if visited[t] {
 		return
 	}
@@ -193,9 +305,9 @@ func (d *dag) topoCollect(t Tip, visited map[Tip]bool, ordered *[]*pb.Effect) {
 		return
 	}
 
-	// LCA snapshot: emit as seed and don't descend past it
+	// LCA snapshot: record and don't descend past it
 	if eff.GetSnapshot() != nil && t == d.lcaTip {
-		*ordered = append(*ordered, eff)
+		d.topoOrder = append(d.topoOrder, t)
 		return
 	}
 
@@ -230,21 +342,11 @@ func (d *dag) topoCollect(t Tip, visited map[Tip]bool, ordered *[]*pb.Effect) {
 			})
 		}
 		for _, dep := range deps {
-			d.topoCollect(dep.tip, visited, ordered)
+			d.topoCollect(dep.tip, visited)
 		}
 	}
 
-	// Skip non-LCA snapshots from output (walked through for deps only)
-	if eff.GetSnapshot() != nil {
-		return
-	}
-
-	// Skip transactional effects from output
-	if eff.TxnId != "" && eff.GetTxnBind() == nil && eff.TxnId != d.activeTxnID {
-		return
-	}
-
-	*ordered = append(*ordered, eff)
+	d.topoOrder = append(d.topoOrder, t)
 }
 
 // encode produces a compact string encoding of the collected dag nodes.

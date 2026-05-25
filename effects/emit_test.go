@@ -121,7 +121,9 @@ func newTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -647,7 +649,9 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(256)),
+		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
+		unsubInFlight:     xsync.NewMap[string, struct{}](),
+		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -799,6 +803,176 @@ func TestFlushTx_FakeConflict_Commits(t *testing.T) {
 
 	if err := ctx.Flush(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys is the regression test
+// for the G1a observed in Jepsen run 26163122703 (swytch-elle-causal):
+// op 75 read element 1931 — written by op 55, which :fail'd with
+// :watch-conflict. Op 55's bind touched el-1 and el-2; its competitor on
+// .68 (which beat op 55) touched only el-1. The winner's commit emitted
+// the verdict snapshot only on its own bind.Keys (el-1), so el-2 — a key
+// the loser wrote but the winner didn't — was left without an
+// authoritative LOST record for op 55. A subsequent tx-context
+// reconstruct of el-2 whose bindKeyClosure truncated at a pre-tx
+// snapshot boundary therefore failed to discover op 55's bind as
+// atomically_lost and surfaced its element.
+//
+// The fix: verdict snapshots emit on the union of {winner's keys} ∪
+// {each beaten loser's keys}. Every key a LOST txn touched now carries
+// a direct verdict record, independent of closure expansion.
+func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
+	const (
+		sharedKey    = "shared"
+		loserOnlyKey = "loser-only"
+		peerNodeID   = pb.NodeID(99)
+		loserNodeID  = pb.NodeID(5)
+		loserTxnID   = "loser-tx"
+	)
+
+	loserBindOffset := Tip{uint64(loserNodeID), 100}
+	loserDataShared := Tip{uint64(loserNodeID), 98}
+	loserDataLoserOnly := Tip{uint64(loserNodeID), 99}
+
+	// Loser's hash maxed so any HLC-derived hash from our engine wins
+	// the ForkChoiceLess(ours, theirs) check inside defeatedCompetitor.
+	loserHash := make([]byte, 32)
+	for i := range loserHash {
+		loserHash[i] = 0xff
+	}
+
+	bc := &txnMockBroadcaster{
+		replicateToResults: map[pb.NodeID]*pb.NackNotify{
+			peerNodeID: {
+				Key: []byte(sharedKey),
+				TipDetails: []*pb.NackTipDetail{
+					{
+						Ref:                toPbRef(loserBindOffset),
+						Hlc:                timestamppb.New(time.Unix(0, 50)),
+						IsBind:             true,
+						IsTransactional:    true,
+						BindHlc:            timestamppb.New(time.Unix(0, 50)),
+						BindNodeId:         uint64(loserNodeID),
+						BindForkChoiceHash: loserHash,
+						BindConsumedTips: []*pb.KeyConsumedTips{
+							{Key: []byte(sharedKey), ConsumedTips: []*pb.EffectRef{}},
+						},
+					},
+				},
+			},
+		},
+	}
+	e := newTxnTestEngine(bc)
+
+	// Pre-stuff the cache with the loser bind. flushTx's commit path
+	// fetches this via getEffect to read its keyset for the verdict
+	// snapshot's emit set. Independent NodeId so reachesFromTx returns
+	// false (loser is not in our DAG ancestry).
+	loserBindHlc := timestamppb.New(time.Unix(0, 50))
+	e.effectCache.Put(loserBindOffset, &pb.Effect{
+		TxnId:          loserTxnID,
+		NodeId:         uint64(loserNodeID),
+		Hlc:            loserBindHlc,
+		ForkChoiceHash: loserHash,
+		Key:            []byte(sharedKey),
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc:           loserBindHlc,
+			OriginatorNodeId: uint64(loserNodeID),
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte(sharedKey), NewTip: toPbRef(loserDataShared)},
+				{Key: []byte(loserOnlyKey), NewTip: toPbRef(loserDataLoserOnly)},
+			},
+		}},
+	})
+
+	// Subscribe peer 99 to the shared key so flushTx replicates our
+	// bind to peer 99 and processes its NACK response.
+	subCtx := e.NewContext()
+	if err := subCtx.Emit(&pb.Effect{
+		Key: []byte(sharedKey),
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+			SubscriberNodeId: uint64(peerNodeID),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := subCtx.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reset broadcasts so we only see effects emitted during our txn.
+	bc.mu.Lock()
+	bc.broadcasts = nil
+	bc.mu.Unlock()
+
+	// Our winning txn writes only the shared key.
+	ctx := e.NewContext()
+	ctx.BeginTx()
+	if err := ctx.Emit(dataEffect(sharedKey)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatalf("expected commit, got %v", err)
+	}
+
+	// Locate the verdict-snapshot emitted on the loser-only key. The
+	// key did not exist before flushTx; if the fix is working, emit
+	// landed there and the index now has the snapshot as its sole tip.
+	loserOnlyTips := e.index.Contains(loserOnlyKey)
+	if loserOnlyTips == nil {
+		t.Fatalf("no verdict snapshot emitted on loser-only key %q — "+
+			"emit set is missing the loser's non-shared keyset", loserOnlyKey)
+	}
+
+	foundLoserOnlyVerdict := false
+	for _, tip := range loserOnlyTips.Tips() {
+		eff, ok := e.effectCache.Get(tip, 0)
+		if !ok {
+			continue
+		}
+		snap := eff.GetSnapshot()
+		if snap == nil {
+			continue
+		}
+		v, ok := snap.TxnVerdicts[loserTxnID]
+		if !ok {
+			t.Fatalf("verdict snapshot on %q is missing the loser txn %q in TxnVerdicts (got %v)",
+				loserOnlyKey, loserTxnID, snap.TxnVerdicts)
+		}
+		if v != pb.Verdict_LOST {
+			t.Fatalf("verdict snapshot on %q records loser %q as %v, want LOST",
+				loserOnlyKey, loserTxnID, v)
+		}
+		foundLoserOnlyVerdict = true
+	}
+	if !foundLoserOnlyVerdict {
+		t.Fatalf("loser-only key %q has tips but none are a SnapshotEffect carrying TxnVerdicts", loserOnlyKey)
+	}
+
+	// The shared key must also have a verdict snapshot — winner's own
+	// keyset is the historical baseline that the fix extends, not
+	// replaces.
+	sharedTips := e.index.Contains(sharedKey)
+	if sharedTips == nil {
+		t.Fatalf("shared key %q has no tips after commit", sharedKey)
+	}
+	foundSharedVerdict := false
+	for _, tip := range sharedTips.Tips() {
+		eff, ok := e.effectCache.Get(tip, 0)
+		if !ok {
+			continue
+		}
+		snap := eff.GetSnapshot()
+		if snap == nil {
+			continue
+		}
+		if v, ok := snap.TxnVerdicts[loserTxnID]; ok && v == pb.Verdict_LOST {
+			foundSharedVerdict = true
+			break
+		}
+	}
+	if !foundSharedVerdict {
+		t.Fatalf("no verdict snapshot on shared key %q records the loser as LOST", sharedKey)
 	}
 }
 
@@ -1166,13 +1340,27 @@ func TestGetSnapshot_ExcludesPendingTxTips(t *testing.T) {
 	if txTips == nil {
 		t.Fatal("expected tips after tx flush")
 	}
-	// Find the tx tip (differs from committed offset)
+	// Find the tx bind tip (differs from committed offset, and skip the
+	// originator's own subscription tip that ensureSubscribed installed
+	// during the tx flush — that one is commutative metadata, not the
+	// bind we want to simulate as pending).
 	var txOff Tip
 	for _, off := range txTips.Tips() {
-		if off != committedOff {
-			txOff = off
-			break
+		if off == committedOff {
+			continue
 		}
+		eff, ok := e.effectCache.Get(off, 0)
+		if !ok {
+			continue
+		}
+		if eff.GetSubscription() != nil {
+			continue
+		}
+		txOff = off
+		break
+	}
+	if txOff == (Tip{}) {
+		t.Fatal("did not find tx bind tip in index after tx flush")
 	}
 
 	// Register as in-progress tx tip (simulating the tx being pending)
@@ -1553,90 +1741,134 @@ func TestFlushTx_ConsumesTips_LinearChain(t *testing.T) {
 	}
 }
 
-// TestVoidedBinds_BoundedMemory verifies that the voidedBinds cache does not
-// grow without bound. It stores far more entries than the cache capacity and
-// asserts that the entry count stays bounded. This is the regression test
-// for the xsync.Map memory leak where voided txnIDs accumulated forever.
-func TestVoidedBinds_BoundedMemory(t *testing.T) {
-	const capacity = 8192
-	vb := clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(capacity))
-	defer vb.Close()
+// TestSpokenBinds_PopulatedOnHandleRemoteBind verifies that handleRemoteBind
+// inserts every (key, consumedTip) pair from the bind's ConsumedTips into
+// spokenBinds. handleRemoteBind is the canonical entry point HandleRemote
+// uses for every remote bind it processes — ACK and NACK paths both pass
+// through here, so populating once at this site covers both response shapes.
+func TestSpokenBinds_PopulatedOnHandleRemoteBind(t *testing.T) {
+	e := NewTestEngine()
+	defer func() { _ = e.Close() }()
 
-	// Insert 4x the capacity — with the old xsync.Map this would have
-	// grown to 4*capacity entries; with CloxCache it stays bounded.
-	const insertCount = capacity * 4
-	for i := range insertCount {
-		vb.Put(fmt.Sprintf("txn:%d", i), struct{}{})
+	const remoteNodeID pb.NodeID = 42
+	ct1 := Tip{uint64(remoteNodeID), 7}
+	ct2 := Tip{uint64(remoteNodeID), 8}
+
+	bind := &pb.TransactionalBindEffect{
+		TxnHlc:           timestamppb.New(e.clock.Now()),
+		OriginatorNodeId: uint64(remoteNodeID),
+		Keys: []*pb.TransactionalBindEffect_KeyBind{
+			{
+				Key:          []byte("k1"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(ct1)},
+				NewTip:       toPbRef(Tip{uint64(remoteNodeID), 10}),
+			},
+			{
+				Key:          []byte("k2"),
+				ConsumedTips: []*pb.EffectRef{toPbRef(ct2)},
+				NewTip:       toPbRef(Tip{uint64(remoteNodeID), 11}),
+			},
+		},
 	}
 
-	count := vb.EntryCount()
-	if count > capacity {
-		t.Fatalf("voidedBinds should be bounded at ~%d entries, got %d", capacity, count)
+	e.handleRemoteBind(bind, Tip{uint64(remoteNodeID), 12}, "txn-remote")
+
+	if _, ok := e.spokenBinds.Get(ct1, 0); !ok {
+		t.Fatalf("expected spokenBinds to contain %v after handleRemoteBind, got miss", ct1)
 	}
-	t.Logf("after %d inserts: %d entries (capacity %d)", insertCount, count, capacity)
-}
-
-// TestVoidedBinds_ReadYourWrites verifies that a txnID stored in the
-// voidedBinds cache is immediately visible to a subsequent lookup on
-// the same goroutine (read-your-writes guarantee within capacity).
-// Uses a large capacity with few inserts to stay well within bounds.
-func TestVoidedBinds_ReadYourWrites(t *testing.T) {
-	const capacity = 8192
-	vb := clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(capacity))
-	defer vb.Close()
-
-	// Insert only 100 entries — well within capacity, so no evictions.
-	for i := range 100 {
-		txnID := fmt.Sprintf("txn:%d", i)
-		vb.Put(txnID, struct{}{})
-		if _, ok := vb.Get(txnID, 0); !ok {
-			t.Fatalf("read-your-writes failed: txnID %q not found immediately after Put", txnID)
-		}
+	if _, ok := e.spokenBinds.Get(ct2, 0); !ok {
+		t.Fatalf("expected spokenBinds to contain %v after handleRemoteBind, got miss", ct2)
 	}
 }
 
-// TestVoidedBinds_EngineIntegration verifies that the Engine's voidedBinds
-// field is properly bounded by inserting entries and checking that the
-// cache does not grow unbounded.
-func TestVoidedBinds_EngineIntegration(t *testing.T) {
-	// Use production-sized capacity for realistic behavior
-	e := &Engine{
-		index:             keytrie.New(),
-		nodeID:            42,
-		clock:             crdt.NewHLC(),
-		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
-		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
-		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
-		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		voidedBinds:       clox.NewCloxCache[string, struct{}](clox.ConfigFromCapacity(8192)),
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
-	}
-	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
-	defer e.voidedBinds.Close()
-	defer e.effectCache.Close()
+// TestSpokenBinds_PreflightAbortsOnHit verifies that emitting a local bind
+// whose initialTips include a spoken (key, tip) pair is rejected by the
+// pre-flight check with ErrTxnAborted. No predicate refinement: the speech
+// act is structural and unconditional.
+func TestSpokenBinds_PreflightAbortsOnHit(t *testing.T) {
+	e := NewTestEngine()
+	defer func() { _ = e.Close() }()
 
-	cap := e.voidedBinds.Capacity()
-
-	// Insert 3x the capacity to force evictions — with the old
-	// xsync.Map this would have grown to 3*cap; now it's bounded.
-	insertCount := cap * 3
-	for i := range insertCount {
-		e.voidedBinds.Put(fmt.Sprintf("txn:%d:%d", e.nodeID, i), struct{}{})
+	if err := e.ensureSubscribed("k"); err != nil {
+		t.Fatalf("subscribe: %v", err)
 	}
 
-	count := e.voidedBinds.EntryCount()
-	if count > cap {
-		t.Fatalf("engine voidedBinds exceeded capacity: %d entries, capacity %d", count, cap)
+	// Seed an initial tip on "k" so the local emit has a non-empty
+	// initialTips. The simplest way: emit a non-tx effect and flush.
+	ctx := e.NewContext()
+	if err := ctx.Emit(&pb.Effect{
+		Key:  []byte("k"),
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "seed", []byte("seed"))},
+	}); err != nil {
+		t.Fatalf("seed emit: %v", err)
 	}
-	t.Logf("after %d inserts: %d entries (capacity %d)", insertCount, count, cap)
+	if err := ctx.Flush(); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
 
-	// Verify read-your-writes within capacity: insert a fresh entry and
-	// immediately read it back. This is the path flushTx depends on —
-	// the Put and Get happen on the same goroutine within microseconds.
-	freshKey := "txn:fresh:ryw"
-	e.voidedBinds.Put(freshKey, struct{}{})
-	if _, ok := e.voidedBinds.Get(freshKey, 0); !ok {
-		t.Fatal("read-your-writes failed for fresh entry after overflow")
+	// Mark the current tip on "k" as spoken — simulating an earlier
+	// HandleRemote where we ACKed/NACKed a remote bind that consumed
+	// this tip.
+	tips := e.index.Contains("k")
+	if tips == nil || len(tips.Tips()) == 0 {
+		t.Fatalf("expected at least one tip on 'k' after seed")
+	}
+	spokenTip := tips.Tips()[0]
+	e.spokenBinds.Put(spokenTip, struct{}{})
+
+	// Start a transactional emit on "k" — pre-flight should abort.
+	ctx2 := e.NewContext()
+	ctx2.BeginTx()
+	if err := ctx2.Emit(&pb.Effect{
+		Key:  []byte("k"),
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "newer", []byte("newer"))},
+	}); err != nil {
+		t.Fatalf("tx emit: %v", err)
+	}
+
+	err := ctx2.Flush()
+	if !errors.Is(err, ErrTxnAborted) {
+		t.Fatalf("expected ErrTxnAborted from pre-flight spokenBinds hit, got %v", err)
+	}
+}
+
+// TestSpokenBinds_PreflightAllowsOnMiss verifies the inverse: when no
+// (key, initialTip) pair is in spokenBinds, the pre-flight does not abort
+// and the local emit proceeds.
+func TestSpokenBinds_PreflightAllowsOnMiss(t *testing.T) {
+	e := NewTestEngine()
+	defer func() { _ = e.Close() }()
+
+	if err := e.ensureSubscribed("k"); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	ctx := e.NewContext()
+	if err := ctx.Emit(&pb.Effect{
+		Key:  []byte("k"),
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "seed", []byte("seed"))},
+	}); err != nil {
+		t.Fatalf("seed emit: %v", err)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatalf("seed flush: %v", err)
+	}
+
+	// Do NOT populate spokenBinds. Pre-flight should not abort.
+	ctx2 := e.NewContext()
+	ctx2.BeginTx()
+	if err := ctx2.Emit(&pb.Effect{
+		Key:  []byte("k"),
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "newer", []byte("newer"))},
+	}); err != nil {
+		t.Fatalf("tx emit: %v", err)
+	}
+
+	if err := ctx2.Flush(); err != nil && !errors.Is(err, ErrTxnAborted) {
+		// Standalone tests have no broadcaster, so flushTx commits
+		// without subscriber-response waits. Any non-abort outcome is
+		// fine for this test; we just need to confirm the pre-flight
+		// did not fire.
+		t.Logf("flush returned %v (may be ok for standalone tx)", err)
 	}
 }

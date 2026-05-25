@@ -677,3 +677,175 @@ func TestCloxCacheArrayKey(t *testing.T) {
 		t.Fatalf("Wrong value after update: got %q, want %q", got, "updated")
 	}
 }
+
+// TestCloxCacheEvictDeciderSkipsPinned verifies that a key the decider
+// refuses to evict survives memory pressure: it stays in the cache while
+// unpinned siblings are evicted to make room for new writes. Uses
+// [2]uint64 keys to match production usage of the effects engine cache.
+func TestCloxCacheEvictDeciderSkipsPinned(t *testing.T) {
+	cfg := Config{
+		NumShards:     1,
+		SlotsPerShard: 8,
+		CollectStats:  true,
+	}
+	cache := NewCloxCache[[2]uint64, int](cfg)
+	defer cache.Close()
+
+	// Pin any key whose first word is 1 (treat as "membership").
+	pinned := [2]uint64{1, 99}
+	cache.SetEvictDecider(func(key [2]uint64, _ int) bool {
+		return key[0] != 1
+	})
+
+	// Seed the pinned entry and bump frequency so the protected-freq
+	// fallback would also try to evict it — the decider must override.
+	cache.Put(pinned, 42)
+	for range 5 {
+		_, _ = cache.Get(pinned, 0)
+	}
+
+	// Fill the cache with unpinned entries until evictions start.
+	for i := range uint64(200) {
+		cache.Put([2]uint64{2, i}, int(i))
+	}
+
+	if _, ok := cache.Get(pinned, 0); !ok {
+		t.Fatal("pinned key was evicted; decider veto did not hold")
+	}
+
+	_, _, evictions := cache.Stats()
+	if evictions == 0 {
+		t.Fatal("expected evictions on unpinned keys; got 0")
+	}
+}
+
+// TestCloxCacheEvictNotifyFires verifies that the post-eviction
+// callback receives the key + value of each evicted entry. Used by
+// the engine to drop the corresponding key from its index and
+// broadcast a cluster-wide unsubscribe.
+func TestCloxCacheEvictNotifyFires(t *testing.T) {
+	cfg := Config{
+		NumShards:     1,
+		SlotsPerShard: 8,
+		CollectStats:  true,
+	}
+	cache := NewCloxCache[[2]uint64, int](cfg)
+	defer cache.Close()
+
+	var mu sync.Mutex
+	evicted := map[[2]uint64]int{}
+	cache.SetEvictNotify(func(key [2]uint64, value int) {
+		mu.Lock()
+		evicted[key] = value
+		mu.Unlock()
+	})
+
+	// Force evictions by overfilling.
+	for i := range uint64(200) {
+		cache.Put([2]uint64{2, i}, int(i))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(evicted) == 0 {
+		t.Fatal("evictNotify was never called; expected at least one eviction")
+	}
+	// Spot-check: every notified value matches the key's intended int.
+	for k, v := range evicted {
+		if int(k[1]) != v {
+			t.Fatalf("evictNotify mismatch: key %v reported value %d", k, v)
+		}
+	}
+}
+
+// TestCloxCacheEvictPartialSweepExtends reproduces the
+// pin-pressure-in-the-sweep-window bug: with the default partial
+// sweep, the chosen window can happen to contain only pinned entries
+// even when evictable entries exist elsewhere in the shard. The
+// previous behavior returned victim==nil and Put returned false,
+// stranding the new key (the effect-cache callers ignore the false
+// return and index the effect with no cached bytes). The fix extends
+// the scan across remaining slots when the partial sweep is empty;
+// every Put against a shard that holds at least one unpinned entry
+// must succeed.
+func TestCloxCacheEvictPartialSweepExtends(t *testing.T) {
+	cfg := Config{
+		NumShards:     1,
+		SlotsPerShard: 64,
+		Capacity:      64,
+		SweepPercent:  2, // maxScan = max(64*2/100, 1) = 1 slot
+		CollectStats:  true,
+	}
+	cache := NewCloxCache[[2]uint64, int](cfg)
+	defer cache.Close()
+
+	cache.SetEvictDecider(func(key [2]uint64, _ int) bool { return key[0] != 1 })
+
+	for i := range uint64(60) {
+		if ok, _, _, _ := cache.Put([2]uint64{1, i}, int(i)); !ok {
+			t.Fatalf("seed pinned {1,%d}: Put returned !ok", i)
+		}
+	}
+	for i := range uint64(4) {
+		if ok, _, _, _ := cache.Put([2]uint64{2, i}, int(i)); !ok {
+			t.Fatalf("seed unpinned {2,%d}: Put returned !ok", i)
+		}
+	}
+
+	// With a 1-slot sweep window and 4 unpinned entries spread across
+	// 64 slots, the partial sweep frequently lands on a pinned slot.
+	// Pre-fix this leaves victim==nil and Put fails; post-fix the
+	// fallback scan finds one of the unpinned entries and Put succeeds.
+	for i := uint64(100); i < 200; i++ {
+		ok, _, _, _ := cache.Put([2]uint64{2, i}, int(i))
+		if !ok {
+			t.Fatalf("Put {2,%d} failed despite unpinned entries in the shard", i)
+		}
+	}
+}
+
+// TestCloxCacheEvictDeciderAllPinnedRefusesEviction verifies the
+// "every candidate pinned" path: when nothing in a sweep is evictable,
+// the cache returns success=false from Put rather than evicting a
+// pinned entry. Cache stays at capacity, no spurious evictions.
+func TestCloxCacheEvictDeciderAllPinnedRefusesEviction(t *testing.T) {
+	cfg := Config{
+		NumShards:     1,
+		SlotsPerShard: 4, // tiny — fills fast
+		Capacity:      4,
+		CollectStats:  true,
+		SweepPercent:  100, // scan the whole shard every eviction
+	}
+	cache := NewCloxCache[[2]uint64, int](cfg)
+	defer cache.Close()
+
+	// Pin everything.
+	cache.SetEvictDecider(func(_ [2]uint64, _ int) bool { return false })
+
+	// Fill to capacity.
+	for i := range uint64(4) {
+		ok, _, _, _ := cache.Put([2]uint64{0, i}, int(i))
+		if !ok {
+			t.Fatalf("initial fill: Put {0,%d} returned !ok", i)
+		}
+	}
+
+	// Try to insert beyond capacity. Eviction can't pick a victim →
+	// Put returns success=false.
+	ok, _, _, _ := cache.Put([2]uint64{0, 999}, 999)
+	if ok {
+		t.Fatal("Put succeeded despite every entry being pinned")
+	}
+
+	_, _, evictions := cache.Stats()
+	if evictions != 0 {
+		t.Fatalf("expected 0 evictions while all entries pinned; got %d", evictions)
+	}
+
+	// All original entries are still present.
+	for i := range uint64(4) {
+		if _, found := cache.Get([2]uint64{0, i}, 0); !found {
+			t.Fatalf("pinned entry {0,%d} was evicted", i)
+		}
+	}
+}

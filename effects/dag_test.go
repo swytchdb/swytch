@@ -177,7 +177,7 @@ func TestOrdered_StableUnderGrowth(t *testing.T) {
 	c := orderedAppend(log, 30, 1, "id-c", []byte("c"), b)
 
 	// Initial: linear [a, b, c]
-	r1, _, err := e.reconstruct("k", []Tip{c})
+	r1, _, err := e.reconstruct("k", []Tip{c}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestOrdered_StableUnderGrowth(t *testing.T) {
 	ee := orderedAppend(log, 25, 3, "id-e", []byte("e"), d)
 
 	// Grown: same effects plus concurrent branch, tips = [c, ee]
-	r2, _, err := e.reconstruct("k", []Tip{c, ee})
+	r2, _, err := e.reconstruct("k", []Tip{c, ee}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

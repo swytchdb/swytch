@@ -2002,15 +2002,14 @@ func runRMW(engine *effects.Engine, label string, body func(*effects.Context) er
 		// two concurrent runRMW calls on overlapping keys can both
 		// pass checkCompetingBinds (each sees only the other's
 		// pre-bind DATA tip, not a bind) and both emit binds; the
-		// loser is only caught by the post-evaluateBindForkChoice
-		// voidedBinds check in flushTx, AFTER one has already
-		// returned success to the caller on the winner side. Redis
-		// avoids this by locking the first key around runner +
-		// Flush in its handler (redis/handler.go around line 514);
-		// SQL does the same here, covering every key the tx
-		// touches. Locks are taken in sorted order to avoid
-		// deadlock when two multi-key txs overlap on a subset of
-		// keys.
+		// loser is only caught at flushTx's evaluateBindForkChoice
+		// AFTER one has already returned success to the caller on
+		// the winner side. Redis avoids this by locking the first
+		// key around runner + Flush in its handler
+		// (redis/handler.go around line 514); SQL does the same
+		// here, covering every key the tx touches. Locks are taken
+		// in sorted order to avoid deadlock when two multi-key txs
+		// overlap on a subset of keys.
 		unlock := lockEngineKeys(engine, ectx.PendingKeys())
 		err := ectx.Flush()
 		unlock()
