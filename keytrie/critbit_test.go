@@ -28,6 +28,7 @@ package keytrie
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -1945,4 +1946,189 @@ func TestCritbitRemoveTipsBinaryKeys(t *testing.T) {
 	c.Insert("\x80", nil, NewTipSet(r(5)))
 	c.Delete("\x80")
 	c.RemoveTips("\x80", []EffectRef{r(5)})
+}
+
+// --- Reaper tests ---
+
+func TestReap_EmptyTree(t *testing.T) {
+	c := NewCritbit()
+	if n := c.reap(); n != 0 {
+		t.Fatalf("expected 0 reaped from empty tree, got %d", n)
+	}
+}
+
+func TestReap_SingleDeletedRoot(t *testing.T) {
+	c := NewCritbit()
+	c.Insert("a", nil, NewTipSet(r(1)))
+	c.Delete("a")
+	// Delete triggers auto-reap; wait for the goroutine to finish
+	for c.reapRunning.Load() {
+		runtime.Gosched()
+	}
+	if c.root.Load() != nil {
+		t.Fatal("root should be nil after auto-reap of single deleted leaf")
+	}
+}
+
+func TestReap_SingleLiveRoot(t *testing.T) {
+	c := NewCritbit()
+	c.Insert("a", nil, NewTipSet(r(1)))
+	if n := c.reap(); n != 0 {
+		t.Fatalf("expected 0 reaped from live root, got %d", n)
+	}
+	if c.Contains("a") == nil {
+		t.Fatal("live key should still exist")
+	}
+}
+
+func TestReap_UnlinksDeletedLeaf(t *testing.T) {
+	c := NewCritbit()
+	c.Insert("a", nil, NewTipSet(r(1)))
+	c.Insert("b", nil, NewTipSet(r(2)))
+	c.Delete("a")
+
+	if n := c.reap(); n != 1 {
+		t.Fatalf("expected 1 reaped, got %d", n)
+	}
+
+	if c.Contains("b") == nil {
+		t.Fatal("live key 'b' should survive reap")
+	}
+	if c.Contains("a") != nil {
+		t.Fatal("deleted key 'a' should not be reachable after reap")
+	}
+}
+
+func TestReap_PreservesAllLiveKeys(t *testing.T) {
+	c := NewCritbit()
+	for i := range 100 {
+		c.Insert(fmt.Sprintf("key-%03d", i), nil, NewTipSet(r(uint64(i))))
+	}
+	// Delete every other key
+	for i := 0; i < 100; i += 2 {
+		c.Delete(fmt.Sprintf("key-%03d", i))
+	}
+
+	for c.reap() > 0 {
+	}
+
+	// Verify all odd keys survive
+	for i := 1; i < 100; i += 2 {
+		key := fmt.Sprintf("key-%03d", i)
+		if c.Contains(key) == nil {
+			t.Errorf("live key %q missing after reap", key)
+		}
+	}
+	// Verify all even keys are gone
+	for i := 0; i < 100; i += 2 {
+		key := fmt.Sprintf("key-%03d", i)
+		if c.Contains(key) != nil {
+			t.Errorf("deleted key %q still reachable after reap", key)
+		}
+	}
+	if c.Size() != 50 {
+		t.Errorf("expected size 50, got %d", c.Size())
+	}
+}
+
+func TestReap_MultiplePassesNeeded(t *testing.T) {
+	c := NewCritbit()
+	for i := range 20 {
+		c.Insert(fmt.Sprintf("k%02d", i), nil, NewTipSet(r(uint64(i))))
+	}
+	// Delete all but one — auto-reap fires from DeleteAndSnapshot
+	for i := range 19 {
+		c.Delete(fmt.Sprintf("k%02d", i))
+	}
+
+	// Wait for auto-reap goroutine to finish
+	for c.reapRunning.Load() {
+		runtime.Gosched()
+	}
+
+	if c.Contains("k19") == nil {
+		t.Fatal("sole survivor k19 should still exist")
+	}
+	if c.Size() != 1 {
+		t.Errorf("expected size 1, got %d", c.Size())
+	}
+}
+
+func TestReap_ReinsertAfterReap(t *testing.T) {
+	c := NewCritbit()
+	c.Insert("a", nil, NewTipSet(r(1)))
+	c.Insert("b", nil, NewTipSet(r(2)))
+	c.Delete("a")
+
+	for c.reap() > 0 {
+	}
+
+	// Re-insert the deleted key
+	c.Insert("a", nil, NewTipSet(r(10)))
+	ts := c.Contains("a")
+	if ts == nil {
+		t.Fatal("re-inserted key should exist")
+	}
+	if ts.Tips()[0] != r(10) {
+		t.Fatalf("expected tip r(10), got %v", ts.Tips()[0])
+	}
+}
+
+func TestReap_ConcurrentInsertAndReap(t *testing.T) {
+	c := NewCritbit()
+
+	// Pre-populate
+	for i := range 1000 {
+		c.Insert(fmt.Sprintf("k%04d", i), nil, NewTipSet(r(uint64(i))))
+	}
+
+	var wg sync.WaitGroup
+
+	// Writer goroutine: continuously insert/delete
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := range 200 {
+			key := fmt.Sprintf("k%04d", round%1000)
+			c.Delete(key)
+			c.Insert(key, nil, NewTipSet(r(uint64(round+10000))))
+		}
+	}()
+
+	// Reaper goroutine: continuously reap
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			c.reap()
+		}
+	}()
+
+	// Reader goroutine: continuously read
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			for i := range 100 {
+				c.Contains(fmt.Sprintf("k%04d", i))
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Wait for any in-flight auto-reap to complete
+	for c.reapRunning.Load() {
+		runtime.Gosched()
+	}
+
+	// Tree should still be valid — no panics, all surviving keys accessible
+	count := int64(0)
+	c.Range(func(key string) bool {
+		count++
+		return true
+	})
+	if count != c.Size() {
+		t.Errorf("Range count %d != Size %d", count, c.Size())
+	}
 }

@@ -29,6 +29,8 @@ package keytrie
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 const (
@@ -62,8 +64,17 @@ type Critbit struct {
 	size   atomic.Int64
 	closed atomic.Bool
 
+	deletedCount atomic.Int64 // deleted-but-linked leaves still in the tree
+	reapRunning  atomic.Bool  // prevents concurrent reap goroutines
+
 	initOnce sync.Once
 	arena    critbitArena[critNode]
+
+	// reapMu coordinates structural modifications. Inserts take a
+	// read-lock (concurrent inserts proceed in parallel). The reaper
+	// takes a write-lock so no insert can be mid-CAS on a child
+	// pointer while the reaper unlinks a subtree.
+	reapMu xsync.RBMutex
 }
 
 func NewCritbit() *Critbit {
@@ -152,6 +163,7 @@ func (c *Critbit) allocInternalNode(bytePos uint32, otherbits uint8) *critNode {
 	return n
 }
 
+
 func highestBit(b byte) uint8 {
 	if b == 0 {
 		return 0
@@ -221,15 +233,21 @@ func (c *Critbit) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
 
 		if rootNode == nil {
 			newNode := c.allocLeafNode(key, new)
-			if c.root.CompareAndSwap(nil, newNode) {
+			rt := c.reapMu.RLock()
+			ok := c.root.CompareAndSwap(nil, newNode)
+			c.reapMu.RUnlock(rt)
+			if ok {
 				c.size.Add(1)
 				return nil, true
 			}
 			continue
 		}
 
+		rt := c.reapMu.RLock()
+
 		bestLeaf := c.findBestMatch(rootNode, key)
 		if bestLeaf == nil {
+			c.reapMu.RUnlock(rt)
 			continue
 		}
 
@@ -245,10 +263,14 @@ func (c *Critbit) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
 			if bestLeaf.tips.CompareAndSwap(old, new) {
 				if bestLeaf.deleted.CompareAndSwap(true, false) {
 					c.size.Add(1)
+					c.deletedCount.Add(-1)
 				}
+				c.reapMu.RUnlock(rt)
 				return nil, true
 			}
-			return bestLeaf.tips.Load(), false
+			tips := bestLeaf.tips.Load()
+			c.reapMu.RUnlock(rt)
+			return tips, false
 		}
 
 		bytePos, otherbits := findCritBit(key, bestLeaf.key)
@@ -260,20 +282,25 @@ func (c *Critbit) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
 			if bestLeaf.tips.CompareAndSwap(old, new) {
 				if bestLeaf.deleted.CompareAndSwap(true, false) {
 					c.size.Add(1)
+					c.deletedCount.Add(-1)
 				}
+				c.reapMu.RUnlock(rt)
 				return nil, true
 			}
-			return bestLeaf.tips.Load(), false
+			tips := bestLeaf.tips.Load()
+			c.reapMu.RUnlock(rt)
+			return tips, false
 		}
 
-		// New key — structural insertion with CAS retry
 		newLeafNode := c.allocLeafNode(key, new)
 		newInternal := c.allocInternalNode(bytePos, otherbits)
 
 		newDir := getDirection(key, bytePos, otherbits)
 		oldDir := 1 - newDir
 
-		if c.insertNode(rootNode, newInternal, newLeafNode, newDir, oldDir, bytePos, otherbits) {
+		ok := c.insertNode(rootNode, newInternal, newLeafNode, newDir, oldDir, bytePos, otherbits)
+		c.reapMu.RUnlock(rt)
+		if ok {
 			c.size.Add(1)
 			return nil, true
 		}
@@ -454,6 +481,13 @@ func (c *Critbit) DeleteAndSnapshot(key string) *TipSet {
 	}
 	old := leaf.tips.Swap(nil)
 	c.size.Add(-1)
+
+	deleted := c.deletedCount.Add(1)
+	live := c.size.Load()
+	if deleted > 0 && deleted > (live+deleted)/10 {
+		c.maybeReap()
+	}
+
 	return old
 }
 
@@ -880,6 +914,85 @@ func (c *Critbit) Snapshot() KeyIndex {
 		return true
 	})
 	return snap
+}
+
+func (c *Critbit) maybeReap() {
+	if !c.reapRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.reapRunning.Store(false)
+		for c.reap() > 0 {
+		}
+	}()
+}
+
+// reap walks the tree bottom-up and unlinks deleted leaves by
+// replacing their parent internal node with the surviving sibling.
+// Takes the write-lock on reapMu so no structural insert can race.
+// Returns the number of deleted leaves unlinked.
+func (c *Critbit) reap() int {
+	if c.closed.Load() {
+		return 0
+	}
+
+	c.reapMu.Lock()
+	defer c.reapMu.Unlock()
+
+	root := c.root.Load()
+	if root == nil {
+		return 0
+	}
+	if root.isLeaf {
+		if root.isDeleted() {
+			c.root.Store(nil)
+			c.deletedCount.Add(-1)
+			return 1
+		}
+		return 0
+	}
+	return c.reapSubtree(root, nil, 0)
+}
+
+// reapSubtree must be called with reapMu write-locked.
+func (c *Critbit) reapSubtree(node, parent *critNode, dirFromParent int) int {
+	if node == nil || node.isLeaf {
+		return 0
+	}
+
+	reaped := 0
+
+	// DFS children first (bottom-up)
+	for dir := range 2 {
+		child := node.child[dir].Load()
+		if child != nil && !child.isLeaf {
+			reaped += c.reapSubtree(child, node, dir)
+		}
+	}
+
+	// Check if either child is a deleted leaf we can unlink
+	for dir := range 2 {
+		child := node.child[dir].Load()
+		if child == nil || !child.isLeaf || !child.isDeleted() {
+			continue
+		}
+
+		sibling := node.child[1-dir].Load()
+		if sibling == nil {
+			continue
+		}
+
+		if parent == nil {
+			c.root.Store(sibling)
+		} else {
+			parent.child[dirFromParent].Store(sibling)
+		}
+		c.deletedCount.Add(-1)
+		reaped++
+		return reaped
+	}
+
+	return reaped
 }
 
 func (c *Critbit) Close() error {
