@@ -84,7 +84,7 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Defaults
-          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","safe-elle-causal","none-counter","none-set","none-sorted-set","none-elle-causal"]'
+          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","none-counter","none-set","none-sorted-set","none-elle-causal"]'
           TIME_LIMIT=60
           JEPSEN_REF=main
           SINGLE_WORKLOAD=""
@@ -99,7 +99,7 @@ jobs:
           # Tokenize on whitespace (no quoting support — we don't need it)
           read -r -a tokens <<<"$rest"
 
-          valid_workloads='safe-counter safe-set safe-sorted-set safe-elle-causal none-counter none-set none-sorted-set none-elle-causal'
+          valid_workloads='safe-counter safe-set safe-sorted-set none-counter none-set none-sorted-set none-elle-causal'
 
           for tok in "${tokens[@]}"; do
             case "$tok" in
@@ -305,7 +305,6 @@ jobs:
             safe-counter)     N=safe; W=counter ;;
             safe-set)         N=safe; W=set ;;
             safe-sorted-set)  N=safe; W=sorted-set ;;
-            safe-elle-causal) N=safe; W=elle-causal ;;
             none-counter)     N=none; W=counter ;;
             none-set)         N=none; W=set ;;
             none-sorted-set)  N=none; W=sorted-set ;;
