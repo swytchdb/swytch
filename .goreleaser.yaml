@@ -140,7 +140,7 @@ brews:
 release:
   github:
     owner: swytchdb
-    name: cache
+    name: swytch
   draft: false
   prerelease: auto
   mode: append
