@@ -190,7 +190,7 @@ func TestReconstructIncludesDescendantBindWithInvisibleAncestor(t *testing.T) {
 	// Read K with tip=bindB — corresponds to row 12.502999Z reconstruct on
 	// 10.0.0.85 reading el-4 at the moment writer-69 is visible but
 	// writer-66 still isn't.
-	result, _, err := e.reconstruct(key, []Tip{bindB})
+	result, _, err := e.reconstruct(key, []Tip{bindB}, "", false)
 	if err != nil {
 		t.Fatalf("reconstruct error: %v", err)
 	}

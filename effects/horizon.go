@@ -34,6 +34,7 @@ type horizonEntry struct {
 	bindOffset Tip
 	txnID      string
 	keyNewTips map[string]Tip // key → data effect offset (for pendingTxTips cleanup)
+	waiters    xsync.RBMutex
 }
 
 // horizonGroup tracks a group of competing Binds that share at least one
@@ -106,7 +107,10 @@ func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBin
 		bindOffset: bindOffset,
 		txnID:      txnID,
 		keyNewTips: newTips,
+		waiters:    xsync.RBMutex{},
 	}
+	// immediately prevent concurrent access to this entry
+	entry.waiters.Lock()
 
 	h.mu.Lock()
 	newBind := &forkChoiceBindEntry{keys: consumedByKey}
@@ -176,6 +180,34 @@ func (h *HorizonSet) Add(txnID string, bindOffset Tip, bind *pb.TransactionalBin
 		"group_size", len(targetGroup.entries))
 }
 
+// HorizonWait is a handle returned by WaitForClear. It carries the
+// horizonEntry pointer and the RToken so Release can RUnlock the same
+// mutex even after the entry has been removed from h.entries by
+// MakeVisible or Abort.
+type HorizonWait struct {
+	entry *horizonEntry
+	tok   *xsync.RToken
+}
+
+// WaitForClear blocks until the bind for txnID has been resolved
+// (MakeVisible or Abort releases the entry's waiter lock). Returns nil if
+// the bind is not in the invisible set — the caller may proceed without
+// waiting. Returns a *HorizonWait the caller must Release when done.
+func (h *HorizonSet) WaitForClear(txnID string) *HorizonWait {
+	if entry, ok := h.entries.Load(txnID); ok {
+		return &HorizonWait{entry: entry, tok: entry.waiters.RLock()}
+	}
+	return nil
+}
+
+// Release returns the read-lock token to the horizonEntry. Safe on nil.
+func (w *HorizonWait) Release() {
+	if w == nil {
+		return
+	}
+	w.entry.waiters.RUnlock(w.tok)
+}
+
 // ScheduleMakeVisible schedules MakeVisible(txnID) to fire after `wait`.
 // Used by handleRemoteBind as a crash-fallback for the remote-arrival
 // wait — the primary signal is the originator's verdict-snapshot
@@ -234,6 +266,10 @@ func (h *HorizonSet) MakeVisible(txnID string) {
 
 	allKeys := make(map[string]struct{})
 	for _, e := range entries {
+		if et, ok := h.entries.Load(e.txnID); ok {
+			et.waiters.Unlock()
+		}
+
 		h.entries.Delete(e.txnID)
 		for k, newTip := range e.keyNewTips {
 			h.engine.pendingTxTips.Delete(newTip)
@@ -271,6 +307,7 @@ func (h *HorizonSet) Abort(txnID string) {
 		return
 	}
 	h.entries.Delete(txnID)
+	entry.waiters.Unlock()
 
 	group := entry.group
 	group.mu.Lock()

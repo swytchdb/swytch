@@ -269,7 +269,12 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 	}
 	slog.Debug("Context.GetSnapshot: hasPending reconstruct", "key", key,
 		"txn_id", c.txnID, "recon_tips", reconTips)
-	result, _, err := c.engine.reconstruct(key, reconTips, c.txnID)
+	// waitForHorizon=true: client-facing in-txn read. If the walk reaches
+	// an in-horizon bind on the ancestry, block on its resolution before
+	// returning. Without this the read can return a list that excludes a
+	// bind which the very next read (post-promotion) will include —
+	// :incompatible-order on a single key.
+	result, _, err := c.engine.reconstruct(key, reconTips, c.txnID, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -297,7 +302,8 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 	if len(tipOffsets) == 0 {
 		return nil, nil, nil
 	}
-	result, _, err := c.engine.reconstruct(key, tipOffsets, c.txnID)
+	// waitForHorizon=true: SSI-snapshot read served back to the client.
+	result, _, err := c.engine.reconstruct(key, tipOffsets, c.txnID, true)
 	if err != nil {
 		return nil, nil, err
 	}

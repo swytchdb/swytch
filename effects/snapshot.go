@@ -22,6 +22,7 @@ package effects
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -33,6 +34,14 @@ import (
 	"github.com/swytchdb/swytch/keytrie"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// errHorizonRetryNeeded is an internal sentinel returned by reconstruct's
+// iterate callback when it encountered a bind in HorizonSet and the caller
+// requested waitForHorizon. The outer reconstruct loop catches it, the
+// wait has already completed inline, and the walk restarts so losersOnKey,
+// snapshotVerdicts, and dependsOnInvisible are recomputed against the new
+// post-resolution state.
+var errHorizonRetryNeeded = errors.New("reconstruct: horizon ancestor resolved, retry")
 
 // verdictEntry holds a snapshot's verdict for a txnID; snapshotTip is the
 // offset of the snapshot that supplied it, used for debug log provenance.
@@ -168,9 +177,13 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		return nil, nil, 0, nil
 	}
 
-	// Walk DAG and reconstruct
+	// Walk DAG and reconstruct. waitForHorizon=true: this is a client-facing
+	// read, so the walk must block on any in-ancestry HorizonSet bind to
+	// avoid returning a value that excludes a bind which will be present
+	// in the next reconstruct from the same tips (the Elle :incompatible-order
+	// shape from Jepsen run 26373595271).
 	slog.Debug("GetSnapshot: cache miss, reconstructing", "key", key, "tips", tipOffsets)
-	result, chainLen, err := e.reconstruct(key, tipOffsets)
+	result, chainLen, err := e.reconstruct(key, tipOffsets, "", true)
 	if err != nil {
 		slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
 		return nil, nil, 0, nil
@@ -489,12 +502,8 @@ func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips [
 // are collected and resolved via fork-choice after the main walk.
 //
 // Returns the reduced result and the number of effects walked.
-func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb.ReducedEffect, int, error) {
-	var txID string
-	if len(currentTxID) > 0 {
-		txID = currentTxID[0]
-	}
-	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID)
+func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon bool) (*pb.ReducedEffect, int, error) {
+	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID, "wait_for_horizon", waitForHorizon)
 
 	// Bind discovery + verdict harvest only need to walk back to the
 	// caller's pre-tx view. For a tx-context reconstruct the engine's
@@ -502,160 +511,212 @@ func (e *Engine) reconstruct(key string, tips []Tip, currentTxID ...string) (*pb
 	// cutoff (walk is bounded only by snapshot LCA in dag.walk).
 	cutoff := e.txCutoff(txID)
 
-	expandKeys, bindsByKey, snapshotVerdicts, err := e.bindKeyClosure(key, cutoff)
-	if err != nil {
-		return nil, 0, err
-	}
-	atomicallyLost := make(map[string]struct{})
-	for txnID, entry := range snapshotVerdicts {
-		if entry.verdict == pb.Verdict_LOST {
-			atomicallyLost[txnID] = struct{}{}
+	var (
+		result          *pb.ReducedEffect
+		subRootEffects  []*pb.Effect
+		count           int
+		crossKeyWalked  int
+		d               *dag
+		err             error
+		expandKeys      map[string]struct{}
+		bindsByKey      map[string][]Tip
+		snapshotVerdicts verdictMap
+		atomicallyLost  map[string]struct{}
+	)
+
+	// Retry loop: every time iterate encounters an in-horizon bind on the
+	// ancestry of tips AND waitForHorizon is true, the wait completes
+	// inline (entry.waiters.RLock blocks until MakeVisible or Abort
+	// releases the write lock) and the callback returns errHorizonRetryNeeded.
+	// We restart with fresh bindKeyClosure / losersOnKey / dependsOnInvisible
+	// state — the resolved bind's verdict is now visible to fork-choice,
+	// and its descendants in the walk no longer trigger the "descends from
+	// invisible ancestor" skip.
+	//
+	// Bounded by the number of distinct in-horizon binds on the ancestry
+	// (each iteration resolves at least one). Each iteration's wait is
+	// bounded by horizonFallbackWait (5s) at worst. Internal callers pass
+	// waitForHorizon=false and get the existing single-pass behavior.
+	for {
+		result = nil
+		subRootEffects = nil
+		count = 0
+		crossKeyWalked = 0
+
+		expandKeys, bindsByKey, snapshotVerdicts, err = e.bindKeyClosure(key, cutoff)
+		if err != nil {
+			return nil, 0, err
 		}
-	}
-	crossKeyWalked := 0
-	for k := range expandKeys {
-		losers, walked := e.losersOnKey(k, bindsByKey[k], snapshotVerdicts, cutoff)
-		if k != key {
-			crossKeyWalked += walked
+		atomicallyLost = make(map[string]struct{})
+		for txnID, entry := range snapshotVerdicts {
+			if entry.verdict == pb.Verdict_LOST {
+				atomicallyLost[txnID] = struct{}{}
+			}
 		}
-		for txnID := range losers {
-			atomicallyLost[txnID] = struct{}{}
-		}
-	}
-	if slog.Default().Enabled(context.Background(), slog.LevelDebug) &&
-		(len(expandKeys) > 1 || len(atomicallyLost) > 0 || len(snapshotVerdicts) > 0) {
-		closure := make([]string, 0, len(expandKeys))
 		for k := range expandKeys {
-			closure = append(closure, k)
+			losers, walked := e.losersOnKey(k, bindsByKey[k], snapshotVerdicts, cutoff)
+			if k != key {
+				crossKeyWalked += walked
+			}
+			for txnID := range losers {
+				atomicallyLost[txnID] = struct{}{}
+			}
 		}
-		lost := make([]string, 0, len(atomicallyLost))
-		for txn := range atomicallyLost {
-			lost = append(lost, txn)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) &&
+			(len(expandKeys) > 1 || len(atomicallyLost) > 0 || len(snapshotVerdicts) > 0) {
+			closure := make([]string, 0, len(expandKeys))
+			for k := range expandKeys {
+				closure = append(closure, k)
+			}
+			lost := make([]string, 0, len(atomicallyLost))
+			for txn := range atomicallyLost {
+				lost = append(lost, txn)
+			}
+			verdictSrcs := make([]string, 0, len(snapshotVerdicts))
+			for txn, entry := range snapshotVerdicts {
+				verdictSrcs = append(verdictSrcs, fmt.Sprintf("%s=%s@%v", txn, entry.verdict.String(), entry.snapshotTip))
+			}
+			slog.Debug("reconstruct: cross-key closure",
+				"key", key,
+				"closure", closure,
+				"atomically_lost", lost,
+				"snapshot_verdicts", verdictSrcs,
+				"cross_key_walked", crossKeyWalked)
 		}
-		verdictSrcs := make([]string, 0, len(snapshotVerdicts))
-		for txn, entry := range snapshotVerdicts {
-			verdictSrcs = append(verdictSrcs, fmt.Sprintf("%s=%s@%v", txn, entry.verdict.String(), entry.snapshotTip))
+
+		d = newDag(e, key, txID)
+		if err := d.prepare(tips); err != nil {
+			return nil, 0, err
 		}
-		slog.Debug("reconstruct: cross-key closure",
-			"key", key,
-			"closure", closure,
-			"atomically_lost", lost,
-			"snapshot_verdicts", verdictSrcs,
-			"cross_key_walked", crossKeyWalked)
-	}
 
-	d := newDag(e, key, txID)
-	if err := d.prepare(tips); err != nil {
-		return nil, 0, err
-	}
+		var isInvisible func(string) bool
+		if e.horizon != nil {
+			isInvisible = e.horizon.IsInvisible
+		}
 
-	var result *pb.ReducedEffect
-	var subRootEffects []*pb.Effect
-	count := 0
-
-	var isInvisible func(string) bool
-	if e.horizon != nil {
-		isInvisible = e.horizon.IsInvisible
-	}
-
-	// Propagate HorizonSet invisibility along DAG dep edges. A visible
-	// bind whose causal chain reaches an invisible bind cannot be
-	// honored: its writes describe a state that's only consistent if
-	// the ancestor's pending verdict resolves WON. Until that verdict
-	// lands, including the descendant while skipping the ancestor would
-	// surface a "future without its past" (Elle :incompatible-order).
-	// Walk d.topoOrder (parents before children, includes tx-data tips
-	// iterate filters from the processor stream) and mark every tip
-	// that transitively depends on an invisible bind.
-	var dependsOnInvisible map[Tip]struct{}
-	if isInvisible != nil {
-		invisibleBindTips := make(map[Tip]struct{})
-		dependsOnInvisible = make(map[Tip]struct{})
-		for _, t := range d.topoOrder {
-			eff := d.nodes[t]
-			var refs []*pb.EffectRef
-			if bind := eff.GetTxnBind(); bind != nil {
-				for _, kb := range bind.Keys {
-					if string(kb.Key) == key {
-						refs = []*pb.EffectRef{kb.NewTip}
+		// Propagate HorizonSet invisibility along DAG dep edges. A visible
+		// bind whose causal chain reaches an invisible bind cannot be
+		// honored: its writes describe a state that's only consistent if
+		// the ancestor's pending verdict resolves WON. Until that verdict
+		// lands, including the descendant while skipping the ancestor would
+		// surface a "future without its past" (Elle :incompatible-order).
+		// Walk d.topoOrder (parents before children, includes tx-data tips
+		// iterate filters from the processor stream) and mark every tip
+		// that transitively depends on an invisible bind.
+		//
+		// When waitForHorizon is true, the iterate callback below will
+		// block on the invisible ancestor (parents visited first in topo
+		// order) and signal retry; on the next iteration this precompute
+		// runs against the post-resolution state, so the marked set will
+		// be empty by the time we reach a descendant that would have been
+		// skipped here.
+		var dependsOnInvisible map[Tip]struct{}
+		if isInvisible != nil {
+			invisibleBindTips := make(map[Tip]struct{})
+			dependsOnInvisible = make(map[Tip]struct{})
+			for _, t := range d.topoOrder {
+				eff := d.nodes[t]
+				var refs []*pb.EffectRef
+				if bind := eff.GetTxnBind(); bind != nil {
+					for _, kb := range bind.Keys {
+						if string(kb.Key) == key {
+							refs = []*pb.EffectRef{kb.NewTip}
+							break
+						}
+					}
+				} else {
+					refs = eff.GetDeps()
+				}
+				for _, ref := range refs {
+					dt := r(ref)
+					if _, ok := invisibleBindTips[dt]; ok {
+						dependsOnInvisible[t] = struct{}{}
+						break
+					}
+					if _, ok := dependsOnInvisible[dt]; ok {
+						dependsOnInvisible[t] = struct{}{}
 						break
 					}
 				}
-			} else {
-				refs = eff.GetDeps()
-			}
-			for _, ref := range refs {
-				dt := r(ref)
-				if _, ok := invisibleBindTips[dt]; ok {
-					dependsOnInvisible[t] = struct{}{}
-					break
-				}
-				if _, ok := dependsOnInvisible[dt]; ok {
-					dependsOnInvisible[t] = struct{}{}
-					break
+				if bind := eff.GetTxnBind(); bind != nil && isInvisible(eff.TxnId) {
+					invisibleBindTips[t] = struct{}{}
 				}
 			}
-			if bind := eff.GetTxnBind(); bind != nil && isInvisible(eff.TxnId) {
-				invisibleBindTips[t] = struct{}{}
-			}
-		}
-	}
-
-	err = d.iterate(func(tip Tip, eff *pb.Effect) error {
-		count++
-
-		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
-			result = cloneReduced(snap.State)
-			return nil
 		}
 
-		if eff.GetSubscription() != nil && len(eff.Deps) == 0 {
-			subRootEffects = append(subRootEffects, eff)
-			return nil
-		}
+		err = d.iterate(func(tip Tip, eff *pb.Effect) error {
+			count++
 
-		if bind := eff.GetTxnBind(); bind != nil {
-			if isInvisible != nil && isInvisible(eff.TxnId) {
-				slog.Debug("reconstruct: skip bind (invisible)", "key", key, "txn", eff.TxnId)
+			if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
+				result = cloneReduced(snap.State)
 				return nil
 			}
-			if dependsOnInvisible != nil {
-				if _, ok := dependsOnInvisible[tip]; ok {
-					slog.Debug("reconstruct: skip bind (descends from invisible ancestor)",
-						"key", key, "txn", eff.TxnId)
+
+			if eff.GetSubscription() != nil && len(eff.Deps) == 0 {
+				subRootEffects = append(subRootEffects, eff)
+				return nil
+			}
+
+			if bind := eff.GetTxnBind(); bind != nil {
+				if isInvisible != nil && isInvisible(eff.TxnId) {
+					if waitForHorizon && e.horizon != nil {
+						// Block on the entry's waiter mutex. RLock returns
+						// once MakeVisible or Abort releases the write lock
+						// taken at horizon.Add. Release the read token,
+						// then signal the outer loop to restart with fresh
+						// fork-choice + dependsOnInvisible state.
+						slog.Debug("reconstruct: waiting on in-horizon ancestor",
+							"key", key, "txn", eff.TxnId)
+						if w := e.horizon.WaitForClear(eff.TxnId); w != nil {
+							w.Release()
+						}
+						return errHorizonRetryNeeded
+					}
+					slog.Debug("reconstruct: skip bind (invisible)", "key", key, "txn", eff.TxnId)
 					return nil
 				}
-			}
-			if _, lost := atomicallyLost[eff.TxnId]; lost {
-				if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_LOST {
-					slog.Debug("reconstruct: skip bind (snapshot verdict LOST)",
+				if dependsOnInvisible != nil {
+					if _, ok := dependsOnInvisible[tip]; ok {
+						slog.Debug("reconstruct: skip bind (descends from invisible ancestor)",
+							"key", key, "txn", eff.TxnId)
+						return nil
+					}
+				}
+				if _, lost := atomicallyLost[eff.TxnId]; lost {
+					if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_LOST {
+						slog.Debug("reconstruct: skip bind (snapshot verdict LOST)",
+							"key", key, "txn", eff.TxnId,
+							"snapshot", entry.snapshotTip)
+					} else {
+						slog.Debug("reconstruct: skip bind (atomically lost)", "key", key, "txn", eff.TxnId)
+					}
+					return nil
+				}
+				if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_WON {
+					slog.Debug("reconstruct: include bind (snapshot verdict WON)",
 						"key", key, "txn", eff.TxnId,
 						"snapshot", entry.snapshotTip)
 				} else {
-					slog.Debug("reconstruct: skip bind (atomically lost)", "key", key, "txn", eff.TxnId)
+					slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
 				}
+				bindEffects, fetchErr := e.collectBindEffects(eff, key)
+				if fetchErr != nil {
+					return fetchErr
+				}
+				result = ReduceChain(result, bindEffects)
 				return nil
 			}
-			if entry, fromSnap := snapshotVerdicts[eff.TxnId]; fromSnap && entry.verdict == pb.Verdict_WON {
-				slog.Debug("reconstruct: include bind (snapshot verdict WON)",
-					"key", key, "txn", eff.TxnId,
-					"snapshot", entry.snapshotTip)
-			} else {
-				slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
-			}
-			bindEffects, fetchErr := e.collectBindEffects(eff, key)
-			if fetchErr != nil {
-				return fetchErr
-			}
-			result = ReduceChain(result, bindEffects)
-			return nil
-		}
 
-		result = ReduceChain(result, []*pb.Effect{eff})
-		return nil
-	})
-	if err != nil {
-		return nil, 0, err
+			result = ReduceChain(result, []*pb.Effect{eff})
+			return nil
+		})
+		if errors.Is(err, errHorizonRetryNeeded) {
+			continue
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		break
 	}
 
 	if count == 0 {
