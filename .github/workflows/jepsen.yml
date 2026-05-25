@@ -417,16 +417,49 @@ jobs:
           # compressed tarball inside the pod first, then fetch that
           # one regular file via `kubectl cp`. A single-file cp is the
           # simplest case for kubectl's wrapper and supports --retries.
+          #
+          # If `kubectl cp` still truncates (92 MB+ tarballs over SPDY),
+          # fall back to streaming via `kubectl exec … cat` which uses a
+          # simpler code path.
+          set +e
           pod="${RESOURCE_PREFIX}-controller"
+
+          # --- build tarball inside the pod ---
           kubectl -n "$NAMESPACE" exec -c holder "$pod" -- \
-            bash -c 'cd /workspace && tar -czf store.tar.gz store && ls -lh store.tar.gz' \
-            || echo "::warning::failed to build store.tar.gz in pod"
-          kubectl -n "$NAMESPACE" cp -c holder --retries=3 \
-            "$pod:/workspace/store.tar.gz" ./store.tar.gz \
-            || echo "::warning::failed to fetch store.tar.gz"
-          if [ -s ./store.tar.gz ]; then
-            tar -xzf store.tar.gz
-            rm store.tar.gz
+            bash -c 'cd /workspace && tar -czf store.tar.gz store && ls -lh store.tar.gz'
+          if [ $? -ne 0 ]; then
+            echo "::warning::failed to build store.tar.gz in pod"
+          else
+            # --- fetch with kubectl cp (up to 3 retries) ---
+            got=false
+            kubectl -n "$NAMESPACE" cp -c holder --retries=3 \
+              "$pod:/workspace/store.tar.gz" ./store.tar.gz \
+              && gzip -t ./store.tar.gz 2>/dev/null \
+              && got=true
+
+            # --- fallback: stream via cat if cp produced a bad file ---
+            if [ "$got" != "true" ]; then
+              echo "::warning::kubectl cp failed or produced a truncated file, retrying via exec cat"
+              rm -f ./store.tar.gz
+              for attempt in 1 2 3; do
+                kubectl -n "$NAMESPACE" exec -c holder "$pod" -- \
+                  cat /workspace/store.tar.gz > ./store.tar.gz
+                if gzip -t ./store.tar.gz 2>/dev/null; then
+                  got=true
+                  break
+                fi
+                echo "::warning::exec cat attempt $attempt failed integrity check"
+                rm -f ./store.tar.gz
+                sleep 2
+              done
+            fi
+
+            if [ "$got" = "true" ] && [ -s ./store.tar.gz ]; then
+              tar -xzf store.tar.gz || echo "::warning::tar extraction failed"
+              rm -f store.tar.gz
+            else
+              echo "::warning::could not retrieve a valid store.tar.gz after all attempts"
+            fi
           fi
           ls -la store 2>/dev/null || echo "store/ not retrieved"
 
@@ -434,23 +467,40 @@ jobs:
         if: always()
         id: result
         run: |
+          parse_valid() {
+            # Look for `:valid? <value>` in the top-level results map.
+            # Jepsen prints the top-level :valid? last and closes it with `}`
+            # (sub-checker :valid? entries are followed by `,` because more keys
+            # follow inside their map). Anchor on the closing brace and take the
+            # last match to avoid picking up a passing nested checker.
+            grep -oE ':valid\?[[:space:]]+(true|false|:unknown)\}' "$1" \
+              | tail -n1 | grep -oE '(true|false|:unknown)'
+          }
+
           # Find the latest run dir (jepsen writes a `latest` symlink, but
           # `kubectl cp` doesn't follow symlinks reliably; walk by mtime).
           latest=$(find store -maxdepth 3 -name results.edn -printf '%T@ %p\n' 2>/dev/null \
                    | sort -n | tail -n1 | awk '{print $2}')
-          if [ -z "$latest" ]; then
-            echo "valid=missing" >>"$GITHUB_OUTPUT"
-            exit 0
+
+          if [ -n "$latest" ]; then
+            echo "results file: $latest"
+            v=$(parse_valid "$latest")
+          else
+            echo "::notice::store/ not available, falling back to controller log output"
+            # Jepsen prints results.edn to stdout; the "Stream controller
+            # logs" step captured it. Scrape the verdict from the log file
+            # that GitHub wrote for step 8 (index 0-based). This is fragile
+            # but better than reporting "missing" when the test actually ran.
+            logfile=$(find /home/runner/work/_temp -name '*.txt' -newer /dev/null 2>/dev/null \
+                      | xargs grep -l 'Everything looks good\|:valid?' 2>/dev/null \
+                      | head -n1)
+            if [ -n "$logfile" ]; then
+              echo "found log with results: $logfile"
+              v=$(parse_valid "$logfile")
+            fi
           fi
-          echo "results file: $latest"
-          # Look for `:valid? <value>` in the top-level results map.
-          # Jepsen prints the top-level :valid? last and closes it with `}`
-          # (sub-checker :valid? entries are followed by `,` because more keys
-          # follow inside their map). Anchor on the closing brace and take the
-          # last match to avoid picking up a passing nested checker.
-          v=$(grep -oE ':valid\?[[:space:]]+(true|false|:unknown)\}' "$latest" \
-              | tail -n1 | grep -oE '(true|false|:unknown)')
-          case "$v" in
+
+          case "${v:-}" in
             true)     echo "valid=true"     >>"$GITHUB_OUTPUT" ;;
             false)    echo "valid=false"    >>"$GITHUB_OUTPUT" ;;
             :unknown) echo "valid=unknown"  >>"$GITHUB_OUTPUT" ;;
