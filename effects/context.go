@@ -194,9 +194,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 	if c == nil {
 		return nil, nil, nil
 	}
-	_, snapSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.get_snapshot",
-		trace.WithAttributes(attribute.String("effect.key", key)))
-	defer snapSpan.End()
+	if tracing.Enabled() {
+		_, snapSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.get_snapshot",
+			trace.WithAttributes(attribute.String("effect.key", key)))
+		defer snapSpan.End()
+	}
 	ck, hasPending := c.keys[key]
 	if !hasPending {
 		// SSI: if we have a snapshot, read from it instead of the live index
@@ -212,7 +214,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
 		// when result is nil, but the check is defensive against future
 		// regressions in that contract.
-		if result != nil && chainLen >= 20+rand.IntN(31) {
+		compactThreshold := 20 + rand.IntN(31)
+		if c.engine.broadcaster == nil {
+			compactThreshold = 1
+		}
+		if result != nil && chainLen >= compactThreshold {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
@@ -526,9 +532,11 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
-	_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
-		trace.WithAttributes(attribute.String("effect.key", key)))
-	defer emitSpan.End()
+	if tracing.Enabled() {
+		_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
+			trace.WithAttributes(attribute.String("effect.key", key)))
+		defer emitSpan.End()
+	}
 
 	// Fill causality
 	eff.Hlc = timestamppb.New(c.engine.clock.Now())
@@ -653,9 +661,11 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 // Flush updates the index for all touched keys and broadcasts all
 // notifications per key for durability, then resets the context for reuse.
 func (c *Context) Flush() error {
-	_, flushSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.flush",
-		trace.WithAttributes(attribute.Int("flush.keys", len(c.keys))))
-	defer flushSpan.End()
+	if tracing.Enabled() {
+		_, flushSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.flush",
+			trace.WithAttributes(attribute.Int("flush.keys", len(c.keys))))
+		defer flushSpan.End()
+	}
 
 	if !c.inTx {
 		return c.flushNonTx()
@@ -688,38 +698,36 @@ func (c *Context) flushNonTx() error {
 
 		mode := c.engine.modeForKey(key)
 
-		func() {
+		if tracing.Enabled() {
 			_, idxSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.update_index",
 				trace.WithAttributes(attribute.String("effect.key", key)))
 			defer idxSpan.End()
-			slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
-			c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
-		}()
+		}
+		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
+		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
 
 		// Tip-count trigger: emit serialization request when tips exceed threshold
 		// and no leader is already active for this key.
-		func() {
-			_, serSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.serialization_check",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer serSpan.End()
-			if c.engine.CheckSerializationLeader(key) == nil {
-				if tips := c.engine.index.Contains(key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
-					slog.Info("adaptive serialization: tip count exceeded threshold",
-						"key", key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
-					c.emitSerializationEffect(key)
-				}
+		if c.engine.CheckSerializationLeader(key) == nil {
+			if tips := c.engine.index.Contains(key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
+				slog.Info("adaptive serialization: tip count exceeded threshold",
+					"key", key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
+				c.emitSerializationEffect(key)
 			}
-		}()
+		}
 
 		if c.engine.broadcaster != nil {
-			bcastCtx, bcastSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.broadcast",
-				trace.WithAttributes(
-					attribute.String("effect.key", key),
-					attribute.Int("flush.mode", int(mode)),
-					attribute.Int("flush.notifies", len(ck.notifies)),
-				))
-			// Re-stamp trace context on notifies so remote spans parent to this broadcast
-			bcastTrace := tracing.InjectIntoBytes(bcastCtx)
+			var bcastTrace []byte
+			if tracing.Enabled() {
+				bcastCtx, bcastSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.broadcast",
+					trace.WithAttributes(
+						attribute.String("effect.key", key),
+						attribute.Int("flush.mode", int(mode)),
+						attribute.Int("flush.notifies", len(ck.notifies)),
+					))
+				defer bcastSpan.End()
+				bcastTrace = tracing.InjectIntoBytes(bcastCtx)
+			}
 			for _, n := range ck.notifies {
 				n.TraceContext = bcastTrace
 			}
@@ -747,31 +755,20 @@ func (c *Context) flushNonTx() error {
 					c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
 				}
 			}
-			bcastSpan.End()
 		}
 
-		func() {
-			_, evictSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.cache_evict",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer evictSpan.End()
-			// Evict snapshot cache so next read sees the new state
-			if c.engine.cache != nil {
-				c.engine.cache.Evict(key)
-			}
-		}()
+		// Evict snapshot cache so next read sees the new state
+		if c.engine.cache != nil {
+			c.engine.cache.Evict(key)
+		}
 
 		// Fire notification callbacks after effect is durable
-		func() {
-			_, cbSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.notify_callbacks",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer cbSpan.End()
-			if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-				c.engine.OnKeyDataAdded(key)
-			}
-			if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
-				c.engine.OnKeyDeleted(key)
-			}
-		}()
+		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
+			c.engine.OnKeyDataAdded(key)
+		}
+		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
+			c.engine.OnKeyDeleted(key)
+		}
 
 		delete(c.keys, key)
 	}

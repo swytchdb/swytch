@@ -682,16 +682,16 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
-	// Create a child span from the remote trace context so it appears
-	// under replication.receive in the originator's trace tree.
-	remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
-	_, handleSpan := tracing.Tracer().Start(remoteCtx, "effects.handle_remote",
-		trace.WithAttributes(
-			attribute.String("effect.key", string(notify.GetKey())),
-			attribute.Int64("effect.offset", int64(notify.GetOrigin().GetOffset())),
-			attribute.Int("effect.node_id", int(notify.GetOrigin().GetNodeId())),
-		))
-	defer handleSpan.End()
+	if tracing.Enabled() {
+		remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
+		_, handleSpan := tracing.Tracer().Start(remoteCtx, "effects.handle_remote",
+			trace.WithAttributes(
+				attribute.String("effect.key", string(notify.GetKey())),
+				attribute.Int64("effect.offset", int64(notify.GetOrigin().GetOffset())),
+				attribute.Int("effect.node_id", int(notify.GetOrigin().GetNodeId())),
+			))
+		defer handleSpan.End()
+	}
 
 	slog.Debug("HandleRemote: received",
 		"offset", notify.Origin.Offset,

@@ -22,15 +22,16 @@ package tracing
 import (
 	"context"
 	"fmt"
-	"log/slog"
-
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
+	"log/slog"
 )
+
+var enabled bool
 
 // Config holds OpenTelemetry tracing configuration.
 type Config struct {
@@ -85,9 +86,15 @@ func Init(ctx context.Context, cfg Config) func(context.Context) error {
 	)
 	otel.SetTracerProvider(tp)
 
+	enabled = true
 	slog.Info("tracing: initialized", "endpoint", cfg.Endpoint, "service", cfg.ServiceName, "node", cfg.NodeID)
 
 	return tp.Shutdown
+}
+
+// Enabled returns whether tracing was initialized with a real exporter.
+func Enabled() bool {
+	return enabled
 }
 
 // Tracer returns the package-level tracer for swytch instrumentation.
