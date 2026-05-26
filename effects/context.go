@@ -35,6 +35,7 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -605,6 +606,10 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 			ck.readOnly = false
 		}
 	}
+
+	// Clone so the cached *pb.Effect owns its byte slices. Callers
+	// (e.g. RESP parser) may pool the underlying buffers.
+	eff = proto.Clone(eff).(*pb.Effect)
 
 	offset, notify, err := c.rawEmit(eff)
 	if err != nil {
