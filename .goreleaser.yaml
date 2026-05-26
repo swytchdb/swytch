@@ -32,6 +32,19 @@ builds:
       - amd64
       - arm64
 
+upx:
+  - enabled: true
+    compress: best
+    lzma: true
+    ids:
+      - swytch
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: default
     formats: [tar.gz]
