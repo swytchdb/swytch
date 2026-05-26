@@ -729,19 +729,18 @@ func (c *Context) flushNonTx() error {
 				// Pre-check already verified all peers are reachable.
 				// Index is updated, so the write is committed — replicate
 				// but don't fail the client if replication errors out.
-				for i, n := range ck.notifies {
-					if i < len(ck.notifies)-1 {
-						c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
+				// Intermediate effects are fire-and-forget; send them
+				// concurrently so they don't serialize QUIC stream opens
+				// before the blocking Replicate on the final effect.
+				for _, n := range ck.notifies[:len(ck.notifies)-1] {
+					go c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
+				}
+				last := ck.notifies[len(ck.notifies)-1]
+				if err := c.engine.broadcaster.Replicate(last, last.EffectData); err != nil {
+					if len(c.engine.broadcaster.PeerIDs()) == 0 {
+						slog.Debug("SafeMode replication skipped: no peers", "key", key, "error", err)
 					} else {
-						if err := c.engine.broadcaster.Replicate(n, n.EffectData); err != nil {
-							// Solo cluster (no peers yet) is not worth warning
-							// on every write — demote to debug.
-							if len(c.engine.broadcaster.PeerIDs()) == 0 {
-								slog.Debug("SafeMode replication skipped: no peers", "key", key, "error", err)
-							} else {
-								slog.Warn("SafeMode replication failed after commit", "key", key, "error", err)
-							}
-						}
+						slog.Warn("SafeMode replication failed after commit", "key", key, "error", err)
 					}
 				}
 			} else {

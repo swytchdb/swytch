@@ -309,11 +309,19 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// effects silently breaks cluster invariants (index claims a tip
 	// we no longer hold bytes for), so the cache must skip them
 	// during victim selection.
-	e.effectCache.SetEvictDecider(func(_ keytrie.EffectRef, eff *pb.Effect) bool {
+	e.effectCache.SetEvictDecider(func(ref keytrie.EffectRef, eff *pb.Effect) bool {
 		if eff == nil {
 			return true
 		}
-		return !isSystemKey(eff.Key)
+		if isSystemKey(eff.Key) {
+			return false
+		}
+		key := string(eff.Key)
+		tipSet := e.index.Contains(key)
+		if tipSet == nil {
+			return true
+		}
+		return !e.isInActivePath(key, ref, tipSet.Tips())
 	})
 	// After-eviction hook: the cache lost the bytes for an effect, so
 	// the local index can no longer honestly claim authority over its

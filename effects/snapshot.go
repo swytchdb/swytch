@@ -475,28 +475,30 @@ func (e *Engine) walkAndInstall(key string, tips []Tip) (installed, skipped int)
 // and re-checks incomplete (returning ErrBootstrapIncomplete) rather
 // than waiting until process exit.
 func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips []Tip) {
-	for !e.closed.Load() {
+	const maxRetries = 10
+	for attempt := range maxRetries {
+		if e.closed.Load() {
+			break
+		}
 		time.Sleep(500 * time.Millisecond)
-
 		if e.closed.Load() {
 			break
 		}
 
 		installed, _ := e.walkAndInstall(key, nackTips)
-		if installed == 0 {
-			slog.Debug("retryBootstrap: still incomplete",
-				"key", key, "tips", len(nackTips))
-			continue
+		if installed > 0 {
+			slog.Debug("retryBootstrap: complete",
+				"key", key, "installed", installed, "of", len(nackTips))
+			state.incomplete.Store(false)
+			state.markReady()
+			return
 		}
-
-		slog.Debug("retryBootstrap: complete",
-			"key", key, "installed", installed, "of", len(nackTips))
-		state.incomplete.Store(false)
-		state.markReady()
-		return
+		slog.Debug("retryBootstrap: still incomplete",
+			"key", key, "tips", len(nackTips), "attempt", attempt+1)
 	}
 
-	slog.Debug("retryBootstrap: aborted by engine shutdown", "key", key)
+	slog.Warn("retryBootstrap: giving up, clearing subscription for re-bootstrap",
+		"key", key, "tips", len(nackTips))
 	e.subscriptions.Delete(key)
 	state.markFailed()
 }
