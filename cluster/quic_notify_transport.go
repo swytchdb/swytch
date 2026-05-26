@@ -28,8 +28,6 @@ import (
 
 	"github.com/quic-go/quic-go"
 	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/tracing"
-	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -142,14 +140,11 @@ func (t *QUICNotifyTransport) AcceptUniStreams(conn *quic.Conn) {
 // handleInboundUniStream reads a complete message from a uni-stream and dispatches it.
 // Wire format: [8:senderNodeID LE][plaintext message]
 func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *quic.ReceiveStream) {
-	_, readSpan := tracing.Tracer().Start(context.Background(), "transport.read_stream")
-
 	// Read sender nodeID prefix
 	var header [8]byte
 	if _, err := io.ReadFull(stream, header[:]); err != nil {
 		slog.Debug("failed to read uni-stream sender header", "error", err)
 		RecordQUICStreamError()
-		readSpan.End()
 		return
 	}
 	peerID := NodeId(binary.LittleEndian.Uint64(header[:]))
@@ -169,16 +164,8 @@ func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *qu
 			slog.Debug("failed to read uni-stream data", "peer", peerID, "error", err)
 			RecordQUICStreamError()
 		}
-		readSpan.End()
 		return
 	}
-
-	readSpan.SetAttributes(
-		attribute.Int("peer.id", int(peerID)),
-		attribute.Int("packet.type", int(data[0])),
-		attribute.Int("packet.size", len(data)),
-	)
-	readSpan.End()
 
 	t.dispatchPlaintext(peerID, data)
 }

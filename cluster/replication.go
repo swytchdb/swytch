@@ -33,7 +33,6 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/protobuf/proto"
 )
 
 // Sentinel errors for replication failures.
@@ -269,11 +268,13 @@ func (r *Replicator) InMajorityPartition() bool {
 // with ErrNoPeers if there are no alive+symmetric same-region peers.
 // Cross-region peers receive the notification fire-and-forget.
 func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *ReplicationFuture {
-	// Extract trace context from the notification for a child span
-	remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
-	_, sendSpan := tracing.Tracer().Start(remoteCtx, "replication.send",
-		trace.WithAttributes(attribute.String("effect.key", string(notify.GetKey()))))
-	defer sendSpan.End()
+	var sendSpan trace.Span
+	if tracing.Enabled() {
+		remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
+		_, sendSpan = tracing.Tracer().Start(remoteCtx, "replication.send",
+			trace.WithAttributes(attribute.String("effect.key", string(notify.GetKey()))))
+		defer sendSpan.End()
+	}
 
 	token := r.mu.RLock()
 	regions := make(map[NodeId]string, len(r.peerRegions))
@@ -290,12 +291,6 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	if len(targets) == 0 {
 		return rejectedFuture(ErrNoPeers)
 	}
-
-	// Same-region peers get the full OffsetNotify with effect_data inline
-	_, cloneSpan := tracing.Tracer().Start(remoteCtx, "replication.marshal")
-	fullNotify := proto.Clone(notify).(*pb.OffsetNotify)
-	fullNotify.EffectData = wireData
-	cloneSpan.End()
 
 	// One tracked request per peer; future resolves on FIRST ACK (first-ACK semantics).
 	future := &ReplicationFuture{done: make(chan struct{})}
@@ -409,15 +404,16 @@ func (r *Replicator) sendCrossRegion(notify *pb.OffsetNotify, wireData []byte, r
 // HandleNotify processes an inbound notification from a peer.
 // It applies the effect and sends an ACK or NACK response back via QUIC.
 func (r *Replicator) HandleNotify(peerID NodeId, requestID uint64, notify *pb.OffsetNotify) {
-	// Create a child span from the remote trace context so it appears
-	// under flush.broadcast in the originator's trace tree.
-	remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
-	_, recvSpan := tracing.Tracer().Start(remoteCtx, "replication.receive",
-		trace.WithAttributes(
-			attribute.Int("peer.id", int(peerID)),
-			attribute.Int64("request.id", int64(requestID)),
-		))
-	defer recvSpan.End()
+	var recvSpan trace.Span
+	if tracing.Enabled() {
+		remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
+		_, recvSpan = tracing.Tracer().Start(remoteCtx, "replication.receive",
+			trace.WithAttributes(
+				attribute.Int("peer.id", int(peerID)),
+				attribute.Int64("request.id", int64(requestID)),
+			))
+		defer recvSpan.End()
+	}
 
 	slog.Debug("HandleNotify: received",
 		"peer", peerID, "requestID", requestID,
@@ -471,18 +467,19 @@ func (r *Replicator) HandleNotifyACK(peerID NodeId, requestID uint64, status byt
 		return
 	}
 
-	// Create span as child of the original replication trace
-	traceCtx := tracing.ExtractFromBytes(tr.traceContext)
-	_, ackSpan := tracing.Tracer().Start(traceCtx, "replication.ack_received",
-		trace.WithAttributes(
-			attribute.Int("peer.id", int(peerID)),
-			attribute.Int64("request.id", int64(requestID)),
-		))
-
 	now := time.Now()
 	latencyMs := float64(now.UnixNano()-tr.createdAt) / 1e6
-	ackSpan.SetAttributes(attribute.Float64("rtt_ms", latencyMs))
-	ackSpan.End()
+
+	if tracing.Enabled() {
+		traceCtx := tracing.ExtractFromBytes(tr.traceContext)
+		_, ackSpan := tracing.Tracer().Start(traceCtx, "replication.ack_received",
+			trace.WithAttributes(
+				attribute.Int("peer.id", int(peerID)),
+				attribute.Int64("request.id", int64(requestID)),
+				attribute.Float64("rtt_ms", latencyMs),
+			))
+		ackSpan.End()
+	}
 
 	RecordUDPNotifyACKLatency(latencyMs)
 
