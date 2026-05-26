@@ -272,15 +272,18 @@ func (h *Handler) DebugEnabled() bool {
 
 // ExecuteInto processes a command and writes the response to the writer
 func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
-	// Start OTel span for this command
-	spanAttrs := []trace.SpanStartOption{
-		trace.WithAttributes(attribute.String("redis.command", cmd.Type.String())),
+	ctx := conn.Ctx
+	if tracing.Enabled() {
+		spanAttrs := []trace.SpanStartOption{
+			trace.WithAttributes(attribute.String("redis.command", cmd.Type.String())),
+		}
+		if len(cmd.Args) > 0 {
+			spanAttrs = append(spanAttrs, trace.WithAttributes(attribute.String("redis.key", string(cmd.Args[0]))))
+		}
+		var span trace.Span
+		ctx, span = tracing.Tracer().Start(conn.Ctx, "redis.command", spanAttrs...)
+		defer span.End()
 	}
-	if len(cmd.Args) > 0 {
-		spanAttrs = append(spanAttrs, trace.WithAttributes(attribute.String("redis.key", string(cmd.Args[0]))))
-	}
-	ctx, span := tracing.Tracer().Start(conn.Ctx, "redis.command", spanAttrs...)
-	defer span.End()
 	if conn.EffectsCtx != nil {
 		conn.EffectsCtx.SetTraceCtx(ctx)
 	}
@@ -465,8 +468,10 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	var keys []string
 	var runner shared.CommandRunner
 	func() {
-		_, prepSpan := tracing.Tracer().Start(ctx, "handler.prepare")
-		defer prepSpan.End()
+		if tracing.Enabled() {
+			_, prepSpan := tracing.Tracer().Start(ctx, "handler.prepare")
+			defer prepSpan.End()
+		}
 		valid, keys, runner = entry.Handler(cmd, w, db)
 	}()
 
@@ -495,16 +500,23 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 
 	// Adaptive serialization: forward write commands to the serialization leader
 	if valid && entry.Flags&shared.FlagWrite != 0 && cmd.Runtime != nil && entry.Keys != nil {
-		_, fwdSpan := tracing.Tracer().Start(ctx, "handler.forward_check")
+		var fwdSpan trace.Span
+		if tracing.Enabled() {
+			_, fwdSpan = tracing.Tracer().Start(ctx, "handler.forward_check")
+		}
 		fwdKeys := entry.Keys(cmd)
 		if len(fwdKeys) > 0 {
 			if result := cmd.Runtime.Forward(cmd.Type.String(), cmd.Args, fwdKeys, conn.Username); result != nil {
 				w.WriteRaw(result)
-				fwdSpan.End()
+				if fwdSpan != nil {
+					fwdSpan.End()
+				}
 				return
 			}
 		}
-		fwdSpan.End()
+		if fwdSpan != nil {
+			fwdSpan.End()
+		}
 	}
 
 	if valid {
@@ -512,15 +524,20 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		// transaction abort storms on hot keys.
 		var keyLock *sync.Mutex
 		if cmd.Runtime != nil && entry.Keys != nil && !conn.InTransaction {
-			_, lockSpan := tracing.Tracer().Start(ctx, "handler.key_lock")
+			if tracing.Enabled() {
+				_, lockSpan := tracing.Tracer().Start(ctx, "handler.key_lock")
+				defer lockSpan.End()
+			}
 			if fwdKeys := entry.Keys(cmd); len(fwdKeys) > 0 {
 				keyLock = cmd.Runtime.GetLock(fwdKeys[0])
 				keyLock.Lock()
 			}
-			lockSpan.End()
 		}
 
-		_, runSpan := tracing.Tracer().Start(ctx, "handler.run")
+		var runSpan trace.Span
+		if tracing.Enabled() {
+			_, runSpan = tracing.Tracer().Start(ctx, "handler.run")
+		}
 		const maxTxnRetries = 10
 		for attempt := 0; ; attempt++ {
 			savedLen := w.Buffer().Len()
@@ -539,7 +556,9 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 			}
 			break
 		}
-		runSpan.End()
+		if runSpan != nil {
+			runSpan.End()
+		}
 
 		if keyLock != nil {
 			keyLock.Unlock()

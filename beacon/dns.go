@@ -24,12 +24,20 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 )
 
 // ResolveJoinAddr resolves a DNS name into cluster peer addresses.
 // Strategy: SRV first (returns host:port directly), then A/AAAA fallback
 // (combined with defaultPort). Returns nil, nil if no records found.
+//
+// If joinAddr contains commas or is already a host:port literal, the
+// addresses are returned directly without DNS resolution.
 func ResolveJoinAddr(ctx context.Context, resolver *net.Resolver, joinAddr string, defaultPort int) ([]string, error) {
+	if addrs, ok := parseLiteralAddrs(joinAddr, defaultPort); ok {
+		return addrs, nil
+	}
+
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
@@ -46,6 +54,46 @@ func ResolveJoinAddr(ctx context.Context, resolver *net.Resolver, joinAddr strin
 		return nil, fmt.Errorf("dns resolution failed for %q: %w", joinAddr, err)
 	}
 	return addrs, nil
+}
+
+// parseLiteralAddrs detects comma-separated host:port literals in joinAddr
+// and returns them directly. A bare IP (no port) gets defaultPort appended.
+// Returns ok=true if joinAddr looks like literal addresses (contains a comma
+// or is a single host:port / IP literal), false if it should go through DNS.
+func parseLiteralAddrs(joinAddr string, defaultPort int) ([]string, bool) {
+	parts := strings.Split(joinAddr, ",")
+	if len(parts) == 1 {
+		// Single value — only treat as literal if it has an explicit port
+		// or is an IP address. Bare hostnames go through DNS.
+		host, _, err := net.SplitHostPort(joinAddr)
+		if err != nil {
+			// No port — could be a bare IP or a hostname.
+			if net.ParseIP(joinAddr) != nil {
+				return []string{net.JoinHostPort(joinAddr, strconv.Itoa(defaultPort))}, true
+			}
+			return nil, false
+		}
+		if net.ParseIP(host) != nil {
+			return []string{joinAddr}, true
+		}
+		return nil, false
+	}
+
+	// Multiple comma-separated values — always literal.
+	addrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		_, _, err := net.SplitHostPort(p)
+		if err != nil {
+			// No port — append default.
+			p = net.JoinHostPort(p, strconv.Itoa(defaultPort))
+		}
+		addrs = append(addrs, p)
+	}
+	return addrs, true
 }
 
 // resolveSRV queries SRV records on the provided name and resolves each

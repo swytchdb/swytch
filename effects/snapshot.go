@@ -96,8 +96,15 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 	// Filter expired elements from KEYED collections
 	if len(result.NetAdds) > 0 {
 		now := time.Now()
+		cloned := false
 		for k, elem := range result.NetAdds {
 			if elem.ExpiresAt != nil && now.After(elem.ExpiresAt.AsTime()) {
+				if !cloned {
+					na := make(map[string]*pb.ReducedElement, len(result.NetAdds))
+					maps.Copy(na, result.NetAdds)
+					result.NetAdds = na
+					cloned = true
+				}
 				delete(result.NetAdds, k)
 			}
 		}
@@ -468,28 +475,30 @@ func (e *Engine) walkAndInstall(key string, tips []Tip) (installed, skipped int)
 // and re-checks incomplete (returning ErrBootstrapIncomplete) rather
 // than waiting until process exit.
 func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips []Tip) {
-	for !e.closed.Load() {
+	const maxRetries = 10
+	for attempt := range maxRetries {
+		if e.closed.Load() {
+			break
+		}
 		time.Sleep(500 * time.Millisecond)
-
 		if e.closed.Load() {
 			break
 		}
 
 		installed, _ := e.walkAndInstall(key, nackTips)
-		if installed == 0 {
-			slog.Debug("retryBootstrap: still incomplete",
-				"key", key, "tips", len(nackTips))
-			continue
+		if installed > 0 {
+			slog.Debug("retryBootstrap: complete",
+				"key", key, "installed", installed, "of", len(nackTips))
+			state.incomplete.Store(false)
+			state.markReady()
+			return
 		}
-
-		slog.Debug("retryBootstrap: complete",
-			"key", key, "installed", installed, "of", len(nackTips))
-		state.incomplete.Store(false)
-		state.markReady()
-		return
+		slog.Debug("retryBootstrap: still incomplete",
+			"key", key, "tips", len(nackTips), "attempt", attempt+1)
 	}
 
-	slog.Debug("retryBootstrap: aborted by engine shutdown", "key", key)
+	slog.Warn("retryBootstrap: giving up, clearing subscription for re-bootstrap",
+		"key", key, "tips", len(nackTips))
 	e.subscriptions.Delete(key)
 	state.markFailed()
 }
@@ -644,11 +653,20 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			}
 		}
 
+		resultFromSnapshot := false
+		ensureResultOwned := func() {
+			if resultFromSnapshot {
+				result = cloneReduced(result)
+				resultFromSnapshot = false
+			}
+		}
+
 		err = d.iterate(func(tip Tip, eff *pb.Effect) error {
 			count++
 
 			if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
-				result = cloneReduced(snap.State)
+				result = snap.State
+				resultFromSnapshot = true
 				return nil
 			}
 
@@ -699,6 +717,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 				} else {
 					slog.Debug("reconstruct: include bind", "key", key, "txn", eff.TxnId)
 				}
+				ensureResultOwned()
 				bindEffects, fetchErr := e.collectBindEffects(eff, key)
 				if fetchErr != nil {
 					return fetchErr
@@ -707,6 +726,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 				return nil
 			}
 
+			ensureResultOwned()
 			result = ReduceChain(result, []*pb.Effect{eff})
 			return nil
 		})
@@ -932,8 +952,10 @@ func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map
 				if snap.PrevSnapshot != nil {
 					stack = append(stack, r(snap.PrevSnapshot))
 				}
-				for _, dep := range eff.Deps {
-					stack = append(stack, r(dep))
+				if snap.State == nil {
+					for _, dep := range eff.Deps {
+						stack = append(stack, r(dep))
+					}
 				}
 				continue
 			}
@@ -1025,8 +1047,10 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 			if snap.PrevSnapshot != nil {
 				stack = append(stack, r(snap.PrevSnapshot))
 			}
-			for _, dep := range eff.Deps {
-				stack = append(stack, r(dep))
+			if snap.State == nil {
+				for _, dep := range eff.Deps {
+					stack = append(stack, r(dep))
+				}
 			}
 			continue
 		}

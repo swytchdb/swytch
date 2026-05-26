@@ -34,14 +34,15 @@ type KeyIndex interface {
 	// On CAS failure: returns (currentTips, false).
 	Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool)
 
-	// Delete removes a key. Returns true if the key existed.
-	Delete(key string) bool
+	// Delete removes a key only if its current tips match old (CAS).
+	// Returns true if the key was deleted.
+	Delete(key string, old *TipSet) bool
 
-	// DeleteAndSnapshot removes a key and returns the tip set it held
-	// at the moment of deletion. Returns nil if the key did not exist
-	// or was already deleted. Atomic w.r.t. concurrent Insert: a writer
-	// holding a stale non-nil `old` will fail its CAS.
-	DeleteAndSnapshot(key string) *TipSet
+	// DeleteAndSnapshot removes a key only if its current tips match old
+	// (CAS), returning the previous tip set on success. Returns nil if
+	// the key did not exist, was already deleted, or tips changed since
+	// old was read.
+	DeleteAndSnapshot(key string, old *TipSet) *TipSet
 
 	// Contains checks if a key exists and returns its TipSet.
 	// Returns nil if key doesn't exist.

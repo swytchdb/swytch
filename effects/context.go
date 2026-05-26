@@ -194,9 +194,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 	if c == nil {
 		return nil, nil, nil
 	}
-	_, snapSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.get_snapshot",
-		trace.WithAttributes(attribute.String("effect.key", key)))
-	defer snapSpan.End()
+	if tracing.Enabled() {
+		_, snapSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.get_snapshot",
+			trace.WithAttributes(attribute.String("effect.key", key)))
+		defer snapSpan.End()
+	}
 	ck, hasPending := c.keys[key]
 	if !hasPending {
 		// SSI: if we have a snapshot, read from it instead of the live index
@@ -212,7 +214,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
 		// when result is nil, but the check is defensive against future
 		// regressions in that contract.
-		if result != nil && chainLen >= 20+rand.IntN(31) {
+		compactThreshold := 20 + rand.IntN(31)
+		if c.engine.broadcaster == nil {
+			compactThreshold = 5
+		}
+		if result != nil && chainLen >= compactThreshold {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
@@ -526,9 +532,11 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
-	_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
-		trace.WithAttributes(attribute.String("effect.key", key)))
-	defer emitSpan.End()
+	if tracing.Enabled() {
+		_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
+			trace.WithAttributes(attribute.String("effect.key", key)))
+		defer emitSpan.End()
+	}
 
 	// Fill causality
 	eff.Hlc = timestamppb.New(c.engine.clock.Now())
@@ -599,6 +607,10 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 		}
 	}
 
+	// Clone so the cached *pb.Effect owns its byte slices. Callers
+	// (e.g. RESP parser) may pool the underlying buffers.
+	eff = proto.Clone(eff).(*pb.Effect)
+
 	offset, notify, err := c.rawEmit(eff)
 	if err != nil {
 		// Clean up the contextKey if we just created it and it has no prior effects
@@ -622,18 +634,13 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	key := string(eff.Key)
 
-	data, err := MarshalEffect(eff)
-	if err != nil {
-		return Tip{}, nil, err
-	}
-
 	offset := c.engine.nextOffset()
 
 	slog.Debug("Emit: wrote effect",
 		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
 
 	if c.engine.effectCache != nil {
-		c.engine.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+		c.engine.effectCache.Put(offset, eff)
 	}
 
 	// Track foreign peer subscriptions so flushTx's collectSubscribers
@@ -646,6 +653,15 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		}
 	}
 
+	if c.engine.broadcaster == nil {
+		return offset, nil, nil
+	}
+
+	data, err := MarshalEffect(eff)
+	if err != nil {
+		return Tip{}, nil, err
+	}
+
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
 }
@@ -653,9 +669,11 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 // Flush updates the index for all touched keys and broadcasts all
 // notifications per key for durability, then resets the context for reuse.
 func (c *Context) Flush() error {
-	_, flushSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.flush",
-		trace.WithAttributes(attribute.Int("flush.keys", len(c.keys))))
-	defer flushSpan.End()
+	if tracing.Enabled() {
+		_, flushSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.flush",
+			trace.WithAttributes(attribute.Int("flush.keys", len(c.keys))))
+		defer flushSpan.End()
+	}
 
 	if !c.inTx {
 		return c.flushNonTx()
@@ -688,38 +706,27 @@ func (c *Context) flushNonTx() error {
 
 		mode := c.engine.modeForKey(key)
 
-		func() {
+		if tracing.Enabled() {
 			_, idxSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.update_index",
 				trace.WithAttributes(attribute.String("effect.key", key)))
 			defer idxSpan.End()
-			slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
-			c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
-		}()
+		}
+		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
+		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
 
-		// Tip-count trigger: emit serialization request when tips exceed threshold
-		// and no leader is already active for this key.
-		func() {
-			_, serSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.serialization_check",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer serSpan.End()
-			if c.engine.CheckSerializationLeader(key) == nil {
-				if tips := c.engine.index.Contains(key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
-					slog.Info("adaptive serialization: tip count exceeded threshold",
-						"key", key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
-					c.emitSerializationEffect(key)
-				}
-			}
-		}()
 
 		if c.engine.broadcaster != nil {
-			bcastCtx, bcastSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.broadcast",
-				trace.WithAttributes(
-					attribute.String("effect.key", key),
-					attribute.Int("flush.mode", int(mode)),
-					attribute.Int("flush.notifies", len(ck.notifies)),
-				))
-			// Re-stamp trace context on notifies so remote spans parent to this broadcast
-			bcastTrace := tracing.InjectIntoBytes(bcastCtx)
+			var bcastTrace []byte
+			if tracing.Enabled() {
+				bcastCtx, bcastSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.broadcast",
+					trace.WithAttributes(
+						attribute.String("effect.key", key),
+						attribute.Int("flush.mode", int(mode)),
+						attribute.Int("flush.notifies", len(ck.notifies)),
+					))
+				defer bcastSpan.End()
+				bcastTrace = tracing.InjectIntoBytes(bcastCtx)
+			}
 			for _, n := range ck.notifies {
 				n.TraceContext = bcastTrace
 			}
@@ -727,19 +734,18 @@ func (c *Context) flushNonTx() error {
 				// Pre-check already verified all peers are reachable.
 				// Index is updated, so the write is committed — replicate
 				// but don't fail the client if replication errors out.
-				for i, n := range ck.notifies {
-					if i < len(ck.notifies)-1 {
-						c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
+				// Intermediate effects are fire-and-forget; send them
+				// concurrently so they don't serialize QUIC stream opens
+				// before the blocking Replicate on the final effect.
+				for _, n := range ck.notifies[:len(ck.notifies)-1] {
+					go c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
+				}
+				last := ck.notifies[len(ck.notifies)-1]
+				if err := c.engine.broadcaster.Replicate(last, last.EffectData); err != nil {
+					if len(c.engine.broadcaster.PeerIDs()) == 0 {
+						slog.Debug("SafeMode replication skipped: no peers", "key", key, "error", err)
 					} else {
-						if err := c.engine.broadcaster.Replicate(n, n.EffectData); err != nil {
-							// Solo cluster (no peers yet) is not worth warning
-							// on every write — demote to debug.
-							if len(c.engine.broadcaster.PeerIDs()) == 0 {
-								slog.Debug("SafeMode replication skipped: no peers", "key", key, "error", err)
-							} else {
-								slog.Warn("SafeMode replication failed after commit", "key", key, "error", err)
-							}
-						}
+						slog.Warn("SafeMode replication failed after commit", "key", key, "error", err)
 					}
 				}
 			} else {
@@ -747,31 +753,20 @@ func (c *Context) flushNonTx() error {
 					c.engine.broadcaster.BroadcastWithData(n, n.EffectData)
 				}
 			}
-			bcastSpan.End()
 		}
 
-		func() {
-			_, evictSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.cache_evict",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer evictSpan.End()
-			// Evict snapshot cache so next read sees the new state
-			if c.engine.cache != nil {
-				c.engine.cache.Evict(key)
-			}
-		}()
+		// Evict snapshot cache so next read sees the new state
+		if c.engine.cache != nil {
+			c.engine.cache.Evict(key)
+		}
 
 		// Fire notification callbacks after effect is durable
-		func() {
-			_, cbSpan := tracing.Tracer().Start(c.TraceCtx(), "flush.notify_callbacks",
-				trace.WithAttributes(attribute.String("effect.key", key)))
-			defer cbSpan.End()
-			if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-				c.engine.OnKeyDataAdded(key)
-			}
-			if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
-				c.engine.OnKeyDeleted(key)
-			}
-		}()
+		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
+			c.engine.OnKeyDataAdded(key)
+		}
+		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
+			c.engine.OnKeyDeleted(key)
+		}
 
 		delete(c.keys, key)
 	}
@@ -1337,15 +1332,6 @@ func (c *Context) flushTx() error {
 		c.engine.resetAbortCount(pk.key)
 		if c.engine.horizon == nil && c.engine.cache != nil {
 			c.engine.cache.Evict(pk.key)
-		}
-		// Tip-count trigger: emit serialization request when tips exceed
-		// threshold and no leader is already active for this key.
-		if c.engine.CheckSerializationLeader(pk.key) == nil {
-			if tips := c.engine.index.Contains(pk.key); tips != nil && len(tips.Tips()) > tipSerializationThreshold {
-				slog.Info("adaptive serialization: tip count exceeded threshold (tx)",
-					"key", pk.key, "tips", len(tips.Tips()), "threshold", tipSerializationThreshold)
-				c.emitSerializationEffect(pk.key)
-			}
 		}
 	}
 

@@ -510,7 +510,8 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 			s.cachedSize -= entrySize(entry)
 			s.cachedSerializedSize -= entrySerializedSize(key, entry)
 		}
-		s.Index.Delete(key)
+		tips := s.Index.Contains(key)
+		s.Index.Delete(key, tips)
 		delete(s.Entries, key)
 	}
 

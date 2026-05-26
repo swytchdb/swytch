@@ -243,7 +243,8 @@ func (e *Engine) FlushIndex() {
 	slog.Info("FlushIndex: wiping all keys from index")
 	keys := e.index.Keys()
 	for _, key := range keys {
-		e.index.Delete(key)
+		tips := e.index.Contains(key)
+		e.index.Delete(key, tips)
 		if e.cache != nil {
 			e.cache.Evict(key)
 		}
@@ -309,11 +310,19 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// effects silently breaks cluster invariants (index claims a tip
 	// we no longer hold bytes for), so the cache must skip them
 	// during victim selection.
-	e.effectCache.SetEvictDecider(func(_ keytrie.EffectRef, eff *pb.Effect) bool {
+	e.effectCache.SetEvictDecider(func(ref keytrie.EffectRef, eff *pb.Effect) bool {
 		if eff == nil {
 			return true
 		}
-		return !isSystemKey(eff.Key)
+		if isSystemKey(eff.Key) {
+			return false
+		}
+		key := string(eff.Key)
+		tipSet := e.index.Contains(key)
+		if tipSet == nil {
+			return true
+		}
+		return !e.isInActivePathCacheOnly(key, ref, tipSet.Tips())
 	})
 	// After-eviction hook: the cache lost the bytes for an effect, so
 	// the local index can no longer honestly claim authority over its
@@ -321,17 +330,21 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// fresh goroutine because evictNotify runs under shard.mu and
 	// handleEviction takes other locks + does a network broadcast.
 	e.effectCache.SetEvictNotify(func(ref keytrie.EffectRef, eff *pb.Effect) {
-		go e.handleEviction(ref, eff)
+		tipSet := e.index.Contains(string(eff.Key))
+		go e.handleEviction(ref, eff, tipSet)
 	})
 	e.cache = cache
 
-	// Percent-based memory limit: delegate to cloxcache's live
-	// enforcer rather than locking a static byte budget. The
-	// enforcer re-evaluates available memory each tick so cgroup /
-	// system changes propagate to cache capacity automatically.
+	// Memory enforcement: start a background loop that compares process
+	// RSS against the target and adjusts cache capacity accordingly.
+	// Percent-based uses a fraction of available memory; absolute uses
+	// the exact byte budget from --maxmemory. Both paths set GOMEMLIMIT
+	// so the Go GC cooperates with the target.
+	const avgEffectBytes = 512 // conservative; loop self-corrects from actual bytes
 	if cfg.MemoryLimitPercent > 0 && cfg.MemoryLimitPercent <= 1.0 {
-		const avgEffectBytes = 512 // conservative; loop self-corrects from actual bytes
 		e.effectCache.EnforceMemoryTarget(cfg.MemoryLimitPercent, avgEffectBytes)
+	} else if cfg.MemoryLimit > 0 {
+		e.effectCache.EnforceAbsoluteMemoryLimit(cfg.MemoryLimit, avgEffectBytes)
 	}
 
 	e.safety.Store(&safetyMap{
@@ -583,7 +596,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	}
 	offset := e.nextOffset()
 	if e.effectCache != nil {
-		e.effectCache.Put(offset, proto.Clone(eff).(*pb.Effect))
+		e.effectCache.Put(offset, eff)
 	}
 	e.updateIndex(key, currentSet, offset)
 
@@ -682,16 +695,16 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
-	// Create a child span from the remote trace context so it appears
-	// under replication.receive in the originator's trace tree.
-	remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
-	_, handleSpan := tracing.Tracer().Start(remoteCtx, "effects.handle_remote",
-		trace.WithAttributes(
-			attribute.String("effect.key", string(notify.GetKey())),
-			attribute.Int64("effect.offset", int64(notify.GetOrigin().GetOffset())),
-			attribute.Int("effect.node_id", int(notify.GetOrigin().GetNodeId())),
-		))
-	defer handleSpan.End()
+	if tracing.Enabled() {
+		remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
+		_, handleSpan := tracing.Tracer().Start(remoteCtx, "effects.handle_remote",
+			trace.WithAttributes(
+				attribute.String("effect.key", string(notify.GetKey())),
+				attribute.Int64("effect.offset", int64(notify.GetOrigin().GetOffset())),
+				attribute.Int("effect.node_id", int(notify.GetOrigin().GetNodeId())),
+			))
+		defer handleSpan.End()
+	}
 
 	slog.Debug("HandleRemote: received",
 		"offset", notify.Origin.Offset,
@@ -811,7 +824,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 					"key", key, "offset", notify.Origin, "unsubscribe", sub.Unsubscribe)
 				return nil, nil
 			}
-			slog.Info("HandleRemote: dropping notify for key with no local authority",
+			slog.Debug("HandleRemote: dropping notify for key with no local authority",
 				"key", key, "offset", notify.Origin)
 			return []*pb.NackNotify{{Key: eff.Key, NotSubscribed: true}}, nil
 		}
@@ -1542,33 +1555,100 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 		nack.TipDetails = append(nack.TipDetails, detail)
 	}
 
+	nack.CausalChain = e.collectCausalChain(key, tips)
+
 	return nack
 }
 
-// ingestNackTips fetches and processes every effect referenced in a NACK's
-// tip details so the local DAG catches up with the peer's view. A NACK
-// is the cluster telling us "you missed these tips"; ignoring the payload
-// leaves us permanently behind and the cluster never converges.
+// collectCausalChain walks the local DAG from tips to the LCA snapshot
+// (BFS, same stop condition as dag.bfs) and returns every effect ref in
+// the active path. The receiver can bulk-fetch all of them instead of
+// discovering the chain one hop at a time.
+func (e *Engine) collectCausalChain(key string, tips []keytrie.EffectRef) []*pb.EffectRef {
+	if e.effectCache == nil || len(tips) == 0 {
+		return nil
+	}
+	var zero Tip
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+	var chain []*pb.EffectRef
+
+	for _, tp := range tips {
+		if tp == zero || visited[tp] {
+			continue
+		}
+		visited[tp] = true
+		queue = append(queue, tp)
+		chain = append(chain, toPbRef(tp))
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, ok := e.effectCache.Get(cur, 0)
+		if !ok {
+			continue
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			break
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == zero || visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+			chain = append(chain, ref)
+		}
+	}
+
+	return chain
+}
+
+// ingestNackTips fetches and processes effects referenced in a NACK's
+// tip details so the local DAG catches up with the peer's view.
 //
-// Walks each tip's dep chain (BFS) and pulls any effect we don't already
-// have via FetchFromAny + HandleRemote. Idempotent — effects we already
-// hold are skipped.
+// When the NACK includes a CausalChain (the sender pre-walked its DAG
+// from tips to LCA), all refs are fetched in parallel — no sequential
+// dep discovery needed. Falls back to BFS dep-walking for old peers
+// that don't populate the chain.
 func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 	if nack == nil || e.broadcaster == nil {
 		return
 	}
+
+	if len(nack.CausalChain) > 0 {
+		go e.ingestCausalChain(nack)
+	}
+
 	var zero Tip
 	visited := make(map[Tip]bool)
-	var stack []Tip
+	queue := make([]Tip, 0, len(nack.TipDetails))
 	for _, d := range nack.TipDetails {
 		if d == nil || d.Ref == nil {
 			continue
 		}
-		stack = append(stack, r(d.Ref))
+		queue = append(queue, r(d.Ref))
 	}
-	for len(stack) > 0 {
-		off := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+	for len(queue) > 0 {
+		off := queue[0]
+		queue = queue[1:]
 		if off == zero || visited[off] {
 			continue
 		}
@@ -1584,9 +1664,67 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 		}
 		if e.effectCache != nil {
 			if cached, ok := e.effectCache.Get(off, 0); ok {
-				stack = append(stack, fromPbRefs(cached.Deps)...)
+				if snap := cached.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+					break
+				}
+				stack := fromPbRefs(cached.Deps)
+				queue = append(queue, stack...)
 			}
 		}
+	}
+}
+
+// ingestCausalChain bulk-fetches every ref in the NACK's pre-computed
+// causal chain in parallel and caches the deserialized effects. Does
+// NOT install tips — the synchronous ingestNackTips / walkAndInstall
+// path handles that. This just warms the cache so dag.bfs finds
+// everything locally instead of doing sequential FetchFromAny calls.
+func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
+	if e.effectCache == nil {
+		return
+	}
+
+	var pending int
+	type fetchResult struct {
+		ref  Tip
+		data []byte
+	}
+	results := make(chan fetchResult, len(nack.CausalChain))
+
+	for _, ref := range nack.CausalChain {
+		off := r(ref)
+		if _, ok := e.effectCache.Get(off, 0); ok {
+			continue
+		}
+		pending++
+		go func(ref *pb.EffectRef) {
+			data, err := e.broadcaster.FetchFromAny(ref)
+			if err != nil {
+				results <- fetchResult{}
+				return
+			}
+			results <- fetchResult{ref: r(ref), data: data}
+		}(ref)
+	}
+
+	for range pending {
+		res := <-results
+		var zero Tip
+		if res.ref == zero || len(res.data) == 0 {
+			continue
+		}
+		protoData := res.data
+		if len(res.data) > 4 {
+			keyLen := binary.LittleEndian.Uint32(res.data[:4])
+			if keyLen > 0 && uint32(len(res.data)) >= 4+keyLen {
+				protoData = res.data[4+keyLen:]
+			}
+		}
+		eff := &pb.Effect{}
+		if err := UnmarshalEffect(protoData, eff); err != nil {
+			continue
+		}
+		e.effectCache.Put(res.ref, eff)
 	}
 }
 
@@ -1607,13 +1745,11 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 // same key can evict in close succession, but only one goroutine
 // runs the broadcast + teardown. Invoked on a fresh goroutine
 // because evictNotify runs under cache shard.mu.
-func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
+func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect, triggerTips *keytrie.TipSet) {
 	if e.closed.Load() || evictedEffect == nil {
 		return
 	}
 	if isSystemKey(evictedEffect.Key) {
-		// evictDecider should have pinned these; reaching here means
-		// the pin invariant was bypassed.
 		slog.Warn("handleEviction: system key evicted; pin invariant violated",
 			"key", string(evictedEffect.Key), "ref", evictedRef)
 		return
@@ -1621,26 +1757,29 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	key := string(evictedEffect.Key)
 
+	if triggerTips == nil {
+		return
+	}
+
+	if !e.isInActivePathCacheOnly(key, evictedRef, triggerTips.Tips()) {
+		slog.Debug("handleEviction: evicted effect below LCA, key still readable",
+			"key", key, "ref", evictedRef)
+		return
+	}
+
 	if _, claimed := e.unsubInFlight.LoadOrStore(key, struct{}{}); claimed {
 		return
 	}
 	defer e.unsubInFlight.Delete(key)
 
-	// Atomically take the deletion: any concurrent updateIndex with a
-	// stale non-nil old will fail its tips.CAS once tips is cleared,
-	// and the snapshot we broadcast matches the tips we actually drop.
-	tipSet := e.index.DeleteAndSnapshot(key)
+	tipSet := e.index.DeleteAndSnapshot(key, triggerTips)
 	if tipSet == nil {
-		// Already torn down or never installed.
-		e.subscriptions.Delete(key)
 		return
 	}
 
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
 		offset := e.nextOffset()
-		// Substitute pre-tx deps for any in-progress txn tips so the
-		// unsub doesn't reference uncommitted state.
 		deps := e.resolveTipDeps(tipSet.Tips())
 		unsub := &pb.Effect{
 			Key:            []byte(key),
@@ -1665,6 +1804,124 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	slog.Debug("handleEviction: dropped key and unsubscribed",
 		"key", key, "ref", evictedRef)
+}
+
+// isInActivePath checks whether evictedRef is in the DAG between the
+// current tips and the LCA snapshot. If it is, reconstruct would need
+// it and the key can't be served. If it's below the LCA, its state is
+// already folded into the snapshot and the key is still readable.
+func (e *Engine) isInActivePath(key string, evictedRef Tip, tips []Tip) bool {
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+
+	for _, t := range tips {
+		if t == evictedRef {
+			return true
+		}
+		visited[t] = true
+		queue = append(queue, t)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, err := e.getEffect(cur)
+		if err != nil {
+			return true
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			return false
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == evictedRef {
+				return true
+			}
+			if visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+		}
+	}
+
+	return false
+}
+
+// isInActivePathCacheOnly is like isInActivePath but only uses locally
+// cached effects — no network fetches. If a dep is missing from the
+// cache, the chain is already broken and the effect is safe to evict
+// (handleEviction will drop the whole key). Used by the evict decider
+// which must not do I/O.
+func (e *Engine) isInActivePathCacheOnly(key string, evictedRef Tip, tips []Tip) bool {
+	if e.effectCache == nil {
+		return false
+	}
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+
+	for _, t := range tips {
+		if t == evictedRef {
+			return true
+		}
+		visited[t] = true
+		queue = append(queue, t)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, ok := e.effectCache.Get(cur, 0)
+		if !ok {
+			return false
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			return false
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == evictedRef {
+				return true
+			}
+			if visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+		}
+	}
+
+	return false
 }
 
 // Close performs graceful shutdown of the engine and its background components.

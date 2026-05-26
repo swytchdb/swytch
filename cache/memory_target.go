@@ -127,6 +127,33 @@ func getProcessRSS() uint64 {
 	return m.Sys
 }
 
+// enforceMemoryWithTarget is the shared implementation for both percentage-based
+// and absolute memory enforcement. It sets GOMEMLIMIT, starts the ghost sweeper,
+// and launches the RSS-based capacity adjustment loop.
+func (c *CloxCache[K, V]) enforceMemoryWithTarget(targetBytes, avgItemSize int64) {
+	c.memoryLimit.Store(targetBytes)
+
+	// Configure GOMEMLIMIT if not already set.
+	// SetMemoryLimit(-1) returns the current limit without changing it.
+	// math.MaxInt64 means "no limit" (the default).
+	currentGoLimit := debug.SetMemoryLimit(-1)
+	if currentGoLimit == math.MaxInt64 {
+		// Reserve 5% of target for non-heap memory (stacks, mmapped regions, etc.)
+		goMemLimit := targetBytes * 95 / 100
+		debug.SetMemoryLimit(goMemLimit)
+		slog.Debug("set GOMEMLIMIT", "limit", FormatMemory(uint64(goMemLimit)))
+	} else {
+		slog.Debug("GOMEMLIMIT already set", "limit", FormatMemory(uint64(currentGoLimit)))
+	}
+
+	// Start the ghost sweeper so ghosts get culled under memory pressure.
+	// Uses the same tick rate as the memory enforcer.
+	c.StartGhostSweeper(time.Second)
+
+	c.wg.Add(1)
+	go c.memoryTargetLoop(targetBytes, avgItemSize)
+}
+
 // EnforceMemoryTarget starts a background goroutine that keeps the process's total
 // memory usage at approximately targetPercent of available system memory.
 //
@@ -151,27 +178,24 @@ func (c *CloxCache[K, V]) EnforceMemoryTarget(targetPercent float64, avgItemSize
 		"target_percent", targetPercent,
 		"target_bytes", FormatMemory(uint64(targetBytes)))
 
-	c.memoryLimit.Store(targetBytes)
+	c.enforceMemoryWithTarget(targetBytes, avgItemSize)
+}
 
-	// Configure GOMEMLIMIT if not already set.
-	// SetMemoryLimit(-1) returns the current limit without changing it.
-	// math.MaxInt64 means "no limit" (the default).
-	currentGoLimit := debug.SetMemoryLimit(-1)
-	if currentGoLimit == math.MaxInt64 {
-		// Reserve 5% of target for non-heap memory (stacks, mmapped regions, etc.)
-		goMemLimit := targetBytes * 95 / 100
-		debug.SetMemoryLimit(goMemLimit)
-		slog.Debug("set GOMEMLIMIT", "limit", FormatMemory(uint64(goMemLimit)))
-	} else {
-		slog.Debug("GOMEMLIMIT already set", "limit", FormatMemory(uint64(currentGoLimit)))
+// EnforceAbsoluteMemoryLimit starts a background goroutine that keeps the
+// process's total memory usage at approximately targetBytes. Uses process RSS
+// to drive capacity adjustments, sets GOMEMLIMIT, and starts the ghost sweeper.
+//
+// Use this when the caller knows an exact byte budget (e.g. --maxmemory 1gb)
+// rather than a fraction of available memory.
+func (c *CloxCache[K, V]) EnforceAbsoluteMemoryLimit(targetBytes, avgItemSize int64) {
+	if targetBytes <= 0 || avgItemSize <= 0 {
+		return
 	}
 
-	// Start the ghost sweeper so ghosts get culled under memory pressure.
-	// Uses the same tick rate as the memory enforcer.
-	c.StartGhostSweeper(time.Second)
+	slog.Debug("absolute memory limit configured",
+		"target_bytes", FormatMemory(uint64(targetBytes)))
 
-	c.wg.Add(1)
-	go c.memoryTargetLoop(targetBytes, avgItemSize)
+	c.enforceMemoryWithTarget(targetBytes, avgItemSize)
 }
 
 func (c *CloxCache[K, V]) memoryTargetLoop(targetBytes, avgItemSize int64) {
