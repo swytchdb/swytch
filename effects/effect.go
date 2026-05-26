@@ -1615,8 +1615,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 		return
 	}
 	if isSystemKey(evictedEffect.Key) {
-		// evictDecider should have pinned these; reaching here means
-		// the pin invariant was bypassed.
 		slog.Warn("handleEviction: system key evicted; pin invariant violated",
 			"key", string(evictedEffect.Key), "ref", evictedRef)
 		return
@@ -1624,17 +1622,24 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	key := string(evictedEffect.Key)
 
+	tipSet := e.index.Contains(key)
+	if tipSet == nil {
+		return
+	}
+
+	if !e.isInActivePath(key, evictedRef, tipSet.Tips()) {
+		slog.Debug("handleEviction: evicted effect below LCA, key still readable",
+			"key", key, "ref", evictedRef)
+		return
+	}
+
 	if _, claimed := e.unsubInFlight.LoadOrStore(key, struct{}{}); claimed {
 		return
 	}
 	defer e.unsubInFlight.Delete(key)
 
-	// Atomically take the deletion: any concurrent updateIndex with a
-	// stale non-nil old will fail its tips.CAS once tips is cleared,
-	// and the snapshot we broadcast matches the tips we actually drop.
-	tipSet := e.index.DeleteAndSnapshot(key)
+	tipSet = e.index.DeleteAndSnapshot(key)
 	if tipSet == nil {
-		// Already torn down or never installed.
 		e.subscriptions.Delete(key)
 		return
 	}
@@ -1642,8 +1647,6 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
 		offset := e.nextOffset()
-		// Substitute pre-tx deps for any in-progress txn tips so the
-		// unsub doesn't reference uncommitted state.
 		deps := e.resolveTipDeps(tipSet.Tips())
 		unsub := &pb.Effect{
 			Key:            []byte(key),
@@ -1668,6 +1671,63 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	slog.Debug("handleEviction: dropped key and unsubscribed",
 		"key", key, "ref", evictedRef)
+}
+
+// isInActivePath checks whether evictedRef is in the DAG between the
+// current tips and the LCA snapshot. If it is, reconstruct would need
+// it and the key can't be served. If it's below the LCA, its state is
+// already folded into the snapshot and the key is still readable.
+func (e *Engine) isInActivePath(key string, evictedRef Tip, tips []Tip) bool {
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+
+	for _, t := range tips {
+		if t == evictedRef {
+			return true
+		}
+		visited[t] = true
+		queue = append(queue, t)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, err := e.getEffect(cur)
+		if err != nil {
+			return true
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			return false
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == evictedRef {
+				return true
+			}
+			if visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+		}
+	}
+
+	return false
 }
 
 // Close performs graceful shutdown of the engine and its background components.
