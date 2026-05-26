@@ -73,3 +73,66 @@ func TestResolveJoinAddr_Unresolvable(t *testing.T) {
 		t.Fatal("expected error for unresolvable name")
 	}
 }
+
+func TestResolveJoinAddr_LiteralHostPort(t *testing.T) {
+	addrs, err := ResolveJoinAddr(context.Background(), nil, "127.0.0.1:7001", 9999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(addrs) != 1 || addrs[0] != "127.0.0.1:7001" {
+		t.Fatalf("expected [127.0.0.1:7001], got %v", addrs)
+	}
+}
+
+func TestResolveJoinAddr_BareIP(t *testing.T) {
+	addrs, err := ResolveJoinAddr(context.Background(), nil, "10.0.0.1", 7379)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(addrs) != 1 || addrs[0] != "10.0.0.1:7379" {
+		t.Fatalf("expected [10.0.0.1:7379], got %v", addrs)
+	}
+}
+
+func TestResolveJoinAddr_CommaSeparated(t *testing.T) {
+	addrs, err := ResolveJoinAddr(context.Background(), nil, "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003", 9999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"}
+	if len(addrs) != len(want) {
+		t.Fatalf("expected %v, got %v", want, addrs)
+	}
+	for i, a := range addrs {
+		if a != want[i] {
+			t.Fatalf("addr[%d]: expected %s, got %s", i, want[i], a)
+		}
+	}
+}
+
+func TestResolveJoinAddr_CommaSeparatedDefaultPort(t *testing.T) {
+	addrs, err := ResolveJoinAddr(context.Background(), nil, "10.0.0.1,10.0.0.2", 7379)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"10.0.0.1:7379", "10.0.0.2:7379"}
+	if len(addrs) != len(want) {
+		t.Fatalf("expected %v, got %v", want, addrs)
+	}
+	for i, a := range addrs {
+		if a != want[i] {
+			t.Fatalf("addr[%d]: expected %s, got %s", i, want[i], a)
+		}
+	}
+}
+
+func TestResolveJoinAddr_HostnameStillUsesDNS(t *testing.T) {
+	// A bare hostname (no comma, no port, not an IP) should still go through DNS.
+	addrs, err := ResolveJoinAddr(context.Background(), nil, "localhost", 7379)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(addrs) == 0 {
+		t.Fatal("expected at least one address for localhost via DNS")
+	}
+}
