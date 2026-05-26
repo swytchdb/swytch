@@ -166,7 +166,7 @@ func TestCritbitBasicOperations(t *testing.T) {
 	}
 
 	// Delete
-	if !c.Delete("foo") {
+	if !c.Delete("foo", c.Contains("foo")) {
 		t.Error("Expected delete to return true")
 	}
 	if c.Size() != 0 {
@@ -177,7 +177,7 @@ func TestCritbitBasicOperations(t *testing.T) {
 	}
 
 	// Delete non-existent
-	if c.Delete("bar") {
+	if c.Delete("bar", c.Contains("bar")) {
 		t.Error("Expected delete to return false for non-existent key")
 	}
 
@@ -262,7 +262,7 @@ func TestCritbitCloseBehavior(t *testing.T) {
 	if c.Contains("foo") != nil {
 		t.Fatal("expected contains to return nil after close")
 	}
-	if c.Delete("foo") {
+	if c.Delete("foo", c.Contains("foo")) {
 		t.Fatal("expected delete to return false after close")
 	}
 
@@ -342,8 +342,8 @@ func TestCritbitRangeWithDeleted(t *testing.T) {
 		c.Insert(key, nil, NewTipSet(EffectRef{0, 0}))
 	}
 
-	c.Delete("b")
-	c.Delete("d")
+	c.Delete("b", c.Contains("b"))
+	c.Delete("d", c.Contains("d"))
 
 	var result []string
 	c.Range(func(key string) bool {
@@ -434,7 +434,7 @@ func TestCritbitRangeFromWithDeleted(t *testing.T) {
 	for _, key := range []string{"a", "b", "c", "d", "e"} {
 		c.Insert(key, nil, NewTipSet(EffectRef{0, 0}))
 	}
-	c.Delete("c")
+	c.Delete("c", c.Contains("c"))
 
 	var result []string
 	c.RangeFrom("b", func(key string) bool {
@@ -494,7 +494,7 @@ func TestCritbitFirstWithDeletedLeaf(t *testing.T) {
 	c.Insert("memtier-2", nil, NewTipSet(r(1)))
 	c.Insert("memtier-3", nil, NewTipSet(r(2)))
 
-	c.Delete("memtier-1")
+	c.Delete("memtier-1", c.Contains("memtier-1"))
 
 	first, ok, _ := c.FirstWithPrefix("memtier-", false)
 	if !ok {
@@ -504,7 +504,7 @@ func TestCritbitFirstWithDeletedLeaf(t *testing.T) {
 		t.Errorf("Expected first=memtier-2 after deleting memtier-1, got %s", first)
 	}
 
-	c.Delete("memtier-2")
+	c.Delete("memtier-2", c.Contains("memtier-2"))
 
 	first, ok, _ = c.FirstWithPrefix("memtier-", false)
 	if !ok {
@@ -523,7 +523,7 @@ func TestCritbitLastWithDeletedLeaf(t *testing.T) {
 	c.Insert("memtier-2", nil, NewTipSet(r(1)))
 	c.Insert("memtier-3", nil, NewTipSet(r(2)))
 
-	c.Delete("memtier-3")
+	c.Delete("memtier-3", c.Contains("memtier-3"))
 
 	last, ok, _ := c.LastWithPrefix("memtier-", false)
 	if !ok {
@@ -598,7 +598,7 @@ func TestCritbitClaimDeletedKey(t *testing.T) {
 	defer c.Close()
 
 	c.Insert("foo", nil, NewTipSet(r(100)))
-	c.Delete("foo")
+	c.Delete("foo", c.Contains("foo"))
 
 	exists, release := c.TryClaimKey("foo")
 	if exists {
@@ -674,7 +674,7 @@ func TestCritbitConcurrentInsertDelete(t *testing.T) {
 			defer wg.Done()
 			for i := range iterations {
 				key := fmt.Sprintf("key%d", i%20)
-				c.Delete(key)
+				c.Delete(key, c.Contains(key))
 			}
 		}()
 	}
@@ -886,7 +886,8 @@ func BenchmarkCritbitDelete(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.Delete(fmt.Sprintf("key%d", i))
+		key := fmt.Sprintf("key%d", i)
+		c.Delete(key, c.Contains(key))
 	}
 }
 
@@ -1236,7 +1237,7 @@ func TestCritbitBinaryKeyDelete(t *testing.T) {
 	c.Insert("\x00\x02", nil, NewTipSet(r(2)))
 	c.Insert("\x00\x03", nil, NewTipSet(r(3)))
 
-	if !c.Delete("\x00\x02") {
+	if !c.Delete("\x00\x02", c.Contains("\x00\x02")) {
 		t.Fatal("Delete returned false for existing key")
 	}
 	if c.Contains("\x00\x02") != nil {
@@ -1256,7 +1257,7 @@ func TestCritbitBinaryKeyDelete(t *testing.T) {
 	}
 
 	// Double delete
-	if c.Delete("\x00\x02") {
+	if c.Delete("\x00\x02", c.Contains("\x00\x02")) {
 		t.Error("Double delete should return false")
 	}
 
@@ -1452,7 +1453,7 @@ func TestCritbitBinaryKeysEmbeddedNulls(t *testing.T) {
 	}
 
 	// Delete one with embedded null, verify others remain
-	c.Delete("ab\x00c")
+	c.Delete("ab\x00c", c.Contains("ab\x00c"))
 	if c.Contains("ab\x00c") != nil {
 		t.Error("Deleted key should not be found")
 	}
@@ -1858,7 +1859,7 @@ func TestCritbitTryClaimBinaryKeys(t *testing.T) {
 	}
 
 	// Deleted key
-	c.Delete("\x00\x01")
+	c.Delete("\x00\x01", c.Contains("\x00\x01"))
 	exists, release = c.TryClaimKey("\x00\x01")
 	if exists || release != nil {
 		t.Error("TryClaimKey for deleted key should return false, nil")
@@ -1892,7 +1893,7 @@ func TestCritbitSnapshotBinaryKeys(t *testing.T) {
 	}
 
 	// Mutation isolation: delete from original
-	c.Delete("\x00\x01")
+	c.Delete("\x00\x01", c.Contains("\x00\x01"))
 	if snap.Contains("\x00\x01") == nil {
 		t.Error("Snapshot should still have key deleted from original")
 	}
@@ -1944,7 +1945,7 @@ func TestCritbitRemoveTipsBinaryKeys(t *testing.T) {
 
 	// RemoveTips on deleted key — should not panic
 	c.Insert("\x80", nil, NewTipSet(r(5)))
-	c.Delete("\x80")
+	c.Delete("\x80", c.Contains("\x80"))
 	c.RemoveTips("\x80", []EffectRef{r(5)})
 }
 
@@ -1960,7 +1961,7 @@ func TestReap_EmptyTree(t *testing.T) {
 func TestReap_SingleDeletedRoot(t *testing.T) {
 	c := NewCritbit()
 	c.Insert("a", nil, NewTipSet(r(1)))
-	c.Delete("a")
+	c.Delete("a", c.Contains("a"))
 	// Delete triggers auto-reap; wait for the goroutine to finish
 	for c.reapRunning.Load() {
 		runtime.Gosched()
@@ -1985,7 +1986,7 @@ func TestReap_UnlinksDeletedLeaf(t *testing.T) {
 	c := NewCritbit()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	c.Insert("b", nil, NewTipSet(r(2)))
-	c.Delete("a")
+	c.Delete("a", c.Contains("a"))
 
 	if n := c.reap(); n != 1 {
 		t.Fatalf("expected 1 reaped, got %d", n)
@@ -2006,7 +2007,8 @@ func TestReap_PreservesAllLiveKeys(t *testing.T) {
 	}
 	// Delete every other key
 	for i := 0; i < 100; i += 2 {
-		c.Delete(fmt.Sprintf("key-%03d", i))
+		key := fmt.Sprintf("key-%03d", i)
+		c.Delete(key, c.Contains(key))
 	}
 
 	for c.reap() > 0 {
@@ -2038,7 +2040,8 @@ func TestReap_MultiplePassesNeeded(t *testing.T) {
 	}
 	// Delete all but one — auto-reap fires from DeleteAndSnapshot
 	for i := range 19 {
-		c.Delete(fmt.Sprintf("k%02d", i))
+		key := fmt.Sprintf("k%02d", i)
+		c.Delete(key, c.Contains(key))
 	}
 
 	// Wait for auto-reap goroutine to finish
@@ -2058,7 +2061,7 @@ func TestReap_ReinsertAfterReap(t *testing.T) {
 	c := NewCritbit()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	c.Insert("b", nil, NewTipSet(r(2)))
-	c.Delete("a")
+	c.Delete("a", c.Contains("a"))
 
 	for c.reap() > 0 {
 	}
@@ -2090,7 +2093,7 @@ func TestReap_ConcurrentInsertAndReap(t *testing.T) {
 		defer wg.Done()
 		for round := range 200 {
 			key := fmt.Sprintf("k%04d", round%1000)
-			c.Delete(key)
+			c.Delete(key, c.Contains(key))
 			c.Insert(key, nil, NewTipSet(r(uint64(round+10000))))
 		}
 	}()

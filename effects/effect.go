@@ -243,7 +243,8 @@ func (e *Engine) FlushIndex() {
 	slog.Info("FlushIndex: wiping all keys from index")
 	keys := e.index.Keys()
 	for _, key := range keys {
-		e.index.Delete(key)
+		tips := e.index.Contains(key)
+		e.index.Delete(key, tips)
 		if e.cache != nil {
 			e.cache.Evict(key)
 		}
@@ -321,7 +322,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		if tipSet == nil {
 			return true
 		}
-		return !e.isInActivePath(key, ref, tipSet.Tips())
+		return !e.isInActivePathCacheOnly(key, ref, tipSet.Tips())
 	})
 	// After-eviction hook: the cache lost the bytes for an effect, so
 	// the local index can no longer honestly claim authority over its
@@ -329,7 +330,8 @@ func NewEngine(cfg EngineConfig) *Engine {
 	// fresh goroutine because evictNotify runs under shard.mu and
 	// handleEviction takes other locks + does a network broadcast.
 	e.effectCache.SetEvictNotify(func(ref keytrie.EffectRef, eff *pb.Effect) {
-		go e.handleEviction(ref, eff)
+		tipSet := e.index.Contains(string(eff.Key))
+		go e.handleEviction(ref, eff, tipSet)
 	})
 	e.cache = cache
 
@@ -1743,7 +1745,7 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 // same key can evict in close succession, but only one goroutine
 // runs the broadcast + teardown. Invoked on a fresh goroutine
 // because evictNotify runs under cache shard.mu.
-func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
+func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect, triggerTips *keytrie.TipSet) {
 	if e.closed.Load() || evictedEffect == nil {
 		return
 	}
@@ -1755,12 +1757,11 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 
 	key := string(evictedEffect.Key)
 
-	tipSet := e.index.Contains(key)
-	if tipSet == nil {
+	if triggerTips == nil {
 		return
 	}
 
-	if !e.isInActivePath(key, evictedRef, tipSet.Tips()) {
+	if !e.isInActivePathCacheOnly(key, evictedRef, triggerTips.Tips()) {
 		slog.Debug("handleEviction: evicted effect below LCA, key still readable",
 			"key", key, "ref", evictedRef)
 		return
@@ -1771,9 +1772,8 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect) {
 	}
 	defer e.unsubInFlight.Delete(key)
 
-	tipSet = e.index.DeleteAndSnapshot(key)
+	tipSet := e.index.DeleteAndSnapshot(key, triggerTips)
 	if tipSet == nil {
-		e.subscriptions.Delete(key)
 		return
 	}
 
@@ -1829,6 +1829,67 @@ func (e *Engine) isInActivePath(key string, evictedRef Tip, tips []Tip) bool {
 		eff, err := e.getEffect(cur)
 		if err != nil {
 			return true
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			return false
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == evictedRef {
+				return true
+			}
+			if visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+		}
+	}
+
+	return false
+}
+
+// isInActivePathCacheOnly is like isInActivePath but only uses locally
+// cached effects — no network fetches. If a dep is missing from the
+// cache, the chain is already broken and the effect is safe to evict
+// (handleEviction will drop the whole key). Used by the evict decider
+// which must not do I/O.
+func (e *Engine) isInActivePathCacheOnly(key string, evictedRef Tip, tips []Tip) bool {
+	if e.effectCache == nil {
+		return false
+	}
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+
+	for _, t := range tips {
+		if t == evictedRef {
+			return true
+		}
+		visited[t] = true
+		queue = append(queue, t)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, ok := e.effectCache.Get(cur, 0)
+		if !ok {
+			return false
 		}
 
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
