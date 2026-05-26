@@ -1545,33 +1545,100 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 		nack.TipDetails = append(nack.TipDetails, detail)
 	}
 
+	nack.CausalChain = e.collectCausalChain(key, tips)
+
 	return nack
 }
 
-// ingestNackTips fetches and processes every effect referenced in a NACK's
-// tip details so the local DAG catches up with the peer's view. A NACK
-// is the cluster telling us "you missed these tips"; ignoring the payload
-// leaves us permanently behind and the cluster never converges.
+// collectCausalChain walks the local DAG from tips to the LCA snapshot
+// (BFS, same stop condition as dag.bfs) and returns every effect ref in
+// the active path. The receiver can bulk-fetch all of them instead of
+// discovering the chain one hop at a time.
+func (e *Engine) collectCausalChain(key string, tips []keytrie.EffectRef) []*pb.EffectRef {
+	if e.effectCache == nil || len(tips) == 0 {
+		return nil
+	}
+	var zero Tip
+	visited := make(map[Tip]bool, len(tips)*4)
+	queue := make([]Tip, 0, len(tips))
+	var chain []*pb.EffectRef
+
+	for _, tp := range tips {
+		if tp == zero || visited[tp] {
+			continue
+		}
+		visited[tp] = true
+		queue = append(queue, tp)
+		chain = append(chain, toPbRef(tp))
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		eff, ok := e.effectCache.Get(cur, 0)
+		if !ok {
+			continue
+		}
+
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			break
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+
+		for _, ref := range refs {
+			dt := r(ref)
+			if dt == zero || visited[dt] {
+				continue
+			}
+			visited[dt] = true
+			queue = append(queue, dt)
+			chain = append(chain, ref)
+		}
+	}
+
+	return chain
+}
+
+// ingestNackTips fetches and processes effects referenced in a NACK's
+// tip details so the local DAG catches up with the peer's view.
 //
-// Walks each tip's dep chain (BFS) and pulls any effect we don't already
-// have via FetchFromAny + HandleRemote. Idempotent — effects we already
-// hold are skipped.
+// When the NACK includes a CausalChain (the sender pre-walked its DAG
+// from tips to LCA), all refs are fetched in parallel — no sequential
+// dep discovery needed. Falls back to BFS dep-walking for old peers
+// that don't populate the chain.
 func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 	if nack == nil || e.broadcaster == nil {
 		return
 	}
+
+	if len(nack.CausalChain) > 0 {
+		go e.ingestCausalChain(nack)
+	}
+
 	var zero Tip
 	visited := make(map[Tip]bool)
-	var stack []Tip
+	queue := make([]Tip, 0, len(nack.TipDetails))
 	for _, d := range nack.TipDetails {
 		if d == nil || d.Ref == nil {
 			continue
 		}
-		stack = append(stack, r(d.Ref))
+		queue = append(queue, r(d.Ref))
 	}
-	for len(stack) > 0 {
-		off := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+	for len(queue) > 0 {
+		off := queue[0]
+		queue = queue[1:]
 		if off == zero || visited[off] {
 			continue
 		}
@@ -1587,9 +1654,67 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 		}
 		if e.effectCache != nil {
 			if cached, ok := e.effectCache.Get(off, 0); ok {
-				stack = append(stack, fromPbRefs(cached.Deps)...)
+				if snap := cached.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+					break
+				}
+				stack := fromPbRefs(cached.Deps)
+				queue = append(queue, stack...)
 			}
 		}
+	}
+}
+
+// ingestCausalChain bulk-fetches every ref in the NACK's pre-computed
+// causal chain in parallel and caches the deserialized effects. Does
+// NOT install tips — the synchronous ingestNackTips / walkAndInstall
+// path handles that. This just warms the cache so dag.bfs finds
+// everything locally instead of doing sequential FetchFromAny calls.
+func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
+	if e.effectCache == nil {
+		return
+	}
+
+	var pending int
+	type fetchResult struct {
+		ref  Tip
+		data []byte
+	}
+	results := make(chan fetchResult, len(nack.CausalChain))
+
+	for _, ref := range nack.CausalChain {
+		off := r(ref)
+		if _, ok := e.effectCache.Get(off, 0); ok {
+			continue
+		}
+		pending++
+		go func(ref *pb.EffectRef) {
+			data, err := e.broadcaster.FetchFromAny(ref)
+			if err != nil {
+				results <- fetchResult{}
+				return
+			}
+			results <- fetchResult{ref: r(ref), data: data}
+		}(ref)
+	}
+
+	for range pending {
+		res := <-results
+		var zero Tip
+		if res.ref == zero || len(res.data) == 0 {
+			continue
+		}
+		protoData := res.data
+		if len(res.data) > 4 {
+			keyLen := binary.LittleEndian.Uint32(res.data[:4])
+			if keyLen > 0 && uint32(len(res.data)) >= 4+keyLen {
+				protoData = res.data[4+keyLen:]
+			}
+		}
+		eff := &pb.Effect{}
+		if err := UnmarshalEffect(protoData, eff); err != nil {
+			continue
+		}
+		e.effectCache.Put(res.ref, eff)
 	}
 }
 

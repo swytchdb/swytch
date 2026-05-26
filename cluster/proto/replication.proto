@@ -369,6 +369,7 @@ message NackNotify {
   repeated EffectRef tips = 3;       // sender's full tip set for this key
   repeated NackTipDetail tip_details = 4;  // metadata per tip for smart conflict detection
   bool not_subscribed = 5;           // receiver is not subscribed to this key, so it discarded the write
+  repeated EffectRef causal_chain = 6; // all effect refs from tips to LCA snapshot; lets receiver bulk-fetch
 }
 
 // ForwardedTransaction carries an entire transaction to be executed on
