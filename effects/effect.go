@@ -814,7 +814,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 					"key", key, "offset", notify.Origin, "unsubscribe", sub.Unsubscribe)
 				return nil, nil
 			}
-			slog.Info("HandleRemote: dropping notify for key with no local authority",
+			slog.Debug("HandleRemote: dropping notify for key with no local authority",
 				"key", key, "offset", notify.Origin)
 			return []*pb.NackNotify{{Key: eff.Key, NotSubscribed: true}}, nil
 		}
