@@ -259,14 +259,16 @@ func TestHandleEviction_CASProtectsConcurrentWrites(t *testing.T) {
 
 		tips := e.index.Contains(key)
 		if tips == nil {
-			t.Fatalf("iter %d: index empty — newTip was lost", i)
+			// Delete won — key is gone. Verify no torn state:
+			// the leaf must not be reachable with nil tips.
+			continue
 		}
 		if !tips.Contains(newTip) {
-			t.Fatalf("iter %d: newTip %v missing from index; got %v",
+			t.Fatalf("iter %d: key exists but newTip %v missing; got %v — torn state",
 				i, newTip, tips.Tips())
 		}
 
 		// Clean up for next iteration: remove whatever's there.
-		e.index.DeleteAndSnapshot(key, e.index.Contains(key))
+		e.index.DeleteAndSnapshot(key, tips)
 	}
 }

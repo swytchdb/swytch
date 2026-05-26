@@ -461,22 +461,31 @@ func (c *Critbit) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 	if c.closed.Load() {
 		return nil
 	}
+
+	rt := c.reapMu.RLock()
+
 	rootNode := c.root.Load()
 	if rootNode == nil {
+		c.reapMu.RUnlock(rt)
 		return nil
 	}
 	leaf := c.findBestMatch(rootNode, key)
 	if leaf == nil || leaf.key != key {
+		c.reapMu.RUnlock(rt)
 		return nil
 	}
 	if !leaf.deleted.CompareAndSwap(false, true) {
+		c.reapMu.RUnlock(rt)
 		return nil
 	}
 	if !leaf.tips.CompareAndSwap(old, nil) {
 		leaf.deleted.Store(false)
+		c.reapMu.RUnlock(rt)
 		return nil
 	}
 	c.size.Add(-1)
+
+	c.reapMu.RUnlock(rt)
 
 	deleted := c.deletedCount.Add(1)
 	live := c.size.Load()
