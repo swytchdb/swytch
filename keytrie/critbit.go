@@ -927,8 +927,7 @@ func (c *Critbit) maybeReap() {
 	}()
 }
 
-// reap walks the tree bottom-up and unlinks deleted leaves by
-// replacing their parent internal node with the surviving sibling.
+// reap does a single BFS walk pruning every deleted leaf it finds.
 // Takes the write-lock on reapMu so no structural insert can race.
 // Returns the number of deleted leaves unlinked.
 func (c *Critbit) reap() int {
@@ -951,45 +950,64 @@ func (c *Critbit) reap() int {
 		}
 		return 0
 	}
-	return c.reapSubtree(root, nil, 0)
-}
 
-// reapSubtree must be called with reapMu write-locked.
-func (c *Critbit) reapSubtree(node, parent *critNode, dirFromParent int) int {
-	if node == nil || node.isLeaf {
-		return 0
+	type bfsEntry struct {
+		node          *critNode
+		parent        *critNode
+		dirFromParent int
 	}
 
 	reaped := 0
+	queue := make([]bfsEntry, 1, 64)
+	queue[0] = bfsEntry{node: root}
 
-	// DFS children first (bottom-up)
-	for dir := range 2 {
-		child := node.child[dir].Load()
-		if child != nil && !child.isLeaf {
-			reaped += c.reapSubtree(child, node, dir)
-		}
-	}
+	for i := 0; i < len(queue); i++ {
+		e := queue[i]
+		node := e.node
 
-	// Check if either child is a deleted leaf we can unlink
-	for dir := range 2 {
-		child := node.child[dir].Load()
-		if child == nil || !child.isLeaf || !child.isDeleted() {
-			continue
+		pruned := false
+		for dir := range 2 {
+			child := node.child[dir].Load()
+			if child == nil || !child.isLeaf || !child.isDeleted() {
+				continue
+			}
+
+			sibling := node.child[1-dir].Load()
+			if sibling == nil {
+				continue
+			}
+
+			if e.parent == nil {
+				c.root.Store(sibling)
+			} else {
+				e.parent.child[e.dirFromParent].Store(sibling)
+			}
+			c.deletedCount.Add(-1)
+			reaped++
+			pruned = true
+
+			if !sibling.isLeaf {
+				queue = append(queue, bfsEntry{
+					node:          sibling,
+					parent:        e.parent,
+					dirFromParent: e.dirFromParent,
+				})
+			}
+			break
 		}
 
-		sibling := node.child[1-dir].Load()
-		if sibling == nil {
-			continue
+		if !pruned {
+			for dir := range 2 {
+				child := node.child[dir].Load()
+				if child != nil && !child.isLeaf {
+					queue = append(queue, bfsEntry{
+						node:          child,
+						parent:        node,
+						dirFromParent: dir,
+					})
+				}
+			}
 		}
-
-		if parent == nil {
-			c.root.Store(sibling)
-		} else {
-			parent.child[dirFromParent].Store(sibling)
-		}
-		c.deletedCount.Add(-1)
-		reaped++
-		return reaped
 	}
 
 	return reaped
