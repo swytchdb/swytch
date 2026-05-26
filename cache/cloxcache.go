@@ -111,22 +111,6 @@ type Cache[K Key, V any] interface {
 	Close()
 }
 
-var cloxTimestamp atomic.Int64
-var startup = sync.Once{}
-
-func init() {
-	startup.Do(func() {
-		cloxTimestamp.Store(time.Now().UnixNano())
-		go func() {
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for range ticker.C {
-				cloxTimestamp.Store(time.Now().UnixNano())
-			}
-		}()
-	})
-}
 
 // CloxCache is a lock-free adaptive in-memory cache.
 // It stores generic keys of type K (string or []byte) and values of type V.
@@ -175,10 +159,11 @@ type shard[K Key, V any] struct {
 	hand atomic.Uint64 // per-shard CLOCK hand position
 	_    [56]byte      // pad to 64
 
-	// cache line 3: hit tracking
+	// cache line 3: hit tracking + access timestamp (all hot-path writes)
 	windowHits atomic.Uint64 // hits in current measurement window
 	windowOps  atomic.Uint64 // total ops in current measurement window
-	_          [48]byte      // pad to 64
+	timestamp  atomic.Uint64 // per-shard monotonic counter for LRU ordering
+	_          [40]byte      // pad to 64
 
 	// cache line 4: adaptive k — threshold tracking (per-shard, no global contention)
 	k                  atomic.Int32  // current protection threshold for this shard
@@ -205,7 +190,7 @@ type recordNode[K Key, V any] struct {
 	next       atomic.Pointer[recordNode[K, V]] // chain traversal
 	keyHash    uint64                           // fast hash comparison
 	freq       atomic.Int32                     // access frequency (negative = ghost)
-	lastAccess atomic.Int64                     // timestamp for LRU tiebreaking
+	lastAccess atomic.Uint64                    // per-shard monotonic timestamp for LRU tiebreaking
 	key        K
 }
 
@@ -336,7 +321,7 @@ func (c *CloxCache[K, V]) Get(key K, offset uint64) (V, bool) {
 					}
 					// Only update timestamp when we successfully bumped freq
 					// This amortises the cost, and hot items skip updates entirely
-					node.lastAccess.Store(cloxTimestamp.Load())
+					node.lastAccess.Store(shard.timestamp.Add(1))
 				}
 			}
 
@@ -385,7 +370,7 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 					c.bytes.Add(c.sizeFunc(key, value) - c.sizeFunc(key, oldValue))
 				}
 				node.value.Store(value)
-				node.lastAccess.Store(cloxTimestamp.Load())
+				node.lastAccess.Store(shard.timestamp.Add(1))
 				for {
 					f = node.freq.Load()
 					if f >= maxFrequency || f < 1 {
@@ -409,7 +394,7 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 	}
 	newNode.value.Store(value)
 	newNode.freq.Store(initialFreq)
-	newNode.lastAccess.Store(cloxTimestamp.Load())
+	newNode.lastAccess.Store(shard.timestamp.Add(1))
 
 	// Try CAS onto head
 	shard.mu.Lock()
@@ -430,7 +415,7 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 					}
 					node.value.Store(value)
 					node.freq.Store(promotedFreq)
-					node.lastAccess.Store(cloxTimestamp.Load())
+					node.lastAccess.Store(shard.timestamp.Add(1))
 					shard.ghostCount.Add(-1)
 					shard.entryCount.Add(1)
 					return true, k, 0, 0
@@ -442,7 +427,7 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 					c.bytes.Add(c.sizeFunc(key, value) - c.sizeFunc(key, oldValue))
 				}
 				node.value.Store(value)
-				node.lastAccess.Store(cloxTimestamp.Load())
+				node.lastAccess.Store(shard.timestamp.Add(1))
 				return true, k, 0, 0
 			}
 		}
@@ -506,7 +491,7 @@ func (c *CloxCache[K, V]) PutBack(key K, value V, oldSize int64) (success bool, 
 			node.value.Store(value)
 
 			// Update last access time
-			node.lastAccess.Store(cloxTimestamp.Load())
+			node.lastAccess.Store(shard.timestamp.Add(1))
 
 			// Bump frequency (saturating at maxFrequency)
 			for {
@@ -551,7 +536,7 @@ func (c *CloxCache[K, V]) CompareAndSwap(key K, expected, new V) (swapped bool, 
 			if f > 0 {
 				// Use atomic CAS - truly atomic, no interleaving
 				if node.value.CompareAndSwap(expected, new) {
-					node.lastAccess.Store(cloxTimestamp.Load())
+					node.lastAccess.Store(shard.timestamp.Add(1))
 					return true, new, true, 0
 				}
 				// CAS failed - return current value for retry
@@ -636,15 +621,15 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 	// Also track oldest ghost for eviction when ghost capacity is full
 	var lowFreqVictim, lowFreqPrev *recordNode[K, V]
 	var lowFreqSlot *atomic.Pointer[recordNode[K, V]]
-	lowFreqAccess := int64(^uint64(0) >> 1) // max int64
+	lowFreqAccess := uint64(^uint64(0))
 
 	var fallbackVictim, fallbackPrev *recordNode[K, V]
 	var fallbackSlot *atomic.Pointer[recordNode[K, V]]
-	fallbackAccess := int64(^uint64(0) >> 1)
+	fallbackAccess := uint64(^uint64(0))
 
 	var oldestGhost, oldestGhostPrev *recordNode[K, V]
 	var oldestGhostSlot *atomic.Pointer[recordNode[K, V]]
-	oldestGhostAccess := int64(^uint64(0) >> 1)
+	oldestGhostAccess := uint64(^uint64(0))
 
 	// Walks one slot's chain and updates the captured victim/ghost trackers.
 	// Returns true if a live (non-ghost, non-pinned) eviction candidate
