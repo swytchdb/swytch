@@ -115,7 +115,7 @@ func isContiguous(result []string, branch []string) bool {
 
 func TestOrdered_LinearChain(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	a := orderedAppend(log, 10, 1, "id-a", []byte("a"))
 	b := orderedAppend(log, 20, 1, "id-b", []byte("b"), a)
@@ -135,7 +135,7 @@ func TestOrdered_LinearChain(t *testing.T) {
 
 func TestOrdered_ForkPreservesCausalOrder(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	a := orderedAppend(log, 10, 1, "id-a", []byte("a"))
 	b := orderedAppend(log, 20, 1, "id-b", []byte("b"), a)
@@ -170,7 +170,7 @@ func TestOrdered_ForkPreservesCausalOrder(t *testing.T) {
 
 func TestOrdered_StableUnderGrowth(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	a := orderedAppend(log, 10, 1, "id-a", []byte("a"))
 	b := orderedAppend(log, 20, 2, "id-b", []byte("b"), a)
@@ -225,7 +225,7 @@ func TestOrdered_DeterministicAcrossViews(t *testing.T) {
 	f := orderedAppend(log, 45, 3, "id-f", []byte("f"), ee)
 
 	// View 1: tips = [d, f]
-	e1 := newSnapshotEngine(log, nil)
+	e1 := newSnapshotEngine(log)
 	e1.index.Insert("k", nil, keytrie.NewTipSet(d, f))
 	r1, _, _, err := e1.GetSnapshot("k")
 	if err != nil {
@@ -241,7 +241,7 @@ func TestOrdered_DeterministicAcrossViews(t *testing.T) {
 		Deps:   []*pb.EffectRef{toPbRef(d), toPbRef(f)},
 		Kind:   &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 4}},
 	})
-	e2 := newSnapshotEngine(log, nil)
+	e2 := newSnapshotEngine(log)
 	e2.index.Insert("k", nil, keytrie.NewTipSet(sub))
 	r2, _, _, err := e2.GetSnapshot("k")
 	if err != nil {
@@ -256,7 +256,7 @@ func TestOrdered_DeterministicAcrossViews(t *testing.T) {
 
 func TestOrdered_BranchContiguity_TwoBranches(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	x := orderedAppend(log, 10, 1, "id-x", []byte("x"))
 	a1 := orderedAppend(log, 20, 1, "id-a1", []byte("a1"), x)
@@ -296,7 +296,7 @@ func TestOrdered_BranchContiguity_TwoBranches(t *testing.T) {
 
 func TestOrdered_BranchContiguity_ThreeBranches(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	x := orderedAppend(log, 10, 1, "id-x", []byte("x"))
 	a1 := orderedAppend(log, 20, 1, "id-a1", []byte("a1"), x)
@@ -336,7 +336,7 @@ func TestOrdered_MergeTipDoesNotChangeOrdering(t *testing.T) {
 	b2 := orderedAppend(log, 31, 2, "id-b2", []byte("b2"), b1)
 
 	// Without merge node: multi-tip
-	e1 := newSnapshotEngine(log, nil)
+	e1 := newSnapshotEngine(log)
 	e1.index.Insert("k", nil, keytrie.NewTipSet(a2, b2))
 	r1, _, _, err := e1.GetSnapshot("k")
 	if err != nil {
@@ -352,7 +352,7 @@ func TestOrdered_MergeTipDoesNotChangeOrdering(t *testing.T) {
 		Deps:   []*pb.EffectRef{toPbRef(a2), toPbRef(b2)},
 		Kind:   &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 3}},
 	})
-	e2 := newSnapshotEngine(log, nil)
+	e2 := newSnapshotEngine(log)
 	e2.index.Insert("k", nil, keytrie.NewTipSet(merge))
 	r2, _, _, err := e2.GetSnapshot("k")
 	if err != nil {
@@ -419,7 +419,7 @@ func TestOrdered_MergeIsCommutative(t *testing.T) {
 
 func TestCrossTxnDepsMustNotConfirm(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Non-transactional root
 	root := log.putEffect(&pb.Effect{
@@ -533,7 +533,7 @@ func TestCrossTxnDepsMustNotConfirm(t *testing.T) {
 // Correct: 10 + 7 + 2 + 1 + 3 = 23
 func TestLCA_SnapshotOnOneBranchMustNotSkipOtherBranch(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	root := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -612,7 +612,7 @@ func TestLCA_SnapshotOnOneBranchMustNotSkipOtherBranch(t *testing.T) {
 // The winner's effects should be visible; the loser's should not.
 func TestCompetingBinds_FirstWins(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	root := log.putEffect(&pb.Effect{
 		Key:            []byte("k"),
@@ -713,7 +713,7 @@ func TestCompetingBinds_FirstWins(t *testing.T) {
 // afterB are non-transactional and should be visible regardless.
 func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	root := log.putEffect(&pb.Effect{
 		Key:            []byte("k"),
@@ -807,7 +807,7 @@ func TestCompetingBinds_LoserDependentsInvisible(t *testing.T) {
 // Their predicates don't intersect, so both should be visible.
 func TestCompetingBinds_NonOverlappingPredicatesBothVisible(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	root := log.putEffect(&pb.Effect{
 		Key:            []byte("k"),
@@ -921,7 +921,7 @@ func TestCompetingBinds_NonOverlappingPredicatesBothVisible(t *testing.T) {
 // in the DAG and the walker finds it as the LCA on the next read.
 func TestCompaction_SnapshotAppearsInDAG(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Emit 60 effects via Context to guarantee compaction triggers
 	// (threshold is 20+rand(31), max 50).
@@ -988,7 +988,7 @@ func TestCompaction_SnapshotAppearsInDAG(t *testing.T) {
 func TestCompaction_BeaconPattern(t *testing.T) {
 
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	nodeIDBytes := func(id uint64) []byte {
 		b := make([]byte, 8)

@@ -755,11 +755,6 @@ func (c *Context) flushNonTx() error {
 			}
 		}
 
-		// Evict snapshot cache so next read sees the new state
-		if c.engine.cache != nil {
-			c.engine.cache.Evict(key)
-		}
-
 		// Fire notification callbacks after effect is durable
 		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
 			c.engine.OnKeyDataAdded(key)
@@ -1322,17 +1317,14 @@ func (c *Context) flushTx() error {
 	}
 
 	slog.Debug("Flush: transaction committed", "bind_offset", bindOffset)
-	// Committed: clean up pending tx tips, reset abort counts, evict cache
+	// Committed: clean up pending tx tips, reset abort counts.
 	// When horizon is active, MakeVisible (fast-path or timer) handles
-	// pendingTxTips cleanup and cache eviction.
+	// pendingTxTips cleanup.
 	for _, pk := range ptxn.keys {
 		if c.engine.horizon == nil {
 			c.engine.pendingTxTips.Delete(pk.newTip)
 		}
 		c.engine.resetAbortCount(pk.key)
-		if c.engine.horizon == nil && c.engine.cache != nil {
-			c.engine.cache.Evict(pk.key)
-		}
 	}
 
 	// Fire notification callbacks after successful commit
