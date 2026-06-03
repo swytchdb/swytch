@@ -147,29 +147,11 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	}
 
 	// Read index tips once — these are the tips the returned snapshot
-	// corresponds to.  We capture them before the cache check so that
-	// a concurrent HandleRemote that evicts the cache AND updates the
-	// index between our reads is correctly handled: we either get a
-	// cache hit with the pre-update tips (correct), or a cache miss
-	// followed by reconstruction against the new tips (also correct).
+	// corresponds to.
 	indexTips := e.index.Contains(key)
 	var snapshotTips []Tip
 	if indexTips != nil {
 		snapshotTips = indexTips.Tips()
-	}
-
-	// Fast path: cache hit
-	if e.cache != nil {
-		if r, ok := e.cache.Get(key); ok {
-			r = filterSnapshot(r)
-			if r == nil {
-				slog.Debug("GetSnapshot: expired/empty", "key", key)
-				e.cache.Evict(key)
-				return nil, nil, 0, nil
-			}
-			slog.Debug("GetSnapshot: cache hit", "key", key)
-			return r, snapshotTips, 0, nil
-		}
 	}
 
 	// Check index for tips
@@ -189,7 +171,7 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// avoid returning a value that excludes a bind which will be present
 	// in the next reconstruct from the same tips (the Elle :incompatible-order
 	// shape from Jepsen run 26373595271).
-	slog.Debug("GetSnapshot: cache miss, reconstructing", "key", key, "tips", tipOffsets)
+	slog.Debug("GetSnapshot: reconstructing", "key", key, "tips", tipOffsets)
 	result, chainLen, err := e.reconstruct(key, tipOffsets, "", true)
 	if err != nil {
 		slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
@@ -200,10 +182,6 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// strips metadata-only snapshots. This populates the in-memory map so
 	// the handler can do fast lookups without a full snapshot.
 	e.updateSerializationState(key, result)
-
-	if result != nil && e.cache != nil {
-		e.cache.Put(key, result)
-	}
 
 	// Targeted filter: surface a metadata-only ReducedEffect as nil so
 	// callers don't see a "key exists" signal driven by the originator's

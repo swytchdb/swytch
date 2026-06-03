@@ -53,14 +53,6 @@ type Broadcaster interface {
 	ForwardTransaction(ctx context.Context, targetNodeID pb.NodeID, tx *pb.ForwardedTransaction) (*pb.ForwardedResponse, error)
 }
 
-// StateCache caches materialized ReducedEffect values by key.
-// Implementations must be safe for concurrent use.
-type StateCache interface {
-	Get(key string) (*pb.ReducedEffect, bool)
-	Put(key string, value *pb.ReducedEffect)
-	Evict(key string)
-}
-
 // PeerRTTProvider provides RTT measurements to peers for optimal leader selection.
 type PeerRTTProvider interface {
 	// GetRTT returns the estimated round-trip time to the given peer.

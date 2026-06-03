@@ -63,7 +63,6 @@ type bootstrapCollector struct {
 // and safety config is swapped atomically.
 type Engine struct {
 	index       keytrie.KeyIndex
-	cache       StateCache  // nil disables caching
 	broadcaster Broadcaster // nil for standalone
 
 	nodeID pb.NodeID
@@ -245,9 +244,6 @@ func (e *Engine) FlushIndex() {
 	for _, key := range keys {
 		tips := e.index.Contains(key)
 		e.index.Delete(key, tips)
-		if e.cache != nil {
-			e.cache.Evict(key)
-		}
 	}
 }
 
@@ -277,8 +273,6 @@ func (sm *safetyMap) modeForKey(key string) SafetyMode {
 
 // NewEngine creates a new Engine from the given configuration.
 func NewEngine(cfg EngineConfig) *Engine {
-	cache := cfg.Cache
-
 	e := &Engine{
 		index:              cfg.Index,
 		broadcaster:        cfg.Broadcaster,
@@ -333,7 +327,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 		tipSet := e.index.Contains(string(eff.Key))
 		go e.handleEviction(ref, eff, tipSet)
 	})
-	e.cache = cache
 
 	// Memory enforcement: start a background loop that compares process
 	// RSS against the target and adjusts cache capacity accordingly.
@@ -1002,14 +995,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		nacks = append(nacks, e.buildEnrichedNack(key, notify.Origin, tipOffsets))
 	}
 
-	// Invalidate cache — but NOT for bind effects when horizon is active
-	// (deferred to horizon timer / MakeVisible)
-	if eff.GetTxnBind() != nil && e.horizon != nil {
-		// Cache eviction deferred to MakeVisible
-	} else if e.cache != nil {
-		e.cache.Evict(key)
-	}
-
 	// Fire notification callbacks for remote effects
 	if eff.TxnId != "" && eff.GetTxnBind() == nil {
 		// In-progress transactional effect — skip notification until bind
@@ -1159,10 +1144,6 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 			}
 			e.updateIndex(kbKey, nil, r(notify.Origin))
 		}
-	}
-
-	if e.cache != nil {
-		e.cache.Evict(key)
 	}
 
 	return nil
@@ -2199,10 +2180,6 @@ func (e *Engine) probeAndFetchKey(key string) {
 			continue
 		}
 		fetchStack = append(fetchStack, fromPbRefs(fetchedEff.Deps)...)
-	}
-
-	if e.cache != nil {
-		e.cache.Evict(key)
 	}
 
 	slog.Debug("anti-entropy: synced", "key", key, "fetched", len(fetched), "new_tips", len(missing))

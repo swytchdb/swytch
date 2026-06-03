@@ -42,7 +42,6 @@ type KeyRangeRule struct {
 type EngineConfig struct {
 	NodeID        pb.NodeID
 	Index         keytrie.KeyIndex
-	Cache         StateCache      // nil disables caching
 	Broadcaster   Broadcaster     // nil for standalone
 	RTTProvider   PeerRTTProvider // nil disables RTT-based leader selection
 	DefaultMode   SafetyMode

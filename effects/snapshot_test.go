@@ -40,29 +40,6 @@ func sTs(nanos int64) *timestamppb.Timestamp {
 	return timestamppb.New(time.Unix(0, nanos))
 }
 
-// --- mock cache ---
-
-type mockCache struct {
-	data map[string]*pb.ReducedEffect
-}
-
-func newMockCache() *mockCache {
-	return &mockCache{data: make(map[string]*pb.ReducedEffect)}
-}
-
-func (c *mockCache) Get(key string) (*pb.ReducedEffect, bool) {
-	v, ok := c.data[key]
-	return v, ok
-}
-
-func (c *mockCache) Put(key string, value *pb.ReducedEffect) {
-	c.data[key] = value
-}
-
-func (c *mockCache) Evict(key string) {
-	delete(c.data, key)
-}
-
 // --- snapshotLog: test helper for pre-populating the effect DAG ---
 
 type snapshotLog struct {
@@ -99,7 +76,7 @@ func (l *snapshotLog) putEffect(eff *pb.Effect) Tip {
 
 // --- helpers ---
 
-func newSnapshotEngine(log *snapshotLog, cache StateCache) *Engine {
+func newSnapshotEngine(log *snapshotLog) *Engine {
 	var ec *clox.CloxCache[Tip, *pb.Effect]
 	if log != nil {
 		ec = log.effectCache
@@ -108,7 +85,6 @@ func newSnapshotEngine(log *snapshotLog, cache StateCache) *Engine {
 	}
 	e := &Engine{
 		index:             keytrie.New(),
-		cache:             cache,
 		effectCache:       ec,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -128,7 +104,7 @@ func newSnapshotEngine(log *snapshotLog, cache StateCache) *Engine {
 // --- GetSnapshot tests ---
 
 func TestGetSnapshot_MissReturnsNil(t *testing.T) {
-	e := newSnapshotEngine(nil, nil)
+	e := newSnapshotEngine(nil)
 
 	r, _, _, err := e.GetSnapshot("missing")
 	if err != nil {
@@ -141,7 +117,7 @@ func TestGetSnapshot_MissReturnsNil(t *testing.T) {
 
 func TestGetSnapshot_SingleEffect(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -163,7 +139,7 @@ func TestGetSnapshot_SingleEffect(t *testing.T) {
 
 func TestGetSnapshot_LinearChain(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -190,7 +166,7 @@ func TestGetSnapshot_LinearChain(t *testing.T) {
 
 func TestGetSnapshot_LinearAdditiveChain(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -217,7 +193,7 @@ func TestGetSnapshot_LinearAdditiveChain(t *testing.T) {
 
 func TestGetSnapshot_ForkLWW(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// root → branch A (HLC=20) and branch B (HLC=30)
 	root := log.putEffect(&pb.Effect{
@@ -252,7 +228,7 @@ func TestGetSnapshot_ForkLWW(t *testing.T) {
 
 func TestGetSnapshot_ForkAdditiveCorrect(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// root(+5) → branchA(+3) and branchB(+2)
 	// Correct result: 5 + 3 + 2 = 10 (NOT 8+7=15 from naive approach)
@@ -281,7 +257,7 @@ func TestGetSnapshot_ForkAdditiveCorrect(t *testing.T) {
 
 func TestGetSnapshot_ForkKeyedUnion(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// root: HSET f0=v0 → branchA: HSET f1=v1, branchB: HSET f2=v2
 	root := log.putEffect(&pb.Effect{
@@ -315,7 +291,7 @@ func TestGetSnapshot_ForkKeyedUnion(t *testing.T) {
 
 func TestGetSnapshot_MergePointInChain(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// root → A, root → B, C(deps:[A,B]) → D [single tip]
 	// Tests that a resolved fork within a single-tip chain works.
@@ -382,7 +358,7 @@ func TestGetSnapshot_MergePointInChain(t *testing.T) {
 
 func TestGetSnapshot_MergePointLWW(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// root → A, root → B, C(deps:[A,B]) → D [single tip]
 	// LWW: merge picks HLC winner, no double-counting issue.
@@ -419,7 +395,7 @@ func TestGetSnapshot_MergePointLWW(t *testing.T) {
 
 func TestGetSnapshot_SnapshotEffectStopsWalk(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// snapshot(state="snap") → A("after")
 	snapOff := log.putEffect(&pb.Effect{
@@ -467,7 +443,7 @@ func TestGetSnapshot_SnapshotEffectStopsWalk(t *testing.T) {
 // Bug (no seed): 0 + 1 (E4) + 1 (E5) = 2
 func TestGetSnapshot_LinearSnapshotSeed(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Build prefix: E1(+1) → E2(+1) → E3(+1)
 	e1 := log.putEffect(&pb.Effect{
@@ -524,82 +500,9 @@ func TestGetSnapshot_LinearSnapshotSeed(t *testing.T) {
 	}
 }
 
-func TestGetSnapshot_CacheHit(t *testing.T) {
-	log := newSnapshotLog()
-	cache := newMockCache()
-	e := newSnapshotEngine(log, cache)
-
-	cached := &pb.ReducedEffect{
-		Op:         pb.EffectOp_INSERT_OP,
-		Merge:      pb.MergeRule_LAST_WRITE_WINS,
-		Collection: pb.CollectionKind_SCALAR,
-		Scalar:     &pb.DataEffect{Value: &pb.DataEffect_Raw{Raw: []byte("cached")}},
-	}
-	cache.Put("k", cached)
-
-	r, _, _, err := e.GetSnapshot("k")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(r.Scalar.GetRaw()) != "cached" {
-		t.Fatalf("expected 'cached', got %q", r.Scalar.GetRaw())
-	}
-}
-
-func TestGetSnapshot_CachePopulated(t *testing.T) {
-	log := newSnapshotLog()
-	cache := newMockCache()
-	e := newSnapshotEngine(log, cache)
-
-	off := log.putEffect(&pb.Effect{
-		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
-		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("val"))},
-	})
-	e.index.Insert("k", nil, keytrie.NewTipSet(off))
-
-	r, _, _, err := e.GetSnapshot("k")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r == nil {
-		t.Fatal("expected non-nil")
-	}
-
-	// Check cache was populated
-	if _, ok := cache.Get("k"); !ok {
-		t.Fatal("expected cache to be populated after GetSnapshot")
-	}
-}
-
-func TestGetSnapshot_ExpiredKeyReturnsNil(t *testing.T) {
-	log := newSnapshotLog()
-	cache := newMockCache()
-	e := newSnapshotEngine(log, cache)
-
-	// Cached value with past expiry
-	cached := &pb.ReducedEffect{
-		Op:        pb.EffectOp_INSERT_OP,
-		ExpiresAt: sTs(1), // expired (1 ns since epoch)
-		Scalar:    &pb.DataEffect{Value: &pb.DataEffect_Raw{Raw: []byte("old")}},
-	}
-	cache.Put("k", cached)
-
-	r, _, _, err := e.GetSnapshot("k")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r != nil {
-		t.Fatal("expected nil for expired key")
-	}
-	// Should have been evicted from cache
-	if _, ok := cache.Get("k"); ok {
-		t.Fatal("expected expired key to be evicted from cache")
-	}
-}
-
 func TestGetSnapshot_ExpiredReconstructedStillReturnsState(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Data effect + meta with past expiry. GetSnapshot returns the raw
 	// causal state — expiry filtering is a presentation concern handled
@@ -625,7 +528,7 @@ func TestGetSnapshot_ExpiredReconstructedStillReturnsState(t *testing.T) {
 
 func TestGetSnapshot_SubscriptionTracked(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// GetSnapshot should track the subscription
 	_, _, _, _ = e.GetSnapshot("newkey")
@@ -638,7 +541,7 @@ func TestGetSnapshot_SubscriptionTracked(t *testing.T) {
 func TestGetSnapshot_SubscriptionBroadcast(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{10, 20}}
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	e.broadcaster = bc
 	bc.nackTarget = e // wire up so bootstrap NACKs arrive and don't block
 
@@ -656,7 +559,7 @@ func TestGetSnapshot_SubscriptionBroadcast(t *testing.T) {
 
 func TestGetSnapshot_MetaWithData(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -685,7 +588,7 @@ func TestGetSnapshot_MetaWithData(t *testing.T) {
 
 func TestGetSnapshot_HashMultiField(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("h"), Hlc: sTs(10), NodeId: 1,
@@ -715,7 +618,7 @@ func TestGetSnapshot_HashMultiField(t *testing.T) {
 
 func TestGetSnapshot_OrderedList(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("l"), Hlc: sTs(10), NodeId: 1,
@@ -753,7 +656,7 @@ func TestGetSnapshot_OrderedList(t *testing.T) {
 
 func TestGetSnapshot_DELReturnsNil(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -853,8 +756,7 @@ func TestReduceChain_MetaOnTopOfSeed(t *testing.T) {
 
 func TestEmitFlushGetSnapshot(t *testing.T) {
 	log := newSnapshotLog()
-	cache := newMockCache()
-	e := newSnapshotEngine(log, cache)
+	e := newSnapshotEngine(log)
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(&pb.Effect{
@@ -886,7 +788,7 @@ func TestEmitFlushGetSnapshot(t *testing.T) {
 
 func TestEmitFlushGetSnapshot_MultipleWrites(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// First write
 	ctx := e.NewContext()
@@ -933,7 +835,7 @@ func TestEmitFlushGetSnapshot_MultipleWrites(t *testing.T) {
 
 func TestGetSnapshot_ReturnsTips(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -975,7 +877,7 @@ func TestGetSnapshot_ReturnsTips(t *testing.T) {
 //  4. Flush correctly creates a fork {C, D} instead of D→C
 func TestEmitWithSnapshotTips_PreventsStaleDepRace(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Set up initial state: key "k" with tips {A, B} (forked)
 	offA := log.putEffect(&pb.Effect{
@@ -1050,7 +952,7 @@ func TestEmitWithSnapshotTips_PreventsStaleDepRace(t *testing.T) {
 // snapshot tips reads deps from the index (backward compat for pure writes).
 func TestEmitWithoutSnapshotTips_ReadsIndex(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	off := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -1235,7 +1137,7 @@ func (b *nackForwardBroadcaster) SendNack(nack *pb.NackNotify, targetNodeID pb.N
 func TestSubscriptionBootstrap_NoPeers_NoBlock(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{peerIDs: nil} // no peers
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	e.broadcaster = bc
 
 	// Should not block even with no peers
@@ -1251,7 +1153,7 @@ func TestSubscriptionBootstrap_NoPeers_NoBlock(t *testing.T) {
 func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{10, 20}, allRegionPeersReachable: true}
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	e.broadcaster = bc
 	bc.nackTarget = e // wire up so empty NACKs arrive
 
@@ -1536,7 +1438,7 @@ func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
 // Bug:     0 (LCA=0) + 4 (snapshot+E4) + 3 (E1+E2+E3+E5) = double-count
 func TestGetSnapshot_ForkWithSnapshotEffect(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Build common prefix: E1(+1) → E2(+1) → E3(+1)
 	e1 := log.putEffect(&pb.Effect{
@@ -1600,7 +1502,7 @@ func TestGetSnapshot_ForkWithSnapshotEffect(t *testing.T) {
 // when the target offset isn't in the effects map yet.
 func TestGetSnapshot_ForkBothBranchesHaveSnapshots(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Common prefix: E1(+10)
 	e1 := log.putEffect(&pb.Effect{
@@ -1679,7 +1581,7 @@ func TestGetSnapshot_ForkBothBranchesHaveSnapshots(t *testing.T) {
 //  6. Tips are now [E6, E7]. Correct value = 7 (E1+E2+E3+E4+E5+E6+E7)
 func TestGetSnapshot_CrossBranchSnapshot(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Common prefix
 	e1 := log.putEffect(&pb.Effect{
@@ -1764,7 +1666,7 @@ func TestGetSnapshot_CrossBranchSnapshot(t *testing.T) {
 // Correct: 3 + 3 + 2 = 8
 func TestGetSnapshot_ForkMultiEffectBranches(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Common prefix
 	e1 := log.putEffect(&pb.Effect{
@@ -1836,7 +1738,7 @@ func TestGetSnapshot_ForkMultiEffectBranches(t *testing.T) {
 //	Tips: [E6, E7]. Correct: 7
 func TestGetSnapshot_ForkAfterMerge(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Common prefix
 	e1 := log.putEffect(&pb.Effect{
@@ -1901,7 +1803,7 @@ func TestGetSnapshot_ForkAfterMerge(t *testing.T) {
 //	Tips: [E4, E5]. Both depend on E3. Correct: 5
 func TestGetSnapshot_ForkWithPartialReplication(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	e1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -1949,7 +1851,7 @@ func TestGetSnapshot_ForkWithPartialReplication(t *testing.T) {
 //	9:U:0: 10:D:1:0,4,5,7,11,13 11:U:0: 12:D:1:0,4,7,9 13:M:0:12
 func TestGetSnapshot_JepsenDAG14(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Node IDs map to offsets. Using sequential offsets.
 	off := make([]Tip, 14)
@@ -2042,7 +1944,7 @@ func TestGetSnapshot_JepsenDAG14(t *testing.T) {
 // formula only subtracts E1 (the global LCA), not E2.
 func TestGetSnapshot_ThreeWayMergeUnequalLCA(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	e1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -2098,7 +2000,7 @@ func TestGetSnapshot_ThreeWayMergeUnequalLCA(t *testing.T) {
 // Correct: 1+1+1+1+1+1 = 6
 func TestGetSnapshot_FourWayMergeFromJepsen(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	e1 := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
@@ -2154,7 +2056,7 @@ func TestGetSnapshot_FourWayMergeFromJepsen(t *testing.T) {
 // Final tips: [tip5, tip6]. Correct: 36.
 func TestGetSnapshot_ChainedCompactionSnapshots(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	hlc := int64(0)
 	nextHLC := func() int64 { hlc++; return hlc }
 
@@ -2273,7 +2175,7 @@ func TestGetSnapshot_ChainedCompactionSnapshots(t *testing.T) {
 // Tips: [E23, E24]. Correct: 24
 func TestGetSnapshot_SnapshotChainWithPartialVisibility(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	hlc := int64(0)
 	nextHLC := func() int64 { hlc++; return hlc }
 
@@ -2357,7 +2259,7 @@ func TestGetSnapshot_SnapshotChainWithPartialVisibility(t *testing.T) {
 // 5 nodes with merge points where nodes observe each other's effects.
 func TestGetSnapshot_ManyForksAndMerges(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 	hlc := int64(0)
 	nextHLC := func() int64 { hlc++; return hlc }
 
@@ -2438,7 +2340,7 @@ func TestGetSnapshot_ManyForksAndMerges(t *testing.T) {
 // Expected reconstruction of el-3: ["48"], not ["48", "53"].
 func TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Node IDs lifted verbatim from the failing run.
 	const (
@@ -2551,7 +2453,7 @@ func TestGetSnapshot_AbortedCrossKeyBind_JepsenG1aRepro(t *testing.T) {
 // and asserts the higher-hash bind is in the loser set.
 func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeA uint64 = 7639866581326252873
@@ -2631,7 +2533,7 @@ func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
 // reader had vs. what we assumed.
 func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeA uint64 = 7639866581326252873 // writer / X
@@ -2789,7 +2691,7 @@ func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 // with two concurrent binds branching off.
 func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeX uint64 = 7639884449200700087 // X's writer
@@ -2915,7 +2817,7 @@ func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
 // isRealConflict match this behavior.
 func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeX     uint64 = 7639884449200700087 // X's writer
@@ -3026,7 +2928,7 @@ func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 // compare, where Y's lower hash would falsely trigger an abort.
 func TestIsRealConflict_TransitiveReachMakesSequential(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeX     uint64 = 7639884449200700087
@@ -3138,7 +3040,7 @@ func TestIsRealConflict_TransitiveReachMakesSequential(t *testing.T) {
 // loser verdicts on every key the bind touches.
 func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const nodeA uint64 = 7639866581326252873
 
@@ -3197,7 +3099,7 @@ func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 // the harvested map and skips T_lost's data. K2's read is correct.
 func TestReconstruct_VerdictSnapshotSurvivesCompaction(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	const (
 		nodeA uint64 = 7639866581326252873
@@ -3331,7 +3233,7 @@ func TestReconstruct_VerdictSnapshotSurvivesCompaction(t *testing.T) {
 // on n3 hitting peer-unavailable and aborting, which surfaced as :G1a.
 func TestGetSnapshot_NilResultZeroesChainLen(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	// Pre-mark "k" subscribed so ensureSubscribed inside GetSnapshot
 	// doesn't install a SubscriptionEffect — we want the walk to see
@@ -3380,7 +3282,7 @@ func TestGetSnapshot_NilResultZeroesChainLen(t *testing.T) {
 // is being honored. Defensive guard at context.go:212.
 func TestContextGetSnapshot_NilResultDoesNotPanicCompaction(t *testing.T) {
 	log := newSnapshotLog()
-	e := newSnapshotEngine(log, nil)
+	e := newSnapshotEngine(log)
 
 	sub := &subscriptionState{ready: make(chan struct{})}
 	sub.markReady()
