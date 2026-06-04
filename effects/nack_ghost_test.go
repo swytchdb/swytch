@@ -40,6 +40,10 @@ type selectiveBroadcaster struct {
 	fetchable map[Tip][]byte // offset → wire bytes; absence = NACK only, not fetchable
 }
 
+func (b *selectiveBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return b.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
 	b.mockBroadcaster.replicateToPeers = append(b.mockBroadcaster.replicateToPeers, target)
 	return []*pb.NackNotify{{

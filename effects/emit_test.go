@@ -72,6 +72,10 @@ func (m *mockBroadcaster) Replicate(notify *pb.OffsetNotify, wireData []byte) er
 	m.replicates = append(m.replicates, notify)
 	return m.replicateErr
 }
+func (m *mockBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return m.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (m *mockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -619,6 +623,10 @@ type txnMockBroadcaster struct {
 	replicateToResults map[pb.NodeID]*pb.NackNotify // nodeID → NackNotify (nil = ACK)
 	replicateToErr     error
 	replicateToCalls   []pb.NodeID // node IDs called
+}
+
+func (m *txnMockBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return m.ReplicateTo(notify, notify.EffectData, target)
 }
 
 func (m *txnMockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {

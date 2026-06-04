@@ -33,6 +33,7 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/proto"
 )
 
 // Sentinel errors for replication failures.
@@ -557,12 +558,29 @@ func allNotSubscribed(nacks []*pb.NackNotify) bool {
 func (r *Replicator) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetPeerID NodeId) ([]*pb.NackNotify, error) {
 	notify.EffectData = wireData
 
-	requestID, future := r.tracker.Register(targetPeerID, 0)
-
-	notifyPkt, err := MarshalNotifyPacket(requestID, notify)
+	body, err := proto.Marshal(notify)
 	if err != nil {
 		return nil, fmt.Errorf("marshal notify packet: %w", err)
 	}
+	return r.replicateBody(body, targetPeerID)
+}
+
+// ReplicateMarshalled sends an already-marshalled OffsetNotify body to a
+// specific peer and waits for ACK/NACK. The body is the proto-marshalled
+// notify, shared across a fan-out so it is marshalled once; only the per-peer
+// request header is assembled here. notify is unused by the wire path (the
+// body carries everything) and is present only so test doubles can inspect it.
+func (r *Replicator) ReplicateMarshalled(_ *pb.OffsetNotify, notifyBody []byte, targetPeerID NodeId) ([]*pb.NackNotify, error) {
+	return r.replicateBody(notifyBody, targetPeerID)
+}
+
+// replicateBody registers a tracked request, frames the notify body into a
+// packet, sends it, and blocks for the ACK/NACK. Shared by ReplicateTo (which
+// marshals per call) and ReplicateMarshalled (which reuses a shared body).
+func (r *Replicator) replicateBody(notifyBody []byte, targetPeerID NodeId) ([]*pb.NackNotify, error) {
+	requestID, future := r.tracker.Register(targetPeerID, 0)
+
+	notifyPkt := AssembleNotifyPacket(requestID, notifyBody)
 
 	wireSize, err := r.transport.Send(targetPeerID, notifyPkt)
 	if err != nil {

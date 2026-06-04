@@ -50,6 +50,22 @@ var errHorizonRetryNeeded = errors.New("reconstruct: horizon ancestor resolved, 
 // the subdag, which is why this is a struct rather than a bare subdag pointer.
 type leafState struct {
 	subdag atomic.Pointer[cachedDag]
+	// reduced memoizes the fully-materialized read result for a specific tip
+	// set, so a repeated client read of an unchanged key skips fork-choice
+	// adjudication and ReduceChain entirely (only the subdag structure cache
+	// existed before). reconstruct(key, tips) is a pure function of the tip set
+	// — the reachable DAG is immutable — so a tip change yields a different key
+	// and misses; see GetSnapshot for the store/serve invariant.
+	reduced atomic.Pointer[reducedResult]
+}
+
+// reducedResult is a cached materialized read keyed on the exact tip set it was
+// derived from. The result is treated as immutable: serve and store both clone,
+// so no consumer can mutate the shared copy (filterSnapshot rewrites fields).
+type reducedResult struct {
+	tips     []Tip
+	result   *pb.ReducedEffect
+	chainLen int
 }
 
 // cachedDag is the reusable output of dag.prepare for a specific tip set: the
@@ -260,16 +276,47 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		return nil, nil, 0, nil
 	}
 
-	// Walk DAG and reconstruct. waitForHorizon=true: this is a client-facing
-	// read, so the walk must block on any in-ancestry HorizonSet bind to
-	// avoid returning a value that excludes a bind which will be present
-	// in the next reconstruct from the same tips (the Elle :incompatible-order
-	// shape from Jepsen run 26373595271).
-	slog.Debug("GetSnapshot: reconstructing", "key", key, "tips", tipOffsets)
-	result, chainLen, err := e.reconstruct(key, tipOffsets, "", true)
-	if err != nil {
-		slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
-		return nil, nil, 0, nil
+	// Reduced-result memo: a client read (waitForHorizon=true) always waits out
+	// any in-horizon ancestor before completing, so a completed result is the
+	// committed answer for these exact tips, and reconstruct(key, tips) is a
+	// pure function of the tip set (the reachable DAG is immutable). Cache it in
+	// the leaf keyed on the tip set — a later write/arrival changes the tips,
+	// yielding a different key that misses. Serve and store both clone so the
+	// shared copy is never mutated (filterSnapshot rewrites fields). The memo is
+	// bypassed while any txn is mid-horizon: a conservative guard that keeps the
+	// cache out of the in-flight-visibility window entirely.
+	horizonClear := e.horizon == nil || e.horizon.Empty()
+	ls, _ := e.index.LoadOrStoreData(key, &leafState{})
+
+	var result *pb.ReducedEffect
+	var chainLen int
+	served := false
+	if horizonClear && ls != nil {
+		if rr := ls.reduced.Load(); rr != nil && tipsEqual(rr.tips, tipOffsets) {
+			result, chainLen, served = cloneReduced(rr.result), rr.chainLen, true
+		}
+	}
+
+	if !served {
+		// Walk DAG and reconstruct. waitForHorizon=true: this is a client-facing
+		// read, so the walk must block on any in-ancestry HorizonSet bind to
+		// avoid returning a value that excludes a bind which will be present
+		// in the next reconstruct from the same tips (the Elle :incompatible-order
+		// shape from Jepsen run 26373595271).
+		slog.Debug("GetSnapshot: reconstructing", "key", key, "tips", tipOffsets)
+		var err error
+		result, chainLen, err = e.reconstruct(key, tipOffsets, "", true)
+		if err != nil {
+			slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
+			return nil, nil, 0, nil
+		}
+		if horizonClear && ls != nil {
+			ls.reduced.Store(&reducedResult{
+				tips:     append([]Tip(nil), tipOffsets...),
+				result:   cloneReduced(result),
+				chainLen: chainLen,
+			})
+		}
 	}
 
 	// Sync serialization state from reconstruction result before filtering
@@ -354,7 +401,7 @@ func (e *Engine) ensureSubscribed(key string) error {
 	offset := e.nextOffset()
 
 	if e.effectCache != nil {
-		e.effectCache.Put(offset, eff)
+		e.effectCache.PutSized(offset, eff, len(data))
 	}
 	e.updateIndex(key, nil, offset)
 
@@ -670,8 +717,11 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			return nil, 0, err
 		}
 
+		// An empty horizon means nothing is mid-wait, so no walked bind can be
+		// invisible — skip the precompute (2 map allocs + a full topoOrder scan)
+		// and the per-bind checks below entirely.
 		var isInvisible func(string) bool
-		if e.horizon != nil {
+		if e.horizon != nil && !e.horizon.Empty() {
 			isInvisible = e.horizon.IsInvisible
 		}
 
@@ -1074,7 +1124,7 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 	}
 
 	var isInvisible func(string) bool
-	if e.horizon != nil {
+	if e.horizon != nil && !e.horizon.Empty() {
 		isInvisible = e.horizon.IsInvisible
 	}
 

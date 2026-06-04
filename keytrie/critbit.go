@@ -93,10 +93,12 @@ type Critbit[T any] struct {
 	// Eviction policy (lifted from CloxCache as a single bounded domain;
 	// see evict.go). Sweeps run serialized under evictMu — a cold path —
 	// while the read path only bumps per-leaf freq/lastAccess + the window
-	// counters. evictHand is the resumable in-order cursor that bounds each
-	// sweep to a fixed leaf budget regardless of keyspace size.
+	// counters. A sweep samples a fixed number of leaves by random root-to-leaf
+	// descent (CloxCache's hash-distributed slot sampling, adapted to the trie),
+	// so victim quality doesn't depend on key-order locality. evictRand is the
+	// sweep's PRNG state, mutated only under evictMu (no atomics needed).
 	evictMu        sync.Mutex
-	evictHand      string
+	evictRand      uint64
 	evictK         atomic.Int32  // protected-freq threshold (adaptive)
 	ghostCount     atomic.Int64  // soft-deleted leaves retained for warm restart
 	windowHits     atomic.Uint64 // live accesses in the current adapt window
@@ -111,6 +113,16 @@ type Critbit[T any] struct {
 	lastAdaptCheck atomic.Uint64 // eviction count at the last adapt check
 	evictDecider   func(key string) bool
 	evictNotify    func(key string, tips []EffectRef, data *T)
+	evictActive    atomic.Bool // true once eviction hooks are installed
+
+	// refDelta, if set, is called on every leaf tip-set transition so the
+	// consumer can maintain per-tip refcounts without re-deriving them at each
+	// call site. added/removed are the tip-set delta; droppedData is the leaf
+	// payload released by a delete or eviction (nil for a plain tip change), so
+	// the consumer can release references the payload held. The trie owns the
+	// "when"; the consumer owns the "what". Runs without any trie lock the
+	// consumer could re-enter.
+	refDelta func(added, removed []EffectRef, droppedData *T)
 
 	initOnce sync.Once
 	arena    critbitArena[critNode[T]]
@@ -288,6 +300,7 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 			c.reapMu.RUnlock(rt)
 			if ok {
 				c.size.Add(1)
+				c.fireTipDelta(old, new, nil)
 				return nil, true
 			}
 			continue
@@ -322,6 +335,7 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 					}
 				}
 				c.reapMu.RUnlock(rt)
+				c.fireTipDelta(old, new, nil)
 				return nil, true
 			}
 			tips := bestLeaf.tips.Load()
@@ -347,6 +361,7 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 					}
 				}
 				c.reapMu.RUnlock(rt)
+				c.fireTipDelta(old, new, nil)
 				return nil, true
 			}
 			tips := bestLeaf.tips.Load()
@@ -364,6 +379,7 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 		c.reapMu.RUnlock(rt)
 		if ok {
 			c.size.Add(1)
+			c.fireTipDelta(old, new, nil)
 			return nil, true
 		}
 	}
@@ -478,6 +494,12 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 // Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —
 // it is promoted explicitly when its key is re-inserted.
 func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
+	// When eviction is inactive (no memory governor) nothing consumes the
+	// freq/LRU/window data, so skip all of it — this keeps the read path free
+	// of trie-global atomic contention in the default, no-eviction case.
+	if !c.evictActive.Load() {
+		return
+	}
 	for {
 		f := leaf.freq.Load()
 		if f < 0 || f >= maxLeafFreq {
@@ -528,6 +550,38 @@ func (c *Critbit[T]) LoadOrStoreData(key string, def *T) (*T, bool) {
 	return leaf.data.Load(), true
 }
 
+// tipSetDiff returns the tips added (in new, not old) and removed (in old, not
+// new) for an old→new transition. Tip sets are small, so a linear scan is cheap.
+func tipSetDiff(old, new *TipSet) (added, removed []EffectRef) {
+	if new != nil {
+		for _, t := range new.tips {
+			if old == nil || !old.Contains(t) {
+				added = append(added, t)
+			}
+		}
+	}
+	if old != nil {
+		for _, t := range old.tips {
+			if new == nil || !new.Contains(t) {
+				removed = append(removed, t)
+			}
+		}
+	}
+	return added, removed
+}
+
+// fireTipDelta reports a leaf tip-set transition to the refDelta hook (if any).
+// droppedData is the leaf payload released by a delete/eviction, else nil.
+func (c *Critbit[T]) fireTipDelta(old, new *TipSet, droppedData *T) {
+	if c.refDelta == nil {
+		return
+	}
+	added, removed := tipSetDiff(old, new)
+	if len(added) > 0 || len(removed) > 0 || droppedData != nil {
+		c.refDelta(added, removed, droppedData)
+	}
+}
+
 func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 	if c.closed.Load() || len(refs) == 0 {
 		return
@@ -562,6 +616,7 @@ func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 		}
 		newTips := NewTipSet(kept...)
 		if leaf.tips.CompareAndSwap(current, newTips) {
+			c.fireTipDelta(current, newTips, nil)
 			return
 		}
 		// CAS failed, retry
@@ -601,10 +656,15 @@ func (c *Critbit[T]) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 		return nil
 	}
 	// Drop the leaf payload too — a deleted key's cached state is stale.
+	droppedData := leaf.data.Load()
 	leaf.data.Store(nil)
 	c.size.Add(-1)
 
 	c.reapMu.RUnlock(rt)
+
+	// Release the tips and the payload's references — DeleteAndSnapshot bypasses
+	// the eviction notify, so this is the only refcount signal for FlushIndex.
+	c.fireTipDelta(old, nil, droppedData)
 
 	deleted := c.deletedCount.Add(1)
 	live := c.size.Load()

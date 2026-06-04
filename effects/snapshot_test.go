@@ -1003,6 +1003,10 @@ type bootstrapBroadcaster struct {
 	remoteEngine *Engine // the "remote" engine that has data
 }
 
+func (b *bootstrapBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return b.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (b *bootstrapBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {
 	b.replicateToPeers = append(b.replicateToPeers, targetNodeID)
 

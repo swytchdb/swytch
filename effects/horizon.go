@@ -337,6 +337,15 @@ func (h *HorizonSet) IsInvisible(txnID string) bool {
 	return ok
 }
 
+// Empty reports whether no txn is currently held invisible. When true,
+// reconstruct can skip its per-read invisibility precompute: any bind
+// reachable from a read's captured tips had its horizon entry added during
+// ingest (before the index update that made it visible to the read), so an
+// empty horizon at reconstruct setup proves no walked bind is invisible.
+func (h *HorizonSet) Empty() bool {
+	return h.entries.Size() == 0
+}
+
 // groupOverlaps checks if a horizon group has any overlapping key with shared
 // consumed tips against a new bind entry. Caller must hold g.mu.
 func groupOverlaps(g *horizonGroup, newBind *forkChoiceBindEntry) bool {

@@ -33,10 +33,16 @@ import (
 	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
-// vertexOverhead approximates the per-entry bookkeeping cost (the Tip key,
-// the vertex struct, and the map slot) added to the marshalled effect size
-// for byte accounting.
-const vertexOverhead = 48
+// vertexOverhead approximates the per-entry bookkeeping cost added to the
+// marshalled effect size for byte accounting. The bare structs alone are ~48B
+// (vertex ~24 + Tip key 16 + map value pointer 8), but that ignores heap
+// size-class rounding on the vertex allocation, the xsync.Map bucket/hash
+// overhead per entry, and the in-memory *pb.Effect struct cost (Hlc, Deps/
+// ForkChoiceHash slice headers, the Kind interface) that proto.Size does not
+// capture — dominant for small effects. 96 is a conservative estimate of the
+// total; over-counting makes the governor evict slightly early, which is the
+// safe direction (under-counting lets RSS overshoot the target).
+const vertexOverhead = 96
 
 // vertex wraps an immutable effect resident in the VertexPool. size caches
 // the entry's accounted bytes so eviction can decrement the total without
@@ -73,14 +79,6 @@ func newVertexPool() *VertexPool {
 	return &VertexPool{m: xsync.NewMap[Tip, *vertex]()}
 }
 
-// effectSize returns the accounted byte cost of holding eff.
-func effectSize(eff *pb.Effect) int64 {
-	if eff == nil {
-		return vertexOverhead
-	}
-	return int64(proto.Size(eff)) + vertexOverhead
-}
-
 // Get returns the effect at tip.
 func (p *VertexPool) Get(tip Tip) (*pb.Effect, bool) {
 	v, ok := p.m.Load(tip)
@@ -92,14 +90,29 @@ func (p *VertexPool) Get(tip Tip) (*pb.Effect, bool) {
 	return v.eff, true
 }
 
-// Put stores eff at tip on first insertion. A re-Put of an already-resident
-// tip keeps the existing vertex so its accumulated refcount survives: effects
-// are immutable (a Tip is written once), so the payload and byte cost are
-// identical and there is nothing to update. Replacing the vertex would reset
+// Put stores eff at tip, computing its accounted size from the proto. Callers
+// that already hold the serialized length — a marshalled buffer on emit, the
+// wire protoData on ingest — should use PutSized to skip the proto.Size walk.
+//
+// A re-Put of an already-resident tip keeps the existing vertex so its
+// accumulated refcount survives: effects are immutable (a Tip is written once),
+// so the payload and byte cost are identical. Replacing the vertex would reset
 // refs to 0, letting reclaimUnreferenced free an effect the index still holds
-// as a frontier tip — a premature free surfacing as a missing read.
+// as a frontier tip — a premature free surfacing as a missing read. The
+// resident fast-path also skips the proto.Size walk on the common re-delivery.
 func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
-	nv := &vertex{eff: eff, size: effectSize(eff)}
+	if _, ok := p.m.Load(tip); ok {
+		return
+	}
+	p.PutSized(tip, eff, proto.Size(eff))
+}
+
+// PutSized stores eff at tip using a caller-supplied serialized length, avoiding
+// the proto.Size walk Put would do. protoLen is the marshalled effect size (the
+// length of MarshalEffect's output, or the wire protoData); vertexOverhead is
+// added on top. Re-Put semantics match Put: an already-resident tip is kept.
+func (p *VertexPool) PutSized(tip Tip, eff *pb.Effect, protoLen int) {
+	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
 	if _, loaded := p.m.LoadOrStore(tip, nv); !loaded {
 		p.bytes.Add(nv.size)
 	}
@@ -166,6 +179,16 @@ func (e *Engine) startMemoryGovernor(targetBytes int64) {
 	if targetBytes <= 0 {
 		return
 	}
+	// Eviction is only ever driven by this governor, so install the hooks here
+	// rather than unconditionally: the bounded sweep pins system keys (never a
+	// victim) and hands each evicted cold key's tips + leaf payload to
+	// onLeafEvicted (which releases refs and unsubscribes). Installing the hooks
+	// also activates the trie's per-read eviction bookkeeping, so a node without
+	// a memory target pays none of that read-path cost.
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
 	if cur := debug.SetMemoryLimit(-1); cur == math.MaxInt64 {
 		// Reserve 5% of the target for non-heap memory (stacks, mmap, etc.).
 		debug.SetMemoryLimit(targetBytes * 95 / 100)
@@ -185,7 +208,16 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 		case <-e.memGovStop:
 			return
 		case <-ticker.C:
-			if int64(clox.GetProcessRSS()) > targetBytes {
+			// Trigger on the pool's own footprint — the bytes eviction can
+			// actually reclaim — not process RSS. RSS includes heap
+			// fragmentation, stacks, and GC overhead the pool can't shed, so
+			// triggering on it while relieveMemoryPressure stops on
+			// effectCache.Bytes() either over-evicts (when the pool dominates
+			// RSS) or burns full-pool scans evicting nothing (when it doesn't).
+			// GOMEMLIMIT (set to 95% of target in startMemoryGovernor) keeps
+			// total RSS in check via the GC; the governor keeps the pool under
+			// target.
+			if e.effectCache.Bytes() > targetBytes {
 				e.relieveMemoryPressure(targetBytes)
 			}
 		}

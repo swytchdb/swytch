@@ -55,6 +55,61 @@ func TestEvictBounded_PinsSystemKey(t *testing.T) {
 	}
 }
 
+// TestFlushIndex_ReleasesTipRefs verifies the trie-owned refcount: FlushIndex
+// deletes keys via the trie's Delete, which fires refDelta so the index-tip
+// reference is released and reclaimUnreferenced can free the vertex. Before the
+// trie-owned-refcount refactor, Delete bypassed the manual refcount protocol
+// and the vertex leaked permanently.
+func TestFlushIndex_ReleasesTipRefs(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	e.index.SetRefDelta(e.applyRefDelta)
+
+	const key = "user:k"
+	tip := Tip{1, 5}
+	// Resident + indexed: PutSized makes the vertex present (incref/decref no-op
+	// on absent tips), Insert fires refDelta to incref the tip (refs=1).
+	e.effectCache.PutSized(tip, &pb.Effect{Key: []byte(key)}, 10)
+	e.index.Insert(key, nil, keytrie.NewTipSet(tip))
+
+	// While it is a live index tip, reclaim must not free it.
+	e.reclaimUnreferenced()
+	if _, ok := e.effectCache.Get(tip); !ok {
+		t.Fatal("referenced index tip was reclaimed")
+	}
+
+	e.FlushIndex()
+	e.reclaimUnreferenced()
+	if _, ok := e.effectCache.Get(tip); ok {
+		t.Fatal("FlushIndex did not release the tip refcount; vertex leaked")
+	}
+}
+
+// TestRemoveTips_ReleasesPrunedRef verifies reconstruct's stale-tip pruning path
+// now releases refs: RemoveTips fires refDelta for the dropped tips while the
+// kept tips stay referenced. Before the refactor RemoveTips skipped the decref
+// and the pruned vertex leaked.
+func TestRemoveTips_ReleasesPrunedRef(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	e.index.SetRefDelta(e.applyRefDelta)
+
+	const key = "user:k"
+	keep := Tip{1, 5}
+	stale := Tip{1, 6}
+	e.effectCache.PutSized(keep, &pb.Effect{Key: []byte(key)}, 10)
+	e.effectCache.PutSized(stale, &pb.Effect{Key: []byte(key)}, 10)
+	e.index.Insert(key, nil, keytrie.NewTipSet(keep, stale))
+
+	e.index.RemoveTips(key, []Tip{stale})
+	e.reclaimUnreferenced()
+
+	if _, ok := e.effectCache.Get(keep); !ok {
+		t.Fatal("kept index tip was wrongly reclaimed")
+	}
+	if _, ok := e.effectCache.Get(stale); ok {
+		t.Fatal("RemoveTips did not release the pruned tip; vertex leaked")
+	}
+}
+
 // TestBroadcastUnsubscribe_EmitsUnsub covers the eviction teardown: dropping a
 // key emits a wire-level unsubscribe (so peers reduce us out of the subscriber
 // set) as a proper DAG element consuming the prior tip, and drops local

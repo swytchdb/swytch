@@ -63,17 +63,29 @@ const (
 func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T)) {
 	c.evictDecider = decider
 	c.evictNotify = notify
+	// Hooks are only ever consumed by EvictBounded, so their presence marks
+	// eviction as active: bumpAccess then maintains the freq/LRU/adaptive-k
+	// bookkeeping. Without them, reads skip that bookkeeping entirely.
+	c.evictActive.Store(true)
 }
 
-// EvictBounded runs one bounded eviction sweep. It scans at most maxScan
-// leaves in key order from the resumable cursor, selects the
-// least-recently-used unprotected (freq <= k) leaf — falling back to the
-// overall LRU leaf when every candidate is protected — soft-deletes it, and
-// notifies the consumer. Returns true if a leaf was evicted.
+// SetRefDelta installs the per-tip refcount hook, fired on every leaf tip-set
+// transition (insert, remove, delete, eviction). See the refDelta field.
+func (c *Critbit[T]) SetRefDelta(fn func(added, removed []EffectRef, droppedData *T)) {
+	c.refDelta = fn
+}
+
+// EvictBounded runs one bounded eviction sweep. It samples at most maxScan
+// leaves by random root-to-leaf descent, selects the least-recently-used
+// unprotected (freq <= k) leaf among them — falling back to the overall LRU
+// sample when every candidate is protected — soft-deletes it, and notifies the
+// consumer. Returns true if a leaf was evicted.
 //
-// Latency is bounded by maxScan regardless of keyspace size: the property
-// CloxCache gets from scanning a fraction of a fixed shard, achieved here with
-// an absolute scan budget advanced over an in-order cursor.
+// Latency is bounded by maxScan regardless of keyspace size, and victim quality
+// doesn't depend on key-order locality: the samples are spread across the
+// keyspace the way CloxCache's hash-distributed slot scan was, so the LRU of
+// the sample tracks the global LRU rather than the LRU of a lexicographic
+// neighborhood.
 func (c *Critbit[T]) EvictBounded(maxScan int) bool {
 	if c.closed.Load() {
 		return false
@@ -92,11 +104,9 @@ func (c *Critbit[T]) EvictBounded(maxScan int) bool {
 		lowAccess = uint64(math.MaxUint64)
 		fbVictim  *critNode[T]
 		fbAccess  = uint64(math.MaxUint64)
-		lastKey   string
 	)
 
-	reachedEnd := c.forwardLeaves(c.evictHand, maxScan, func(leaf *critNode[T]) {
-		lastKey = leaf.key
+	c.sampleLeaves(maxScan, func(leaf *critNode[T]) {
 		if leaf.isDeleted() { // already evicted / ghost
 			return
 		}
@@ -112,12 +122,6 @@ func (c *Critbit[T]) EvictBounded(maxScan int) bool {
 			fbVictim, fbAccess = leaf, access
 		}
 	})
-
-	if reachedEnd {
-		c.evictHand = "" // wrap
-	} else {
-		c.evictHand = lastKey
-	}
 
 	victim := lowVictim
 	protected := false
@@ -170,6 +174,10 @@ func (c *Critbit[T]) EvictBounded(maxScan int) bool {
 	} else {
 		c.evictedUnprot.Add(1)
 	}
+
+	// Release the evicted leaf's tip and payload references; evictNotify is
+	// then only responsible for the teardown side effects (unsubscribe).
+	c.fireTipDelta(tips, nil, data)
 
 	if c.evictNotify != nil {
 		var tipRefs []EffectRef
@@ -299,78 +307,56 @@ func (c *Critbit[T]) maybeAdaptK() {
 	}
 }
 
-// forwardLeaves visits leaves in key order strictly greater than `after`,
-// calling fn for at most max of them, and returns whether the keyspace end was
-// reached within the budget (so the caller wraps its cursor). It descends to
-// `after` in O(depth) and walks forward, so cost is O(depth + visited) — it
-// does not re-scan the skipped prefix. Lock-free read traversal; deleted/ghost
-// leaves are yielded too so the caller can account for them.
-func (c *Critbit[T]) forwardLeaves(after string, max int, fn func(*critNode[T])) (reachedEnd bool) {
+// sampleLeaves calls fn on up to n live leaves drawn by independent random
+// root-to-leaf descents (a random child at each internal node). It mirrors
+// CloxCache's hash-distributed slot sampling: each descent lands somewhere
+// uncorrelated with key order, so the caller's LRU-of-sample approximates the
+// global LRU instead of the LRU of a contiguous key range. A leaf's draw
+// probability is 2^-depth, so shallow leaves are mildly oversampled — the same
+// trade-off as Redis's random-sample LRU.
+//
+// Ghost/deleted leaves are skipped and re-drawn so n counts live candidates;
+// total descents are capped at 4n so a ghost-heavy trie can't spin. Lock-free
+// read traversal. Runs under evictMu, the only mutator of evictRand.
+func (c *Critbit[T]) sampleLeaves(n int, fn func(*critNode[T])) {
 	root := c.root.Load()
 	if root == nil {
-		return true
+		return
 	}
 
-	// Descend toward `after`. Wherever we take the left child, the right
-	// subtree lies after us in key order — stash it to visit afterward.
-	// Stashed deepest-last, so popping from the end yields in-order.
-	var pending []*critNode[T]
-	cur := root
-	for cur != nil && !cur.isLeaf {
-		dir := getDirection(after, cur.bytePos, cur.otherbits)
-		if dir == 0 {
-			if right := cur.child[1].Load(); right != nil {
-				pending = append(pending, right)
+	seen := 0
+	for attempts := 0; seen < n && attempts < n*4; attempts++ {
+		cur := root
+		for cur != nil && !cur.isLeaf {
+			dir := int(c.nextRand() & 1)
+			next := cur.child[dir].Load()
+			if next == nil { // mid-reap transient; take the sibling
+				next = cur.child[1-dir].Load()
 			}
+			cur = next
 		}
-		cur = cur.child[dir].Load()
-	}
-
-	count := 0
-	visit := func(leaf *critNode[T]) bool { // returns keepGoing
-		if leaf.key <= after {
-			return true
-		}
-		fn(leaf)
-		count++
-		return count < max
-	}
-
-	if cur != nil && cur.isLeaf {
-		if !visit(cur) {
-			return false
-		}
-	}
-	for len(pending) > 0 {
-		n := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if !c.dfsLeaves(n, visit) {
-			return false
-		}
-	}
-	return true
-}
-
-// dfsLeaves walks the subtree rooted at n left-first, calling visit on each
-// leaf until visit returns false. Returns visit's last keepGoing value.
-func (c *Critbit[T]) dfsLeaves(n *critNode[T], visit func(*critNode[T]) bool) bool {
-	stack := []*critNode[T]{n}
-	for len(stack) > 0 {
-		x := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if x.isLeaf {
-			if !visit(x) {
-				return false
-			}
+		if cur == nil || !cur.isLeaf {
 			continue
 		}
-		// Push right then left so the left subtree is popped (visited) first.
-		if right := x.child[1].Load(); right != nil {
-			stack = append(stack, right)
+		if cur.isDeleted() { // ghost/deleted: doesn't count toward the budget
+			continue
 		}
-		if left := x.child[0].Load(); left != nil {
-			stack = append(stack, left)
-		}
+		fn(cur)
+		seen++
 	}
-	return true
+}
+
+// nextRand advances the sweep's xorshift64 PRNG. Seeded lazily from the trie
+// clock so an un-accessed trie still yields a usable stream. Caller holds
+// evictMu, so no synchronization is required.
+func (c *Critbit[T]) nextRand() uint64 {
+	x := c.evictRand
+	if x == 0 {
+		x = c.clock.Load() | 1 // xorshift64 must not start at zero
+	}
+	x ^= x << 13
+	x ^= x >> 7
+	x ^= x << 17
+	c.evictRand = x
+	return x
 }

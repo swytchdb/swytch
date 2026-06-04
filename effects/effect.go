@@ -294,13 +294,10 @@ func NewEngine(cfg EngineConfig) *Engine {
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 
-	// Eviction hooks: the bounded sweep pins system keys (never a victim)
-	// and, on evicting a cold key, hands its tips + leaf payload to
-	// onLeafEvicted, which releases refs and unsubscribes.
-	e.index.SetEvictHooks(
-		func(key string) bool { return !isSystemKey([]byte(key)) },
-		e.onLeafEvicted,
-	)
+	// The trie owns vertex refcount maintenance: it fires applyRefDelta on
+	// every leaf tip-set transition (insert/remove/delete/eviction), so the
+	// refcount can never be silently skipped on a removal path.
+	e.index.SetRefDelta(e.applyRefDelta)
 
 	// Memory governor: keep process RSS near the target. Under pressure it
 	// first reclaims refs-0 vertices (below-LCA / orphans), then evicts cold
@@ -556,7 +553,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	}
 	offset := e.nextOffset()
 	if e.effectCache != nil {
-		e.effectCache.Put(offset, eff)
+		e.effectCache.PutSized(offset, eff, len(data))
 	}
 	e.updateIndex(key, currentSet, offset)
 
@@ -801,7 +798,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	// Cache deserialized effect
 	if e.effectCache != nil {
-		e.effectCache.Put(r(notify.Origin), eff)
+		e.effectCache.PutSized(r(notify.Origin), eff, len(protoData))
 	}
 
 	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
@@ -853,8 +850,8 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		}
 	}
 	if canonicalIndexable {
-		// Consume deps and add the new tip in a single index transition so
-		// the tip refcount (reindexTipRefs) decrefs the consumed deps and
+		// Consume deps and add the new tip in a single index transition so the
+		// trie's refDelta hook (applyRefDelta) decrefs the consumed deps and
 		// increfs the arrival together.
 		e.updateIndex(key, keytrie.NewTipSet(fromPbRefs(deps)...), r(notify.Origin))
 	}
@@ -1014,28 +1011,44 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 	}
 
 	effectData := notify.EffectData
+	var eff *pb.Effect
+	fromCache := false
 	if len(effectData) == 0 {
-		if e.broadcaster == nil {
-			return nil
+		// Already resident? Skip the network FetchFromAny — this runs inside
+		// the synchronous NACK-ingest loop that gates commit/abort, and the
+		// effect is immutable so the cached bytes are identical. Backfill's
+		// index/bind/pendingTxTips tail is idempotent, so re-running it on the
+		// cached effect is safe.
+		if e.effectCache != nil {
+			if cached, ok := e.effectCache.Get(r(notify.Origin)); ok {
+				eff, fromCache = cached, true
+			}
 		}
-		var err error
-		effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
-		if err != nil {
+		if !fromCache {
+			if e.broadcaster == nil {
+				return nil
+			}
+			var err error
+			effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	var protoData []byte
+	if !fromCache {
+		protoData = effectData
+		if len(effectData) > 4 {
+			keyLen := binary.LittleEndian.Uint32(effectData[:4])
+			if keyLen > 0 && uint32(len(effectData)) >= 4+keyLen {
+				protoData = effectData[4+keyLen:]
+			}
+		}
+		eff = &pb.Effect{}
+		if err := UnmarshalEffect(protoData, eff); err != nil {
 			return err
 		}
-	}
-
-	protoData := effectData
-	if len(effectData) > 4 {
-		keyLen := binary.LittleEndian.Uint32(effectData[:4])
-		if keyLen > 0 && uint32(len(effectData)) >= 4+keyLen {
-			protoData = effectData[4+keyLen:]
-		}
-	}
-
-	eff := &pb.Effect{}
-	if err := UnmarshalEffect(protoData, eff); err != nil {
-		return err
 	}
 
 	if !isSystemKey(eff.Key) {
@@ -1063,8 +1076,8 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		return fmt.Errorf("fork_choice_hash missing or mismatch for offset %v", notify.Origin)
 	}
 
-	if e.effectCache != nil {
-		e.effectCache.Put(r(notify.Origin), eff)
+	if e.effectCache != nil && !fromCache {
+		e.effectCache.PutSized(r(notify.Origin), eff, len(protoData))
 	}
 
 	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
@@ -1671,34 +1684,20 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 		if err := UnmarshalEffect(protoData, eff); err != nil {
 			continue
 		}
-		e.effectCache.Put(res.ref, eff)
+		e.effectCache.PutSized(res.ref, eff, len(protoData))
 	}
 }
 
 // onLeafEvicted is the eviction-notify callback the index invokes after its
 // bounded sweep soft-deletes a victim key's leaf (the cold-key teardown). The
-// leaf's tips and cached subdag are released so their pool vertices fall to
-// refs-0 and reclaimUnreferenced frees the bytes, and the key is unsubscribed
-// cluster-wide so peers reduce us out of its subscriber set. Future reads
-// re-subscribe and bootstrap fresh. The leaf is already soft-deleted by the
-// sweep, so this only does the side effects.
-func (e *Engine) onLeafEvicted(key string, tips []Tip, data *leafState) {
+// refcount release (index tips + cached subdag) is handled by the trie's
+// refDelta hook (applyRefDelta), which fires for the same eviction — so this
+// callback is only the teardown side effect: unsubscribe cluster-wide so peers
+// reduce us out of the subscriber set. Future reads re-subscribe and bootstrap
+// fresh. The leaf is already soft-deleted by the sweep.
+func (e *Engine) onLeafEvicted(key string, tips []Tip, _ *leafState) {
 	if e.closed.Load() {
 		return
-	}
-
-	// Synchronous: release the index-tip refs and the cached subdag's refs
-	// so the vertices fall to refs-0 before the governor's reclaim pass. A
-	// frontier tip is held by both (incref'd twice), so it is decref'd twice.
-	for _, t := range tips {
-		e.effectCache.decref(t)
-	}
-	if data != nil {
-		if cs := data.subdag.Load(); cs != nil {
-			for t := range cs.nodes {
-				e.effectCache.decref(t)
-			}
-		}
 	}
 
 	// Async: the unsubscribe broadcast is network I/O and must not run under
@@ -2040,7 +2039,7 @@ func (e *Engine) storeWireData(offset Tip, wireData []byte) error {
 		return err
 	}
 	if e.effectCache != nil {
-		e.effectCache.Put(offset, eff)
+		e.effectCache.PutSized(offset, eff, len(protoData))
 	}
 	return nil
 }

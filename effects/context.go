@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"sort"
@@ -639,10 +640,6 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	slog.Debug("Emit: wrote effect",
 		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
 
-	if c.engine.effectCache != nil {
-		c.engine.effectCache.Put(offset, eff)
-	}
-
 	// Track foreign peer subscriptions so flushTx's collectSubscribers
 	// sees them. Self-subscribes are filtered inside addPeerSubscriber.
 	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
@@ -653,13 +650,22 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		}
 	}
 
+	// Marshal once and reuse the length for the pool's byte accounting (avoids
+	// a redundant proto.Size walk) and the bytes for the notify. The standalone
+	// (no-broadcaster) path has nothing to marshal, so it falls back to Put.
 	if c.engine.broadcaster == nil {
+		if c.engine.effectCache != nil {
+			c.engine.effectCache.Put(offset, eff)
+		}
 		return offset, nil, nil
 	}
 
 	data, err := MarshalEffect(eff)
 	if err != nil {
 		return Tip{}, nil, err
+	}
+	if c.engine.effectCache != nil {
+		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
@@ -1028,11 +1034,14 @@ func (c *Context) flushTx() error {
 		return ErrTxnAborted
 	}
 
+	// One hash, reused for the bind effect, the void check, and the pending
+	// txn record — all keyed on (nodeID, hlcTs), so recomputing would be waste.
+	bindHash := ComputeForkChoiceHash(c.engine.nodeID, hlcTs)
 	bindEff := &pb.Effect{
 		Key:            bind.Keys[0].Key, // use first key as canonical
 		Hlc:            hlcTs,
 		NodeId:         uint64(c.engine.nodeID),
-		ForkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		ForkChoiceHash: bindHash,
 		TxnId:          c.txnID,
 		Deps:           bindDeps,
 		Kind:           &pb.Effect_TxnBind{TxnBind: bind},
@@ -1072,7 +1081,7 @@ func (c *Context) flushTx() error {
 		txnID:          c.txnID,
 		txnHLC:         txnHLC,
 		originNode:     c.engine.nodeID,
-		forkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		forkChoiceHash: bindHash,
 		bindOffset:     bindOffset,
 		done:           make(chan struct{}),
 	}
@@ -1133,6 +1142,15 @@ func (c *Context) flushTx() error {
 				err   error
 			}
 
+			// Marshal the bind notify once: the proto body is identical for
+			// every subscriber (only the per-peer request header differs), so
+			// re-marshalling per goroutine is wasted work — and would race on
+			// the shared bindNotify. The fan-out reuses this single body.
+			bindBody, marshalErr := proto.Marshal(bindNotify)
+			if marshalErr != nil {
+				return fmt.Errorf("flushTx: marshal bind notify: %w", marshalErr)
+			}
+
 			results := make([]replicaResult, len(subscribers))
 			var wg sync.WaitGroup
 			wg.Add(len(subscribers))
@@ -1142,7 +1160,7 @@ func (c *Context) flushTx() error {
 					slog.Debug("flushTx: ReplicateTo",
 						"bind_offset", bindOffset,
 						"target", target)
-					nacks, err := c.engine.broadcaster.ReplicateTo(bindNotify, bindNotify.EffectData, target)
+					nacks, err := c.engine.broadcaster.ReplicateMarshalled(bindNotify, bindBody, target)
 					results[idx] = replicaResult{subID: target, nacks: nacks, err: err}
 				}(i, subID)
 			}
@@ -1427,31 +1445,36 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 		offsets = append(offsets, lastOffset)
 		newTips := keytrie.NewTipSet(offsets...)
 		if _, ok := e.index.Insert(key, current, newTips); ok {
-			e.reindexTipRefs(current, newTips)
+			// Insert fires the trie's refDelta hook (applyRefDelta), which
+			// increfs the added tips and decrefs the consumed ones — no manual
+			// refcount call here.
 			return
 		}
 	}
 }
 
-// reindexTipRefs adjusts vertex refcounts for an index tip-set transition
-// (old → new): each tip newly present is incref'd (the index now holds it),
-// each tip no longer present is decref'd. The index reference pins a frontier
-// tip in the pool independent of subdag caching, so a freshly written/arrived
-// tip is protected in the window before the next read rebuilds its subdag.
-func (e *Engine) reindexTipRefs(old, new *keytrie.TipSet) {
+// applyRefDelta is the trie's refDelta hook and the single owner of vertex
+// refcount maintenance. The trie calls it on every leaf tip-set transition —
+// insert, RemoveTips, delete, eviction — so no removal path can silently skip
+// the decref (the leaks that arose when reconstruct's RemoveTips and
+// FlushIndex's Delete bypassed the old per-call-site protocol). It increfs the
+// added index tips, decrefs the removed ones, and releases the references held
+// by a dropped leaf payload (its cached subdag's nodes). A frontier tip is
+// held by both the index and the subdag, so it is incref'd twice (here +
+// publishSubdag) and decref'd twice (here for the tip + here for the subdag).
+func (e *Engine) applyRefDelta(added, removed []Tip, dropped *leafState) {
 	if e.effectCache == nil {
 		return
 	}
-	if new != nil {
-		for _, t := range new.Tips() {
-			if old == nil || !old.Contains(t) {
-				e.effectCache.incref(t)
-			}
-		}
+	for _, t := range added {
+		e.effectCache.incref(t)
 	}
-	if old != nil {
-		for _, t := range old.Tips() {
-			if new == nil || !new.Contains(t) {
+	for _, t := range removed {
+		e.effectCache.decref(t)
+	}
+	if dropped != nil {
+		if cs := dropped.subdag.Load(); cs != nil {
+			for t := range cs.nodes {
 				e.effectCache.decref(t)
 			}
 		}

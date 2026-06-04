@@ -35,6 +35,11 @@ type Broadcaster interface {
 	// ReplicateTo sends to a specific peer and waits for ACK/NACK.
 	// Returns NackNotify slice on conflict, nil on ACK.
 	ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error)
+	// ReplicateMarshalled is ReplicateTo with a pre-marshalled notify body, so
+	// a fan-out (the bind to every subscriber) marshals the body once instead
+	// of once per peer. notify is passed for inspection; the body is the wire
+	// payload.
+	ReplicateMarshalled(notify *pb.OffsetNotify, notifyBody []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error)
 	// SendNack sends an enriched NACK to the originator.
 	SendNack(nack *pb.NackNotify, targetNodeID pb.NodeID)
 	FetchFromAny(ref *pb.EffectRef) ([]byte, error)

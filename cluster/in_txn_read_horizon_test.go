@@ -201,6 +201,10 @@ func (g *gatedBroadcaster) Replicate(notify *pb.OffsetNotify, _ []byte) error {
 	return err
 }
 
+func (g *gatedBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return g.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (g *gatedBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
 	return g.bus.deliver(target, notify, notify.EffectData)
 }

@@ -744,6 +744,16 @@ func (pm *PeerManager) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, tar
 	return nil, nil
 }
 
+// ReplicateMarshalled sends a pre-marshalled notify body to a peer (see
+// Replicator.ReplicateMarshalled). Used by the bind fan-out so the body is
+// marshalled once for all subscribers.
+func (pm *PeerManager) ReplicateMarshalled(notify *pb.OffsetNotify, notifyBody []byte, targetNodeID NodeId) ([]*pb.NackNotify, error) {
+	if pm.replicator != nil {
+		return pm.replicator.ReplicateMarshalled(notify, notifyBody, targetNodeID)
+	}
+	return nil, nil
+}
+
 // SendNack sends an enriched NACK to a specific peer.
 func (pm *PeerManager) SendNack(nack *pb.NackNotify, targetNodeID NodeId) {
 	if pm.replicator != nil {
