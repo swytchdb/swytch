@@ -280,7 +280,7 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 		if tp == ghostA || tp == ghostB {
 			t.Fatalf("ghost tip %v installed despite unreachable bootstrap", tp)
 		}
-		eff, ok := e.effectCache.Get(tp, 0)
+		eff, ok := e.effectCache.Get(tp)
 		if !ok {
 			t.Fatalf("tip %v not in effectCache", tp)
 		}

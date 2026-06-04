@@ -89,7 +89,7 @@ func TestHandleRemote_Rule1_UnsubscribedCanonical_NoIndexUpdate(t *testing.T) {
 	// The bind's bytes are still in the effect cache — Rule 1 separates
 	// cache acceptance from index participation.
 	if e.effectCache != nil {
-		if _, ok := e.effectCache.Get(bindOff, 0); !ok {
+		if _, ok := e.effectCache.Get(bindOff); !ok {
 			t.Errorf("effect cache: bind %v should be cached even when canonical key is unsubscribed", bindOff)
 		}
 	}

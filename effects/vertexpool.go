@@ -57,9 +57,9 @@ type vertex struct {
 // is the only component that knows a key's active DAG path and can therefore
 // choose safe victims.
 //
-// Per-key refcounting (so eviction can drop whole keys and reclaim only the
-// vertices no other key needs) arrives with the cached subdag in a later
-// stage; today the pool is unbounded between governor sweeps.
+// Per-key refcounting (incref/decref) lets eviction drop whole keys and
+// reclaim only the vertices no other key still needs; a vertex is referenced
+// by every index tip and cached subdag that includes it.
 type VertexPool struct {
 	m     *xsync.Map[Tip, *vertex]
 	bytes atomic.Int64
@@ -81,10 +81,8 @@ func effectSize(eff *pb.Effect) int64 {
 	return int64(proto.Size(eff)) + vertexOverhead
 }
 
-// Get returns the effect at tip. The second parameter is vestigial (a
-// CloxCache offset artifact) and ignored; it will be removed when the pool
-// API is finalized in the sharded-eviction stage.
-func (p *VertexPool) Get(tip Tip, _ uint64) (*pb.Effect, bool) {
+// Get returns the effect at tip.
+func (p *VertexPool) Get(tip Tip) (*pb.Effect, bool) {
 	v, ok := p.m.Load(tip)
 	if !ok {
 		p.misses.Add(1)

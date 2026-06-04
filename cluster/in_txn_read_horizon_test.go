@@ -222,7 +222,7 @@ func (g *gatedBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
 	if cache == nil {
 		return nil, fmt.Errorf("gatedBroadcaster: peer %v has no effect cache", g.peer)
 	}
-	eff, ok := cache.Get(effects.Tip{ref.NodeId, ref.Offset}, 0)
+	eff, ok := cache.Get(effects.Tip{ref.NodeId, ref.Offset})
 	if !ok {
 		return nil, fmt.Errorf("gatedBroadcaster: peer %v missing effect %+v", g.peer, ref)
 	}

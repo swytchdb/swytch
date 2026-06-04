@@ -1372,7 +1372,7 @@ func (e *Engine) collectBindEffects(bindEff *pb.Effect, key string) ([]*pb.Effec
 func (e *Engine) getEffect(offset Tip) (*pb.Effect, error) {
 	// Check deserialized effect cache
 	if e.effectCache != nil {
-		if cached, ok := e.effectCache.Get(offset, 0); ok {
+		if cached, ok := e.effectCache.Get(offset); ok {
 			return cached, nil
 		}
 	}
@@ -1390,7 +1390,7 @@ func (e *Engine) getEffect(offset Tip) (*pb.Effect, error) {
 	}
 	// storeWireData puts it in effectCache; try again
 	if e.effectCache != nil {
-		if cached, ok := e.effectCache.Get(offset, 0); ok {
+		if cached, ok := e.effectCache.Get(offset); ok {
 			return cached, nil
 		}
 	}

@@ -95,7 +95,7 @@ func (r *EngineLogReader) ReadEffect(ref *pb.EffectRef) ([]byte, error) {
 		return nil, fmt.Errorf("effect cache not initialized")
 	}
 	key := effects.Tip{ref.NodeId, ref.Offset}
-	eff, ok := r.effectCache.Get(key, 0)
+	eff, ok := r.effectCache.Get(key)
 	if !ok {
 		return nil, fmt.Errorf("effect not found at %v", ref)
 	}

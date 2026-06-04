@@ -122,7 +122,6 @@ func newTestEngine(bc Broadcaster) *Engine {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       newVertexPool(),
 	}
@@ -201,7 +200,7 @@ func TestEmitTwoSameKey(t *testing.T) {
 
 	// Verify dep chaining: the tip (meta effect) should depend on the first effect
 	tipOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(tipOff, 0)
+	cached, ok := e.effectCache.Get(tipOff)
 	if !ok {
 		t.Fatal("expected effect in cache")
 	}
@@ -233,7 +232,7 @@ func TestEmitForkResolution(t *testing.T) {
 
 	// Deps should include both original tips (fork resolution)
 	tipOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(tipOff, 0)
+	cached, ok := e.effectCache.Get(tipOff)
 	if !ok {
 		t.Fatal("expected effect in cache")
 	}
@@ -391,7 +390,7 @@ func TestBeginTxSetsFlag(t *testing.T) {
 	// In a tx, the tip is the BIND; walk tips to find a data effect with TxnId
 	found := false
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -650,7 +649,6 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       newVertexPool(),
 	}
@@ -926,7 +924,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 
 	foundLoserOnlyVerdict := false
 	for _, tip := range loserOnlyTips.Tips() {
-		eff, ok := e.effectCache.Get(tip, 0)
+		eff, ok := e.effectCache.Get(tip)
 		if !ok {
 			continue
 		}
@@ -958,7 +956,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 	}
 	foundSharedVerdict := false
 	for _, tip := range sharedTips.Tips() {
-		eff, ok := e.effectCache.Get(tip, 0)
+		eff, ok := e.effectCache.Get(tip)
 		if !ok {
 			continue
 		}
@@ -1001,7 +999,7 @@ func TestEmit_ExcludesInProgressTxTips(t *testing.T) {
 		t.Fatal("expected index entry for key k")
 	}
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1136,7 +1134,7 @@ func TestFlushTx_SerializationEscalation_AfterNAborts(t *testing.T) {
 	}
 	found := false
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1349,7 +1347,7 @@ func TestGetSnapshot_ExcludesPendingTxTips(t *testing.T) {
 		if off == committedOff {
 			continue
 		}
-		eff, ok := e.effectCache.Get(off, 0)
+		eff, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1731,7 +1729,7 @@ func TestFlushTx_ConsumesTips_LinearChain(t *testing.T) {
 
 		// Verify the tip is a BIND effect via effectCache
 		bindOffset := postTips.Tips()[0]
-		cached, ok := e.effectCache.Get(bindOffset, 0)
+		cached, ok := e.effectCache.Get(bindOffset)
 		if !ok {
 			t.Fatalf("iteration %d: could not find BIND at offset %d in effectCache", i, bindOffset)
 		}

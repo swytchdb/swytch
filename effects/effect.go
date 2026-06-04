@@ -106,11 +106,6 @@ type Engine struct {
 	// NACK round, producing missing verdict snapshots downstream.
 	peerSubscribers *xsync.Map[string, *xsync.Map[pb.NodeID, struct{}]]
 
-	// Per-key dedupe for handleEviction. Multiple effects on the
-	// same key can evict in close succession; only one goroutine
-	// should run the broadcast + teardown for any given key.
-	unsubInFlight *xsync.Map[string, struct{}]
-
 	// Deserialized effect store — effects are immutable once written.
 	// Replaces the per-offset CloxCache; eviction is driven by the engine
 	// memory governor (see startMemoryGovernor), not the pool itself.
@@ -295,7 +290,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
 		peerSubscribers:    xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:      xsync.NewMap[string, struct{}](),
 		effectCache:        newVertexPool(),
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
@@ -1474,7 +1468,7 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	}
 
 	for _, tp := range tips {
-		eff, ok := e.effectCache.Get(tp, 0)
+		eff, ok := e.effectCache.Get(tp)
 		if !ok {
 			continue
 		}
@@ -1539,7 +1533,7 @@ func (e *Engine) collectCausalChain(key string, tips []keytrie.EffectRef) []*pb.
 		cur := queue[0]
 		queue = queue[1:]
 
-		eff, ok := e.effectCache.Get(cur, 0)
+		eff, ok := e.effectCache.Get(cur)
 		if !ok {
 			continue
 		}
@@ -1616,7 +1610,7 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 			continue
 		}
 		if e.effectCache != nil {
-			if cached, ok := e.effectCache.Get(off, 0); ok {
+			if cached, ok := e.effectCache.Get(off); ok {
 				if snap := cached.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
 					break
 				}
@@ -1646,7 +1640,7 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 
 	for _, ref := range nack.CausalChain {
 		off := r(ref)
-		if _, ok := e.effectCache.Get(off, 0); ok {
+		if _, ok := e.effectCache.Get(off); ok {
 			continue
 		}
 		pending++
@@ -2000,7 +1994,7 @@ func (e *Engine) probeAndFetchKey(key string) {
 		fetched[off] = true
 
 		if e.effectCache != nil {
-			if cached, ok := e.effectCache.Get(off, 0); ok {
+			if cached, ok := e.effectCache.Get(off); ok {
 				fetchStack = append(fetchStack, fromPbRefs(cached.Deps)...)
 				continue
 			}

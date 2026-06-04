@@ -184,7 +184,7 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 	e.reclaimUnreferenced()
 
 	// The system key's effect must survive the sweep.
-	if _, ok := e.effectCache.Get(systemTip, 0); !ok {
+	if _, ok := e.effectCache.Get(systemTip); !ok {
 		t.Fatal("system __swytch:members effect was evicted; pin failed")
 	}
 	// User effects must have been evicted.
@@ -192,7 +192,7 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 	if evictions == 0 {
 		t.Fatal("no evictions occurred; sweep did not exercise victim selection")
 	}
-	if _, ok := e.effectCache.Get(Tip{1, 1000}, 0); ok {
+	if _, ok := e.effectCache.Get(Tip{1, 1000}); ok {
 		t.Fatal("user-key effect survived the sweep; victim selection failed")
 	}
 }

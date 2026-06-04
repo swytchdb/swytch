@@ -867,7 +867,7 @@ func (c *Context) flushTx() error {
 			// during flushTx, AFTER initialTips was captured at Emit
 			// time, so the originator's own subscription would otherwise
 			// look like a competitor and trigger a spurious abort.
-			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+			if eff, ok := c.engine.effectCache.Get(t); ok && eff.GetSubscription() != nil {
 				continue
 			}
 			slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
@@ -932,7 +932,7 @@ func (c *Context) flushTx() error {
 			// BeginTx, so without this skip the originator's own
 			// subscription tip would look like a concurrent external
 			// write and trigger a spurious abort.
-			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+			if eff, ok := c.engine.effectCache.Get(t); ok && eff.GetSubscription() != nil {
 				continue
 			}
 			// Concurrent effect on watched key → SSI conflict

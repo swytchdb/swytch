@@ -94,7 +94,6 @@ func newSnapshotEngine(log *snapshotLog) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -985,7 +984,7 @@ func TestEmitWithoutSnapshotTips_ReadsIndex(t *testing.T) {
 		t.Fatalf("expected 1 tip after flush, got %v", tips)
 	}
 	newOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(newOff, 0)
+	cached, ok := e.effectCache.Get(newOff)
 	if !ok {
 		t.Fatal("emitted effect not in effectCache")
 	}
@@ -1023,7 +1022,7 @@ func (b *bootstrapBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
 	}
 	offset := r(ref)
 	// Read from remote engine's effect cache
-	cached, ok := b.remoteEngine.effectCache.Get(offset, 0)
+	cached, ok := b.remoteEngine.effectCache.Get(offset)
 	if !ok {
 		return nil, fmt.Errorf("effect %v not found in remote cache", offset)
 	}
@@ -1056,7 +1055,6 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	remoteEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1100,7 +1098,6 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	localEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1186,7 +1183,6 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1251,7 +1247,6 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1306,7 +1301,6 @@ func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1370,7 +1364,6 @@ func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
