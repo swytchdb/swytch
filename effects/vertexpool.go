@@ -1,0 +1,274 @@
+/*
+ * Copyright 2026 Swytch Labs BV
+ *
+ * This file is part of Swytch.
+ *
+ * Swytch is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * Swytch is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with Swytch. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package effects
+
+import (
+	"log/slog"
+	"math"
+	"runtime/debug"
+	"sync/atomic"
+	"time"
+
+	"github.com/puzpuzpuz/xsync/v4"
+	"google.golang.org/protobuf/proto"
+
+	clox "github.com/swytchdb/swytch/cache"
+	pb "github.com/swytchdb/swytch/cluster/proto"
+)
+
+// vertexOverhead approximates the per-entry bookkeeping cost (the Tip key,
+// the vertex struct, and the map slot) added to the marshalled effect size
+// for byte accounting.
+const vertexOverhead = 48
+
+// vertex wraps an immutable effect resident in the VertexPool. size caches
+// the entry's accounted bytes so eviction can decrement the total without
+// re-marshalling.
+type vertex struct {
+	eff  *pb.Effect
+	size int64
+}
+
+// VertexPool is the engine's deserialized effect store: a map from Tip to
+// its effect, replacing the per-offset CloxCache. Presence in the pool means
+// "resident locally"; absence means getEffect must fetch the bytes from a
+// peer. The pool is dumb storage with byte accounting — it has no eviction
+// policy of its own. Eviction is driven by the engine memory governor, which
+// is the only component that knows a key's active DAG path and can therefore
+// choose safe victims.
+//
+// Per-key refcounting (so eviction can drop whole keys and reclaim only the
+// vertices no other key needs) arrives with the cached subdag in a later
+// stage; today the pool is unbounded between governor sweeps.
+type VertexPool struct {
+	m     *xsync.Map[Tip, *vertex]
+	bytes atomic.Int64
+
+	hits      atomic.Uint64
+	misses    atomic.Uint64
+	evictions atomic.Uint64
+}
+
+func newVertexPool() *VertexPool {
+	return &VertexPool{m: xsync.NewMap[Tip, *vertex]()}
+}
+
+// effectSize returns the accounted byte cost of holding eff.
+func effectSize(eff *pb.Effect) int64 {
+	if eff == nil {
+		return vertexOverhead
+	}
+	return int64(proto.Size(eff)) + vertexOverhead
+}
+
+// Get returns the effect at tip. The second parameter is vestigial (a
+// CloxCache offset artifact) and ignored; it will be removed when the pool
+// API is finalized in the sharded-eviction stage.
+func (p *VertexPool) Get(tip Tip, _ uint64) (*pb.Effect, bool) {
+	v, ok := p.m.Load(tip)
+	if !ok {
+		p.misses.Add(1)
+		return nil, false
+	}
+	p.hits.Add(1)
+	return v.eff, true
+}
+
+// peek returns the effect at tip without recording a hit/miss. Used by the
+// engine's own DAG walks (active-path collection) so internal traversal does
+// not skew the access statistics.
+func (p *VertexPool) peek(tip Tip) (*pb.Effect, bool) {
+	if v, ok := p.m.Load(tip); ok {
+		return v.eff, true
+	}
+	return nil, false
+}
+
+// Put stores eff at tip, replacing any prior value and adjusting the byte
+// total by the delta. Effects are immutable, so a re-Put of the same tip is
+// normally identical; the delta keeps accounting correct regardless.
+func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
+	nv := &vertex{eff: eff, size: effectSize(eff)}
+	if prev, loaded := p.m.LoadAndStore(tip, nv); loaded {
+		p.bytes.Add(nv.size - prev.size)
+	} else {
+		p.bytes.Add(nv.size)
+	}
+}
+
+// delete removes tip from the pool, decrements the byte total, and counts an
+// eviction. Returns the bytes freed, or 0 if tip was absent.
+func (p *VertexPool) delete(tip Tip) int64 {
+	prev, loaded := p.m.LoadAndDelete(tip)
+	if !loaded {
+		return 0
+	}
+	p.bytes.Add(-prev.size)
+	p.evictions.Add(1)
+	return prev.size
+}
+
+// rangeVertices iterates every resident vertex. The callback must not call
+// the pool's mutating methods on the same tip mid-iteration other than
+// delete, which xsync.Map tolerates.
+func (p *VertexPool) rangeVertices(fn func(tip Tip, v *vertex) bool) {
+	p.m.Range(fn)
+}
+
+// Bytes returns the accounted memory held by the pool.
+func (p *VertexPool) Bytes() int64 { return p.bytes.Load() }
+
+// EntryCount returns the number of resident effects.
+func (p *VertexPool) EntryCount() int { return p.m.Size() }
+
+// Stats returns cumulative hit, miss, and eviction counts.
+func (p *VertexPool) Stats() (hits, misses, evictions uint64) {
+	return p.hits.Load(), p.misses.Load(), p.evictions.Load()
+}
+
+// startMemoryGovernor launches the background loop that keeps process RSS near
+// targetBytes by sweeping below-LCA effects out of the vertex pool. It also
+// sets GOMEMLIMIT (if unset) so the GC cooperates with the budget, mirroring
+// the prior CloxCache enforcement. targetBytes <= 0 disables enforcement.
+//
+// This is the interim memory-pressure mechanism. It is looser than the old
+// per-Put CloxCache eviction (it reacts on a 1s tick rather than inline),
+// because choosing a safe victim now requires the active-path walk, which is
+// too expensive for the ingest hot path. The tight, per-key bound returns
+// with the sharded eviction policy in a later stage.
+func (e *Engine) startMemoryGovernor(targetBytes int64) {
+	if targetBytes <= 0 {
+		return
+	}
+	if cur := debug.SetMemoryLimit(-1); cur == math.MaxInt64 {
+		// Reserve 5% of the target for non-heap memory (stacks, mmap, etc.).
+		debug.SetMemoryLimit(targetBytes * 95 / 100)
+		slog.Debug("vertex pool: set GOMEMLIMIT", "limit", clox.FormatMemory(uint64(targetBytes*95/100)))
+	}
+	e.memGovStop = make(chan struct{})
+	e.memGovWg.Add(1)
+	go e.memoryGovernorLoop(targetBytes)
+}
+
+func (e *Engine) memoryGovernorLoop(targetBytes int64) {
+	defer e.memGovWg.Done()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.memGovStop:
+			return
+		case <-ticker.C:
+			if int64(clox.GetProcessRSS()) > targetBytes {
+				e.sweepBelowLCA()
+			}
+		}
+	}
+}
+
+// sweepBelowLCA evicts every pool effect that is not in any subscribed key's
+// active path (its tips down to the nearest snapshot-with-state) and is not a
+// pinned system-key effect. Below-LCA history is already folded into a
+// snapshot, so dropping it is safe: reconstruct never needs it and the key
+// stays readable. Returns the bytes reclaimed.
+func (e *Engine) sweepBelowLCA() int64 {
+	if e.effectCache == nil {
+		return 0
+	}
+	active := e.activeSet()
+	var reclaimed int64
+	e.effectCache.rangeVertices(func(tip Tip, v *vertex) bool {
+		if _, ok := active[tip]; ok {
+			return true
+		}
+		if v.eff != nil && isSystemKey(v.eff.Key) {
+			return true
+		}
+		reclaimed += e.effectCache.delete(tip)
+		return true
+	})
+	if reclaimed > 0 {
+		slog.Debug("vertex pool: swept below-LCA effects",
+			"reclaimed", reclaimed, "remaining_bytes", e.effectCache.Bytes())
+	}
+	return reclaimed
+}
+
+// activeSet returns the union of every subscribed key's active-path tips —
+// each key walked from its current index tips down to (and including) the
+// nearest snapshot-with-state. Effects outside this set are below an LCA and
+// safe to evict. Pool-only: a missing dep just truncates that branch.
+func (e *Engine) activeSet() map[Tip]struct{} {
+	set := make(map[Tip]struct{})
+	for _, key := range e.index.Keys() {
+		ts := e.index.Contains(key)
+		if ts == nil {
+			continue
+		}
+		e.collectActivePath(key, ts.Tips(), set)
+	}
+	return set
+}
+
+// collectActivePath adds key's active-path vertices to set: a BFS from tips
+// following per-key dependencies, stopping at (and including) any snapshot
+// that carries folded state.
+func (e *Engine) collectActivePath(key string, tips []Tip, set map[Tip]struct{}) {
+	queue := make([]Tip, 0, len(tips))
+	for _, t := range tips {
+		if _, seen := set[t]; seen {
+			continue
+		}
+		set[t] = struct{}{}
+		queue = append(queue, t)
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		eff, ok := e.effectCache.peek(cur)
+		if !ok {
+			continue
+		}
+		// A snapshot carrying state bounds the active path: it is kept (the
+		// LCA reconstruct needs it) but its ancestors are foldable.
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
+			continue
+		}
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+		for _, ref := range refs {
+			dt := r(ref)
+			if _, seen := set[dt]; seen {
+				continue
+			}
+			set[dt] = struct{}{}
+			queue = append(queue, dt)
+		}
+	}
+}

@@ -35,7 +35,7 @@ import (
 
 func newHorizonTestEngine() *Engine {
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 		index:             keytrie.New(),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -77,7 +77,7 @@ func installFakeTimers(h *HorizonSet) func() {
 
 func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 		index:             keytrie.New(),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),

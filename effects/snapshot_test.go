@@ -43,7 +43,7 @@ func sTs(nanos int64) *timestamppb.Timestamp {
 // --- snapshotLog: test helper for pre-populating the effect DAG ---
 
 type snapshotLog struct {
-	effectCache *clox.CloxCache[Tip, *pb.Effect]
+	effectCache *VertexPool
 	entries     map[Tip][]byte // raw proto bytes, for tests that inspect wire data
 	nextOff     uint64
 	nodeID      uint64
@@ -51,7 +51,7 @@ type snapshotLog struct {
 
 func newSnapshotLog() *snapshotLog {
 	return &snapshotLog{
-		effectCache: clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache: newVertexPool(),
 		entries:     make(map[Tip][]byte),
 		nextOff:     100,
 		nodeID:      1,
@@ -77,11 +77,11 @@ func (l *snapshotLog) putEffect(eff *pb.Effect) Tip {
 // --- helpers ---
 
 func newSnapshotEngine(log *snapshotLog) *Engine {
-	var ec *clox.CloxCache[Tip, *pb.Effect]
+	var ec *VertexPool
 	if log != nil {
 		ec = log.effectCache
 	} else {
-		ec = clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024))
+		ec = newVertexPool()
 	}
 	e := &Engine{
 		index:             keytrie.New(),

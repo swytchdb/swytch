@@ -75,7 +75,7 @@ func (c *CloxCache[K, V]) sweepGhosts() {
 	memoryLimit := c.memoryLimit.Load()
 	underPressure := false
 	if memoryLimit > 0 {
-		processRSS := int64(getProcessRSS())
+		processRSS := int64(GetProcessRSS())
 		underPressure = processRSS > memoryLimit
 	}
 

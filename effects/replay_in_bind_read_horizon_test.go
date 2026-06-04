@@ -344,7 +344,7 @@ func TestReplayRun26373595271InBindReadDiverges(t *testing.T) {
 func newInBindReadReplayEngine(t *testing.T) *Engine {
 	t.Helper()
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 		index:             keytrie.New(),
 		broadcaster:       &mockBroadcaster{},
 		nodeID:            replay26373595271NodeN103,

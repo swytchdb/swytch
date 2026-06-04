@@ -30,13 +30,13 @@ import (
 	"time"
 )
 
-// getAvailableMemory returns the total memory available to this process.
+// GetAvailableMemory returns the total memory available to this process.
 // It checks (in order):
 //  1. Cgroup v2 memory limit (containers)
 //  2. Cgroup v1 memory limit (older containers)
 //  3. Total system RAM via /proc/meminfo (Linux)
 //  4. Fallback: estimate from runtime (all platforms)
-func getAvailableMemory() uint64 {
+func GetAvailableMemory() uint64 {
 	if mem := getCgroupV2MemoryLimit(); mem > 0 {
 		return mem
 	}
@@ -107,9 +107,9 @@ func getProcMemTotal() uint64 {
 	return 0
 }
 
-// getProcessRSS returns the current resident set size (actual physical memory used)
+// GetProcessRSS returns the current resident set size (actual physical memory used)
 // of this process. Falls back to runtime.MemStats.Sys if /proc is unavailable.
-func getProcessRSS() uint64 {
+func GetProcessRSS() uint64 {
 	// Try /proc/self/statm (field 1 is RSS in pages)
 	data, err := os.ReadFile("/proc/self/statm")
 	if err == nil {
@@ -170,7 +170,7 @@ func (c *CloxCache[K, V]) EnforceMemoryTarget(targetPercent float64, avgItemSize
 		return
 	}
 
-	availableMemory := getAvailableMemory()
+	availableMemory := GetAvailableMemory()
 	targetBytes := int64(float64(availableMemory) * targetPercent)
 
 	slog.Debug("memory target configured",
@@ -215,7 +215,7 @@ func (c *CloxCache[K, V]) memoryTargetLoop(targetBytes, avgItemSize int64) {
 }
 
 func (c *CloxCache[K, V]) adjustForMemoryTarget(targetBytes, avgItemSize int64) {
-	processRSS := int64(getProcessRSS())
+	processRSS := int64(GetProcessRSS())
 	entryCount := int64(c.EntryCount())
 
 	if entryCount == 0 {

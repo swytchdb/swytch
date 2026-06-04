@@ -21,7 +21,6 @@ package effects
 
 import (
 	"testing"
-	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
@@ -151,11 +150,10 @@ func TestHandleEviction_ShutdownShortCircuit(t *testing.T) {
 	}
 }
 
-// TestNewEngine_PinsSystemKeysInCache verifies the end-to-end wiring:
-// constructing an Engine via NewEngine installs the cache decider so
-// that "__swytch:" effects survive memory pressure while user-key
-// effects are evicted. This is the regression test for the original
-// bootstrap-incomplete bug.
+// TestNewEngine_PinsSystemKeysInCache verifies that the memory-pressure
+// sweep pins "__swytch:" effects while evicting user-key effects that are
+// not in any active path. This is the regression test for the original
+// bootstrap-incomplete bug (a membership effect must never be swept).
 func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := NewEngine(EngineConfig{
@@ -163,11 +161,11 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 		Index:       keytrie.New(),
 		Broadcaster: bc,
 		DefaultMode: UnsafeMode,
-		MemoryLimit: 4096, // tiny — easy to overflow
 	})
 	defer func() { _ = e.Close() }()
 
-	// Seed a membership-style effect.
+	// Seed a membership-style effect. It has no index entry, so it is not
+	// in any active path — only the system-key pin should keep it.
 	systemKey := "__swytch:members"
 	systemEff := &pb.Effect{
 		Key:            []byte(systemKey),
@@ -184,15 +182,10 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 	}
 	systemTip := Tip{1, 1}
 	e.effectCache.Put(systemTip, systemEff)
-	// Bump frequency so the protected-freq fallback would also try to
-	// evict it — the decider must override regardless.
-	for range 5 {
-		_, _ = e.effectCache.Get(systemTip, 0)
-	}
 
-	// Overflow with user-key effects. The exact payload size doesn't
-	// matter — we keep going until evictions happen.
-	for i := range uint64(5000) {
+	// User-key effects with no index entry — below-LCA / orphan from the
+	// sweep's perspective, so all should be evicted.
+	for i := range uint64(50) {
 		userEff := &pb.Effect{
 			Key:            []byte("user:k"),
 			Hlc:            sTs(int64(i + 2)),
@@ -208,18 +201,21 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 		e.effectCache.Put(Tip{1, 1000 + i}, userEff)
 	}
 
-	// Allow any async handleEviction callbacks a moment to settle.
-	time.Sleep(50 * time.Millisecond)
+	// Run the sweep directly (the governor fires it on its tick under
+	// memory pressure; here we drive it deterministically).
+	e.sweepBelowLCA()
 
-	// The system key's effect must still be in the cache.
+	// The system key's effect must survive the sweep.
 	if _, ok := e.effectCache.Get(systemTip, 0); !ok {
 		t.Fatal("system __swytch:members effect was evicted; pin failed")
 	}
-	// And evictions must have occurred (otherwise our pressure
-	// assertion didn't actually exercise the decider).
+	// User effects must have been evicted.
 	_, _, evictions := e.effectCache.Stats()
 	if evictions == 0 {
-		t.Fatal("no evictions occurred; test did not exercise the decider path")
+		t.Fatal("no evictions occurred; sweep did not exercise victim selection")
+	}
+	if _, ok := e.effectCache.Get(Tip{1, 1000}, 0); ok {
+		t.Fatal("user-key effect survived the sweep; victim selection failed")
 	}
 }
 

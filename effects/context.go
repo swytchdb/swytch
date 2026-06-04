@@ -714,7 +714,6 @@ func (c *Context) flushNonTx() error {
 		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
 
-
 		if c.engine.broadcaster != nil {
 			var bcastTrace []byte
 			if tracing.Enabled() {

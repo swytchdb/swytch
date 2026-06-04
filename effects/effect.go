@@ -38,7 +38,6 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -108,8 +107,14 @@ type Engine struct {
 	// should run the broadcast + teardown for any given key.
 	unsubInFlight *xsync.Map[string, struct{}]
 
-	// Deserialized effect cache — effects are immutable once written
-	effectCache *clox.CloxCache[keytrie.EffectRef, *pb.Effect]
+	// Deserialized effect store — effects are immutable once written.
+	// Replaces the per-offset CloxCache; eviction is driven by the engine
+	// memory governor (see startMemoryGovernor), not the pool itself.
+	effectCache *VertexPool
+
+	// Memory governor lifecycle (RSS-driven below-LCA sweeps).
+	memGovStop chan struct{}
+	memGovWg   sync.WaitGroup
 
 	closed atomic.Bool
 
@@ -288,57 +293,23 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
 		peerSubscribers:    xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		unsubInFlight:      xsync.NewMap[string, struct{}](),
-		effectCache: clox.NewCloxCache[keytrie.EffectRef, *pb.Effect](func() clox.Config {
-			c := clox.ConfigFromMemorySize(effectCacheSize(cfg.MemoryLimit))
-			c.CollectStats = true
-			return c
-		}()),
-		spokenBinds: clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
+		effectCache:        newVertexPool(),
+		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
-	e.effectCache.SetSizeFunc(func(_ keytrie.EffectRef, v *pb.Effect) int64 {
-		return 16 + int64(proto.Size(v)) // 16 = sizeof(EffectRef=[2]uint64)
-	})
-	// Pin cluster-operational keys (any "__swytch:" prefix). Membership,
-	// pubsub channel routing, pubsub pattern routing, and any future
-	// system-owned key shares this namespace. Eviction of one of these
-	// effects silently breaks cluster invariants (index claims a tip
-	// we no longer hold bytes for), so the cache must skip them
-	// during victim selection.
-	e.effectCache.SetEvictDecider(func(ref keytrie.EffectRef, eff *pb.Effect) bool {
-		if eff == nil {
-			return true
-		}
-		if isSystemKey(eff.Key) {
-			return false
-		}
-		key := string(eff.Key)
-		tipSet := e.index.Contains(key)
-		if tipSet == nil {
-			return true
-		}
-		return !e.isInActivePathCacheOnly(key, ref, tipSet.Tips())
-	})
-	// After-eviction hook: the cache lost the bytes for an effect, so
-	// the local index can no longer honestly claim authority over its
-	// tip. Drop the key + unsubscribe cluster-wide. Dispatched on a
-	// fresh goroutine because evictNotify runs under shard.mu and
-	// handleEviction takes other locks + does a network broadcast.
-	e.effectCache.SetEvictNotify(func(ref keytrie.EffectRef, eff *pb.Effect) {
-		tipSet := e.index.Contains(string(eff.Key))
-		go e.handleEviction(ref, eff, tipSet)
-	})
 
-	// Memory enforcement: start a background loop that compares process
-	// RSS against the target and adjusts cache capacity accordingly.
-	// Percent-based uses a fraction of available memory; absolute uses
-	// the exact byte budget from --maxmemory. Both paths set GOMEMLIMIT
-	// so the Go GC cooperates with the target.
-	const avgEffectBytes = 512 // conservative; loop self-corrects from actual bytes
+	// Memory governor: keep process RSS near the target by sweeping
+	// below-LCA effects out of the vertex pool. Percent-based uses a
+	// fraction of available memory; absolute uses the exact byte budget
+	// from --maxmemory. The governor also sets GOMEMLIMIT so the GC
+	// cooperates with the target. System-key ("__swytch:") effects are
+	// pinned by sweepBelowLCA, never evicted.
+	var memTarget int64
 	if cfg.MemoryLimitPercent > 0 && cfg.MemoryLimitPercent <= 1.0 {
-		e.effectCache.EnforceMemoryTarget(cfg.MemoryLimitPercent, avgEffectBytes)
+		memTarget = int64(float64(clox.GetAvailableMemory()) * cfg.MemoryLimitPercent)
 	} else if cfg.MemoryLimit > 0 {
-		e.effectCache.EnforceAbsoluteMemoryLimit(cfg.MemoryLimit, avgEffectBytes)
+		memTarget = cfg.MemoryLimit
 	}
+	e.startMemoryGovernor(memTarget)
 
 	e.safety.Store(&safetyMap{
 		defaultMode: cfg.DefaultMode,
@@ -350,14 +321,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 	}
 
 	return e
-}
-
-// effectCacheSize returns the byte budget for the deserialized effect cache.
-func effectCacheSize(memoryLimit int64) uint64 {
-	if memoryLimit <= 0 {
-		return 10 * 1024 * 1024 // 10MB default
-	}
-	return uint64(memoryLimit)
 }
 
 func (e *Engine) NodeID() pb.NodeID {
@@ -378,7 +341,7 @@ func (e *Engine) generateTxnID() string {
 
 // EffectCache returns the engine's deserialized effect cache for use by
 // the fetch handler (serves effects from cache when the log is unavailable).
-func (e *Engine) EffectCache() *clox.CloxCache[Tip, *pb.Effect] {
+func (e *Engine) EffectCache() *VertexPool {
 	return e.effectCache
 }
 
@@ -1911,6 +1874,10 @@ func (e *Engine) Close() error {
 	if e.antiEntropyStop != nil {
 		close(e.antiEntropyStop)
 		e.antiEntropyWg.Wait()
+	}
+	if e.memGovStop != nil {
+		close(e.memGovStop)
+		e.memGovWg.Wait()
 	}
 	if e.spokenBinds != nil {
 		e.spokenBinds.Close()

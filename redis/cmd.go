@@ -312,17 +312,18 @@ Examples:
 				}
 				ec := activeRuntime.Engine.EffectCache()
 				hits, misses, evictions := ec.Stats()
+				// Capacity / AverageK / MemoryAvail were CloxCache-specific
+				// (fixed slot capacity, protected-freq K). The vertex pool is
+				// unbounded between governor sweeps, so they report zero until
+				// the sharded per-key eviction policy reintroduces them.
 				return telemetry.HeartbeatStats{
 					Nodes:         nodes,
 					UptimeSeconds: int(adapter.UptimeSeconds()),
-					MemoryAvail:   ec.MemoryLimit(),
 					MemoryUsage:   ec.Bytes(),
 					HitCount:      hits,
 					MissCount:     misses,
 					Evictions:     evictions,
 					EntryCount:    ec.EntryCount(),
-					Capacity:      ec.Capacity(),
-					AverageK:      ec.AverageK(),
 				}
 			},
 		})

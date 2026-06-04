@@ -124,7 +124,7 @@ func newTestEngine(bc Broadcaster) *Engine {
 		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	return e
@@ -652,7 +652,7 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	return e
