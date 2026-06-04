@@ -30,7 +30,6 @@ import (
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
-	"github.com/swytchdb/swytch/keytrie"
 )
 
 // gatedPairedBus is a two-node in-process replication shim that wires two
@@ -358,14 +357,10 @@ func TestInTxnReadObservesInconsistentSnapshotAcrossHorizon(t *testing.T) {
 
 	// Both engines get a real broadcaster, which auto-inits horizon.
 	engA := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1001,
-		Index:       keytrie.New(),
-		DefaultMode: effects.UnsafeMode, // skip majority-partition gating
+		NodeID: 1001, DefaultMode: effects.UnsafeMode, // skip majority-partition gating
 	})
 	engB := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1002,
-		Index:       keytrie.New(),
-		DefaultMode: effects.UnsafeMode,
+		NodeID: 1002, DefaultMode: effects.UnsafeMode,
 	})
 
 	// Hook SetBroadcaster so the engines learn about each other via the

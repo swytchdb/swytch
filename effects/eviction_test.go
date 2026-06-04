@@ -158,7 +158,6 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := NewEngine(EngineConfig{
 		NodeID:      1,
-		Index:       keytrie.New(),
 		Broadcaster: bc,
 		DefaultMode: UnsafeMode,
 	})

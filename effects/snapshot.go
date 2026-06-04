@@ -43,6 +43,100 @@ import (
 // post-resolution state.
 var errHorizonRetryNeeded = errors.New("reconstruct: horizon ancestor resolved, retry")
 
+// leafState is the per-key payload attached to each critbit leaf (the trie's
+// T). It carries the cached subdag for the key so reads reuse the prepared
+// structure instead of rebuilding it. It is created once per key and mutated
+// in place; later stages add eviction metadata (freq, last-access) alongside
+// the subdag, which is why this is a struct rather than a bare subdag pointer.
+type leafState struct {
+	subdag atomic.Pointer[cachedDag]
+}
+
+// cachedDag is the reusable output of dag.prepare for a specific tip set: the
+// collected node map, the fork-choice-sorted topological order, and the LCA.
+// It is immutable once published; a tip change produces a new one. Fork-choice
+// adjudication (losersOnKey / bindKeyClosure) and ReduceChain still run fresh
+// on every read against this structure — only the BFS+topo build is cached, so
+// the answer remains derived from the DAG.
+type cachedDag struct {
+	tips      []Tip
+	nodes     map[Tip]*pb.Effect
+	topoOrder []Tip
+	lcaTip    Tip
+}
+
+// tipsEqual reports whether two tip sets are equal as sets. Tip sets are
+// small (usually one tip), so the quadratic membership check is cheap and
+// avoids spurious cache misses from ordering differences.
+func tipsEqual(a, b []Tip) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, x := range a {
+		found := false
+		for _, y := range b {
+			if x == y {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// prepareDag populates d with the DAG structure for (key, tips), reusing the
+// leaf's cached subdag when it matches tips and rebuilding + publishing it
+// otherwise. Falls back to a transient build when the key has no leaf (not in
+// the index) — nothing to cache against.
+func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
+	if e.index == nil {
+		return d.prepare(tips)
+	}
+	ls, _ := e.index.LoadOrStoreData(key, &leafState{})
+	if ls == nil {
+		return d.prepare(tips)
+	}
+	if cs := ls.subdag.Load(); cs != nil && tipsEqual(cs.tips, tips) {
+		d.nodes = cs.nodes
+		d.topoOrder = cs.topoOrder
+		d.lcaTip = cs.lcaTip
+		return nil
+	}
+	if err := d.prepare(tips); err != nil {
+		return err
+	}
+	e.publishSubdag(ls, d, tips)
+	return nil
+}
+
+// publishSubdag installs d's prepared structure as the leaf's cached subdag.
+// The CAS ensures only the winning builder mutates the key-membership
+// refcounts: the new subdag's vertices are incref'd and the replaced subdag's
+// are decref'd exactly once. A losing builder discards its copy and leaves
+// refcounts untouched — its read still proceeds from d's local structure.
+func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
+	cs := &cachedDag{
+		tips:      append([]Tip(nil), tips...),
+		nodes:     d.nodes,
+		topoOrder: d.topoOrder,
+		lcaTip:    d.lcaTip,
+	}
+	old := ls.subdag.Load()
+	if ls.subdag.CompareAndSwap(old, cs) {
+		for t := range cs.nodes {
+			e.effectCache.incref(t)
+		}
+		if old != nil {
+			for t := range old.nodes {
+				e.effectCache.decref(t)
+			}
+		}
+	}
+}
+
 // verdictEntry holds a snapshot's verdict for a txnID; snapshotTip is the
 // offset of the snapshot that supplied it, used for debug log provenance.
 type verdictEntry struct {
@@ -572,7 +666,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 		}
 
 		d = newDag(e, key, txID)
-		if err := d.prepare(tips); err != nil {
+		if err := e.prepareDag(d, key, tips); err != nil {
 			return nil, 0, err
 		}
 

@@ -38,7 +38,7 @@ func newTestEngineForEphemeral(t *testing.T) *Engine {
 	log := newSnapshotLog()
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       &mockBroadcaster{},
 		nodeID:            1,
 		clock:             crdt.NewHLC(),

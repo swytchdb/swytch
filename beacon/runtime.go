@@ -29,7 +29,6 @@ import (
 	"github.com/swytchdb/swytch/cluster"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
-	"github.com/swytchdb/swytch/keytrie"
 )
 
 // RuntimeConfig describes what a swytch process needs to join a
@@ -104,7 +103,6 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 
 	engine := effects.NewEngine(effects.EngineConfig{
 		NodeID:             pb.NewNodeID(),
-		Index:              keytrie.New(),
 		DefaultMode:        effects.SafeMode,
 		MemoryLimit:        cfg.MemoryLimit,
 		MemoryLimitPercent: cfg.MemoryLimitPercent,

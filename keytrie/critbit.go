@@ -39,28 +39,35 @@ const (
 
 // critNode is a flattened node that serves as both internal and leaf.
 // Hot-path fields (child, bytePos, otherbits, isLeaf) are in the first 22 bytes.
-// Leaf fields start at offset 24. All fits in one cache line.
-type critNode struct {
-	child     [2]atomic.Pointer[critNode] // 16 bytes, offset 0  (internal)
-	bytePos   uint32                      // 4 bytes,  offset 16 (internal)
-	otherbits uint8                       // 1 byte,   offset 20 (internal)
-	isLeaf    bool                        // 1 byte,   offset 21
-	_         [2]byte                     //           offset 22
-	key       string                      // 16 bytes, offset 24 (leaf)
-	tips      atomic.Pointer[TipSet]      // 8 bytes,  offset 40 (leaf)
-	deleted   atomic.Bool                 // 4 bytes,  offset 44 (leaf)
-	_         [16]byte                    //           offset 48
+// Leaf fields start at offset 24.
+//
+// The type parameter T is the consumer-owned leaf payload. The trie itself
+// never inspects it — it only stores the pointer on each leaf so a consumer
+// (the effects engine) can attach a per-key cached subdag without leaking its
+// types into keytrie. Plain tip indexes use T = struct{} and never touch it.
+type critNode[T any] struct {
+	child     [2]atomic.Pointer[critNode[T]] // 16 bytes, offset 0  (internal)
+	bytePos   uint32                         // 4 bytes,  offset 16 (internal)
+	otherbits uint8                          // 1 byte,   offset 20 (internal)
+	isLeaf    bool                           // 1 byte,   offset 21
+	_         [2]byte                        //           offset 22
+	key       string                         // 16 bytes, offset 24 (leaf)
+	tips      atomic.Pointer[TipSet]         // 8 bytes,  offset 40 (leaf)
+	deleted   atomic.Bool                    // 4 bytes,  offset 44 (leaf)
+	data      atomic.Pointer[T]              // 8 bytes,  offset 48 (leaf payload)
+	_         [8]byte                        //           offset 56
 }
 
 func noop() {}
 
-func (n *critNode) isDeleted() bool {
+func (n *critNode[T]) isDeleted() bool {
 	return n.deleted.Load()
 }
 
-// Critbit is a crit-bit trie for storing string keys.
-type Critbit struct {
-	root   atomic.Pointer[critNode]
+// Critbit is a crit-bit trie for storing string keys, generic over the
+// per-leaf payload type T (see critNode).
+type Critbit[T any] struct {
+	root   atomic.Pointer[critNode[T]]
 	size   atomic.Int64
 	closed atomic.Bool
 
@@ -68,7 +75,7 @@ type Critbit struct {
 	reapRunning  atomic.Bool  // prevents concurrent reap goroutines
 
 	initOnce sync.Once
-	arena    critbitArena[critNode]
+	arena    critbitArena[critNode[T]]
 
 	// reapMu coordinates structural modifications. Inserts take a
 	// read-lock (concurrent inserts proceed in parallel). The reaper
@@ -77,8 +84,9 @@ type Critbit struct {
 	reapMu xsync.RBMutex
 }
 
-func NewCritbit() *Critbit {
-	c := &Critbit{}
+// NewCritbit creates a new crit-bit trie with leaf payload type T.
+func NewCritbit[T any]() *Critbit[T] {
+	c := &Critbit[T]{}
 	c.ensureInit()
 	return c
 }
@@ -142,13 +150,13 @@ func (a *critbitArena[T]) clear() {
 	a.growMu.Unlock()
 }
 
-func (c *Critbit) ensureInit() {
+func (c *Critbit[T]) ensureInit() {
 	c.initOnce.Do(func() {
 		c.arena.init(defaultCritbitArenaChunkSize)
 	})
 }
 
-func (c *Critbit) allocLeafNode(key string, ts *TipSet) *critNode {
+func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n := c.arena.alloc()
 	n.isLeaf = true
 	n.key = key
@@ -156,13 +164,12 @@ func (c *Critbit) allocLeafNode(key string, ts *TipSet) *critNode {
 	return n
 }
 
-func (c *Critbit) allocInternalNode(bytePos uint32, otherbits uint8) *critNode {
+func (c *Critbit[T]) allocInternalNode(bytePos uint32, otherbits uint8) *critNode[T] {
 	n := c.arena.alloc()
 	n.bytePos = bytePos
 	n.otherbits = otherbits
 	return n
 }
-
 
 func highestBit(b byte) uint8 {
 	if b == 0 {
@@ -218,7 +225,7 @@ func getDirection(key string, bytePos uint32, otherbits uint8) int {
 //
 // On success: returns (nil, true).
 // On CAS failure: returns (currentTips, false) — the conflicting tip set.
-func (c *Critbit) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
+func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
 	if c.closed.Load() {
 		return nil, false
 	}
@@ -307,7 +314,7 @@ func (c *Critbit) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool) {
 	}
 }
 
-func (c *Critbit) findBestMatch(node *critNode, key string) *critNode {
+func (c *Critbit[T]) findBestMatch(node *critNode[T], key string) *critNode[T] {
 	if node == nil {
 		return nil
 	}
@@ -323,7 +330,7 @@ func (c *Critbit) findBestMatch(node *critNode, key string) *critNode {
 	return current
 }
 
-func (c *Critbit) insertNode(rootNode *critNode, newInternal *critNode, newLeafNode *critNode, newDir, oldDir int, bytePos uint32, otherbits uint8) bool {
+func (c *Critbit[T]) insertNode(rootNode *critNode[T], newInternal *critNode[T], newLeafNode *critNode[T], newDir, oldDir int, bytePos uint32, otherbits uint8) bool {
 	if rootNode.isLeaf {
 		newInternal.child[newDir].Store(newLeafNode)
 		newInternal.child[oldDir].Store(rootNode)
@@ -350,7 +357,7 @@ func shouldInsertBefore(newBytePos uint32, newOtherbits uint8, curBytePos uint32
 	return newOtherbits < curOtherbits
 }
 
-func (c *Critbit) walkAndInsert(rootNode *critNode, newInternal *critNode, newLeafNode *critNode, newDir, oldDir int, bytePos uint32, otherbits uint8) bool {
+func (c *Critbit[T]) walkAndInsert(rootNode *critNode[T], newInternal *critNode[T], newLeafNode *critNode[T], newDir, oldDir int, bytePos uint32, otherbits uint8) bool {
 	current := rootNode
 
 	for {
@@ -396,7 +403,7 @@ func (c *Critbit) walkAndInsert(rootNode *critNode, newInternal *critNode, newLe
 
 // Contains checks if a key exists and returns its TipSet.
 // Returns nil if the key doesn't exist or is deleted.
-func (c *Critbit) Contains(key string) *TipSet {
+func (c *Critbit[T]) Contains(key string) *TipSet {
 	if c.closed.Load() {
 		return nil
 	}
@@ -411,7 +418,50 @@ func (c *Critbit) Contains(key string) *TipSet {
 	return leaf.tips.Load()
 }
 
-func (c *Critbit) RemoveTips(key string, refs []EffectRef) {
+// LoadData returns the leaf payload for key, or (nil, false) if the key is
+// missing/deleted or has no payload attached yet.
+func (c *Critbit[T]) LoadData(key string) (*T, bool) {
+	if c.closed.Load() {
+		return nil, false
+	}
+	rootNode := c.root.Load()
+	if rootNode == nil {
+		return nil, false
+	}
+	leaf := c.findBestMatch(rootNode, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return nil, false
+	}
+	d := leaf.data.Load()
+	return d, d != nil
+}
+
+// LoadOrStoreData returns the leaf payload for key, installing def if none is
+// present yet (CAS, so concurrent callers agree on a single payload). Returns
+// (nil, false) if the key is missing/deleted. The bool reports whether an
+// existing payload was loaded (true) rather than def being stored (false).
+func (c *Critbit[T]) LoadOrStoreData(key string, def *T) (*T, bool) {
+	if c.closed.Load() {
+		return nil, false
+	}
+	rootNode := c.root.Load()
+	if rootNode == nil {
+		return nil, false
+	}
+	leaf := c.findBestMatch(rootNode, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return nil, false
+	}
+	if cur := leaf.data.Load(); cur != nil {
+		return cur, true
+	}
+	if leaf.data.CompareAndSwap(nil, def) {
+		return def, false
+	}
+	return leaf.data.Load(), true
+}
+
+func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 	if c.closed.Load() || len(refs) == 0 {
 		return
 	}
@@ -451,13 +501,13 @@ func (c *Critbit) RemoveTips(key string, refs []EffectRef) {
 	}
 }
 
-func (c *Critbit) Delete(key string, old *TipSet) bool {
+func (c *Critbit[T]) Delete(key string, old *TipSet) bool {
 	return c.DeleteAndSnapshot(key, old) != nil
 }
 
 // DeleteAndSnapshot removes a key only if its current tips match old
 // (CAS). Returns the previous tip set on success, nil on failure.
-func (c *Critbit) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
+func (c *Critbit[T]) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 	if c.closed.Load() {
 		return nil
 	}
@@ -483,6 +533,8 @@ func (c *Critbit) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 		c.reapMu.RUnlock(rt)
 		return nil
 	}
+	// Drop the leaf payload too — a deleted key's cached state is stale.
+	leaf.data.Store(nil)
 	c.size.Add(-1)
 
 	c.reapMu.RUnlock(rt)
@@ -496,14 +548,14 @@ func (c *Critbit) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 	return old
 }
 
-func (c *Critbit) Size() int64 {
+func (c *Critbit[T]) Size() int64 {
 	if c.closed.Load() {
 		return 0
 	}
 	return c.size.Load()
 }
 
-func (c *Critbit) Range(fn func(key string) bool) {
+func (c *Critbit[T]) Range(fn func(key string) bool) {
 	if c.closed.Load() || fn == nil {
 		return
 	}
@@ -513,7 +565,7 @@ func (c *Critbit) Range(fn func(key string) bool) {
 	}
 }
 
-func (c *Critbit) rangeNode(node *critNode, fn func(key string) bool) bool {
+func (c *Critbit[T]) rangeNode(node *critNode[T], fn func(key string) bool) bool {
 	if node == nil {
 		return true
 	}
@@ -534,7 +586,7 @@ func (c *Critbit) rangeNode(node *critNode, fn func(key string) bool) bool {
 	return true
 }
 
-func (c *Critbit) RangeFrom(after string, fn func(key string) bool) {
+func (c *Critbit[T]) RangeFrom(after string, fn func(key string) bool) {
 	if c.closed.Load() || fn == nil {
 		return
 	}
@@ -548,7 +600,7 @@ func (c *Critbit) RangeFrom(after string, fn func(key string) bool) {
 	}
 }
 
-func (c *Critbit) rangeFromNode(node *critNode, after string, fn func(key string) bool) bool {
+func (c *Critbit[T]) rangeFromNode(node *critNode[T], after string, fn func(key string) bool) bool {
 	if node == nil {
 		return true
 	}
@@ -569,7 +621,7 @@ func (c *Critbit) rangeFromNode(node *critNode, after string, fn func(key string
 	return true
 }
 
-func (c *Critbit) RangePrefix(prefix string, fn func(key string) bool) {
+func (c *Critbit[T]) RangePrefix(prefix string, fn func(key string) bool) {
 	if c.closed.Load() || fn == nil {
 		return
 	}
@@ -583,7 +635,7 @@ func (c *Critbit) RangePrefix(prefix string, fn func(key string) bool) {
 	}
 }
 
-func (c *Critbit) findPrefixSubtree(node *critNode, prefix string) *critNode {
+func (c *Critbit[T]) findPrefixSubtree(node *critNode[T], prefix string) *critNode[T] {
 	current := node
 	for current != nil && !current.isLeaf {
 		if int(current.bytePos) >= len(prefix) {
@@ -595,7 +647,7 @@ func (c *Critbit) findPrefixSubtree(node *critNode, prefix string) *critNode {
 	return current
 }
 
-func (c *Critbit) rangePrefixNode(node *critNode, prefix string, fn func(key string) bool) bool {
+func (c *Critbit[T]) rangePrefixNode(node *critNode[T], prefix string, fn func(key string) bool) bool {
 	if node == nil {
 		return true
 	}
@@ -618,7 +670,7 @@ func (c *Critbit) rangePrefixNode(node *critNode, prefix string, fn func(key str
 	return true
 }
 
-func (c *Critbit) Keys() []string {
+func (c *Critbit[T]) Keys() []string {
 	if c.closed.Load() {
 		return nil
 	}
@@ -630,7 +682,7 @@ func (c *Critbit) Keys() []string {
 	return result
 }
 
-func (c *Critbit) MatchPattern(pattern string) []string {
+func (c *Critbit[T]) MatchPattern(pattern string) []string {
 	if c.closed.Load() {
 		return nil
 	}
@@ -647,7 +699,7 @@ func (c *Critbit) MatchPattern(pattern string) []string {
 	return result
 }
 
-func (c *Critbit) FirstWithPrefix(prefix string, claim bool) (string, bool, ReleaseClaimFunc) {
+func (c *Critbit[T]) FirstWithPrefix(prefix string, claim bool) (string, bool, ReleaseClaimFunc) {
 	if c.closed.Load() {
 		return "", false, nil
 	}
@@ -669,7 +721,7 @@ func (c *Critbit) FirstWithPrefix(prefix string, claim bool) (string, bool, Rele
 	return key, true, nil
 }
 
-func (c *Critbit) findLeftmost(node *critNode, prefix string) (string, *critNode, bool) {
+func (c *Critbit[T]) findLeftmost(node *critNode[T], prefix string) (string, *critNode[T], bool) {
 	if node == nil {
 		return "", nil, false
 	}
@@ -693,7 +745,7 @@ func (c *Critbit) findLeftmost(node *critNode, prefix string) (string, *critNode
 	return "", nil, false
 }
 
-func (c *Critbit) LastWithPrefix(prefix string, claim bool) (string, bool, ReleaseClaimFunc) {
+func (c *Critbit[T]) LastWithPrefix(prefix string, claim bool) (string, bool, ReleaseClaimFunc) {
 	if c.closed.Load() {
 		return "", false, nil
 	}
@@ -715,7 +767,7 @@ func (c *Critbit) LastWithPrefix(prefix string, claim bool) (string, bool, Relea
 	return key, true, nil
 }
 
-func (c *Critbit) findRightmost(node *critNode, prefix string) (string, *critNode, bool) {
+func (c *Critbit[T]) findRightmost(node *critNode[T], prefix string) (string, *critNode[T], bool) {
 	if node == nil {
 		return "", nil, false
 	}
@@ -739,19 +791,12 @@ func (c *Critbit) findRightmost(node *critNode, prefix string) (string, *critNod
 	return "", nil, false
 }
 
-type critbitPathEntry struct {
-	node *critNode
+type critbitPathEntry[T any] struct {
+	node *critNode[T]
 	dir  int
 }
 
-var pathPool = sync.Pool{
-	New: func() any {
-		p := make([]critbitPathEntry, 0, 64)
-		return &p
-	},
-}
-
-func (c *Critbit) NextWithPrefix(prefix, after string, claim bool) (string, bool, ReleaseClaimFunc) {
+func (c *Critbit[T]) NextWithPrefix(prefix, after string, claim bool) (string, bool, ReleaseClaimFunc) {
 	if c.closed.Load() {
 		return "", false, nil
 	}
@@ -759,27 +804,20 @@ func (c *Critbit) NextWithPrefix(prefix, after string, claim bool) (string, bool
 		return c.FirstWithPrefix(prefix, claim)
 	}
 
-	pathPtr := pathPool.Get().(*[]critbitPathEntry)
-	defer func() {
-		*pathPtr = (*pathPtr)[:0]
-		pathPool.Put(pathPtr)
-	}()
-
 	for {
 		rootNode := c.root.Load()
 		if rootNode == nil {
 			return "", false, nil
 		}
 
-		path := (*pathPtr)[:0]
+		path := make([]critbitPathEntry[T], 0, 64)
 		current := rootNode
 
 		for current != nil && !current.isLeaf {
 			dir := getDirection(after, current.bytePos, current.otherbits)
-			path = append(path, critbitPathEntry{node: current, dir: dir})
+			path = append(path, critbitPathEntry[T]{node: current, dir: dir})
 			current = current.child[dir].Load()
 		}
-		*pathPtr = path
 
 		var resultKey string
 		found := false
@@ -824,7 +862,7 @@ func (c *Critbit) NextWithPrefix(prefix, after string, claim bool) (string, bool
 	}
 }
 
-func (c *Critbit) PrevWithPrefix(prefix, before string, claim bool) (string, bool, ReleaseClaimFunc) {
+func (c *Critbit[T]) PrevWithPrefix(prefix, before string, claim bool) (string, bool, ReleaseClaimFunc) {
 	if c.closed.Load() {
 		return "", false, nil
 	}
@@ -832,27 +870,20 @@ func (c *Critbit) PrevWithPrefix(prefix, before string, claim bool) (string, boo
 		return c.LastWithPrefix(prefix, claim)
 	}
 
-	pathPtr := pathPool.Get().(*[]critbitPathEntry)
-	defer func() {
-		*pathPtr = (*pathPtr)[:0]
-		pathPool.Put(pathPtr)
-	}()
-
 	for {
 		rootNode := c.root.Load()
 		if rootNode == nil {
 			return "", false, nil
 		}
 
-		path := (*pathPtr)[:0]
+		path := make([]critbitPathEntry[T], 0, 64)
 		current := rootNode
 
 		for current != nil && !current.isLeaf {
 			dir := getDirection(before, current.bytePos, current.otherbits)
-			path = append(path, critbitPathEntry{node: current, dir: dir})
+			path = append(path, critbitPathEntry[T]{node: current, dir: dir})
 			current = current.child[dir].Load()
 		}
-		*pathPtr = path
 
 		var resultKey string
 		found := false
@@ -886,7 +917,7 @@ func (c *Critbit) PrevWithPrefix(prefix, before string, claim bool) (string, boo
 	}
 }
 
-func (c *Critbit) TryClaimKey(key string) (exists bool, release ReleaseClaimFunc) {
+func (c *Critbit[T]) TryClaimKey(key string) (exists bool, release ReleaseClaimFunc) {
 	if c.closed.Load() {
 		return false, nil
 	}
@@ -901,16 +932,17 @@ func (c *Critbit) TryClaimKey(key string) (exists bool, release ReleaseClaimFunc
 	return true, noop
 }
 
-func (c *Critbit) GetHeadHint(prefix string) string      { return "" }
-func (c *Critbit) SetHeadHint(prefix string, key string) {}
-func (c *Critbit) GetTailHint(prefix string) string      { return "" }
-func (c *Critbit) SetTailHint(prefix string, key string) {}
+func (c *Critbit[T]) GetHeadHint(prefix string) string      { return "" }
+func (c *Critbit[T]) SetHeadHint(prefix string, key string) {}
+func (c *Critbit[T]) GetTailHint(prefix string) string      { return "" }
+func (c *Critbit[T]) SetTailHint(prefix string, key string) {}
 
 // Snapshot returns a frozen copy of the index. The new Critbit is independent —
 // mutations to either copy don't affect the other. TipSets are immutable so
-// only pointers are copied. O(n) in key count.
-func (c *Critbit) Snapshot() KeyIndex {
-	snap := NewCritbit()
+// only pointers are copied. Leaf payloads (T) are NOT copied: a snapshot is a
+// tip-only view used for SSI reads. O(n) in key count.
+func (c *Critbit[T]) Snapshot() KeyIndex {
+	snap := NewCritbit[T]()
 	c.Range(func(key string) bool {
 		tips := c.Contains(key)
 		if tips != nil {
@@ -921,7 +953,7 @@ func (c *Critbit) Snapshot() KeyIndex {
 	return snap
 }
 
-func (c *Critbit) maybeReap() {
+func (c *Critbit[T]) maybeReap() {
 	if !c.reapRunning.CompareAndSwap(false, true) {
 		return
 	}
@@ -935,7 +967,7 @@ func (c *Critbit) maybeReap() {
 // reap does a single BFS walk pruning every deleted leaf it finds.
 // Takes the write-lock on reapMu so no structural insert can race.
 // Returns the number of deleted leaves unlinked.
-func (c *Critbit) reap() int {
+func (c *Critbit[T]) reap() int {
 	if c.closed.Load() {
 		return 0
 	}
@@ -957,8 +989,8 @@ func (c *Critbit) reap() int {
 	}
 
 	type bfsEntry struct {
-		node          *critNode
-		parent        *critNode
+		node          *critNode[T]
+		parent        *critNode[T]
 		dirFromParent int
 	}
 
@@ -1018,7 +1050,7 @@ func (c *Critbit) reap() int {
 	return reaped
 }
 
-func (c *Critbit) Close() error {
+func (c *Critbit[T]) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}

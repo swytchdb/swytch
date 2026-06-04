@@ -41,7 +41,6 @@ type KeyRangeRule struct {
 // EngineConfig holds configuration for creating an Engine.
 type EngineConfig struct {
 	NodeID        pb.NodeID
-	Index         keytrie.KeyIndex
 	Broadcaster   Broadcaster     // nil for standalone
 	RTTProvider   PeerRTTProvider // nil disables RTT-based leader selection
 	DefaultMode   SafetyMode

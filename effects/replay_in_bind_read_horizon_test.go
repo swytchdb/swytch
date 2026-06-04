@@ -345,7 +345,7 @@ func newInBindReadReplayEngine(t *testing.T) *Engine {
 	t.Helper()
 	e := &Engine{
 		effectCache:       newVertexPool(),
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       &mockBroadcaster{},
 		nodeID:            replay26373595271NodeN103,
 		clock:             crdt.NewHLC(),

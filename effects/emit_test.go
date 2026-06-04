@@ -112,7 +112,7 @@ func (m *mockBroadcaster) ForwardTransaction(_ context.Context, _ pb.NodeID, _ *
 
 func newTestEngine(bc Broadcaster) *Engine {
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            42,
 		clock:             crdt.NewHLC(),
@@ -640,7 +640,7 @@ func (m *txnMockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byt
 
 func newTxnTestEngine(bc Broadcaster) *Engine {
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            42,
 		clock:             crdt.NewHLC(),

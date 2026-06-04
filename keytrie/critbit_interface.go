@@ -108,10 +108,12 @@ type KeyIndex interface {
 	Close() error
 }
 
-// New creates a new critbit tree.
+// New creates a new critbit tree with no leaf payload (plain tip index).
+// Consumers that attach per-key leaf data use NewCritbit[T] directly.
 func New() KeyIndex {
-	return NewCritbit()
+	return NewCritbit[struct{}]()
 }
 
-// Ensure implementations satisfy the interface.
-var _ KeyIndex = (*Critbit)(nil)
+// Ensure implementations satisfy the interface. Critbit[T] satisfies KeyIndex
+// for any T — the interface methods never mention the leaf payload type.
+var _ KeyIndex = (*Critbit[struct{}])(nil)

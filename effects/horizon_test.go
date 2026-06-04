@@ -36,7 +36,7 @@ import (
 func newHorizonTestEngine() *Engine {
 	e := &Engine{
 		effectCache:       newVertexPool(),
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
@@ -78,7 +78,7 @@ func installFakeTimers(h *HorizonSet) func() {
 func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 	e := &Engine{
 		effectCache:       newVertexPool(),
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),

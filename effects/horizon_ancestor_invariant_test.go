@@ -258,7 +258,7 @@ func newSnapshotEngineWithHorizon(log *snapshotLog) *Engine {
 		ec = newVertexPool()
 	}
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		effectCache:       ec,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),

@@ -61,7 +61,11 @@ type bootstrapCollector struct {
 // Lock-free: the log uses CAS, the index manages its own concurrency,
 // and safety config is swapped atomically.
 type Engine struct {
-	index       keytrie.KeyIndex
+	// index is the per-key tip frontier. Its leaf payload is *leafState,
+	// which carries the cached subdag (and, later, eviction metadata) for
+	// each key — one structure, the trie, owns both the tips and the
+	// derived read cache.
+	index       *keytrie.Critbit[leafState]
 	broadcaster Broadcaster // nil for standalone
 
 	nodeID pb.NodeID
@@ -190,7 +194,6 @@ func (s *subscriptionState) markFailed() {
 func NewTestEngine() *Engine {
 	return NewEngine(EngineConfig{
 		NodeID: 1,
-		Index:  keytrie.New(),
 	})
 }
 
@@ -279,7 +282,7 @@ func (sm *safetyMap) modeForKey(key string) SafetyMode {
 // NewEngine creates a new Engine from the given configuration.
 func NewEngine(cfg EngineConfig) *Engine {
 	e := &Engine{
-		index:              cfg.Index,
+		index:              keytrie.NewCritbit[leafState](),
 		broadcaster:        cfg.Broadcaster,
 		nodeID:             pb.NewNodeID(),
 		clock:              crdt.NewHLC(),

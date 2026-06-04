@@ -84,7 +84,7 @@ func newSnapshotEngine(log *snapshotLog) *Engine {
 		ec = newVertexPool()
 	}
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		effectCache:       ec,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -1047,7 +1047,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 	remoteLog.nextOff = 10000
 	remoteEngine := &Engine{
 		effectCache:       remoteLog.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            2,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
@@ -1090,7 +1090,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 
 	localEngine := &Engine{
 		effectCache:       localLog.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -1176,7 +1176,7 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -1241,7 +1241,7 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -1296,7 +1296,7 @@ func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -1360,7 +1360,7 @@ func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),

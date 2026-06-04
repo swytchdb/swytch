@@ -40,10 +40,13 @@ const vertexOverhead = 48
 
 // vertex wraps an immutable effect resident in the VertexPool. size caches
 // the entry's accounted bytes so eviction can decrement the total without
-// re-marshalling.
+// re-marshalling. refs counts how many resident keys' cached subdags include
+// this vertex (key membership); the sharded eviction policy drops a vertex
+// only once refs hits zero.
 type vertex struct {
 	eff  *pb.Effect
 	size int64
+	refs atomic.Int32
 }
 
 // VertexPool is the engine's deserialized effect store: a map from Tip to
@@ -130,6 +133,23 @@ func (p *VertexPool) delete(tip Tip) int64 {
 // delete, which xsync.Map tolerates.
 func (p *VertexPool) rangeVertices(fn func(tip Tip, v *vertex) bool) {
 	p.m.Range(fn)
+}
+
+// incref bumps the key-membership refcount of the vertex at tip, if resident.
+// A no-op for a non-resident tip (e.g. an effect served from the wire-parse
+// fallback that never entered the pool) — refcounting only governs pooled
+// vertices.
+func (p *VertexPool) incref(tip Tip) {
+	if v, ok := p.m.Load(tip); ok {
+		v.refs.Add(1)
+	}
+}
+
+// decref lowers the key-membership refcount of the vertex at tip, if resident.
+func (p *VertexPool) decref(tip Tip) {
+	if v, ok := p.m.Load(tip); ok {
+		v.refs.Add(-1)
+	}
 }
 
 // Bytes returns the accounted memory held by the pool.
