@@ -1,5 +1,5 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26.3 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
 
 # Target platform args (automatically set by buildx)
 ARG TARGETOS
