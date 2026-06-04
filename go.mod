@@ -3,6 +3,7 @@ module github.com/swytchdb/swytch
 go 1.26
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jeroenrinzema/psql-wire v0.19.0
 	github.com/klauspost/compress v1.18.6
@@ -26,7 +27,6 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

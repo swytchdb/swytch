@@ -59,6 +59,11 @@ type Context struct {
 	keys        map[string]*contextKey
 	watchedKeys map[string]*watchedKeyState // keys registered via Watch with WATCH-time state
 	txSnapshot  keytrie.KeyIndex            // frozen index snapshot for SSI reads (nil outside MULTI/EXEC)
+
+	// readOnly marks a context used only for read-only, non-transactional
+	// commands. Such a context may answer a read-miss from the cluster key
+	// filters without subscribing (free misses), and skips chain compaction.
+	readOnly bool
 }
 
 type contextKey struct {
@@ -153,6 +158,18 @@ func (e *Engine) NewContext() *Context {
 	}
 }
 
+// NewReadOnlyContext creates a context for read-only, non-transactional
+// commands. It uses the per-node cluster key filters to answer a read-miss
+// without issuing a subscription — a key no peer holds returns nil for free.
+// It must not be used inside MULTI/EXEC (SSI reads must subscribe).
+func (e *Engine) NewReadOnlyContext() *Context {
+	return &Context{
+		engine:   e,
+		keys:     make(map[string]*contextKey),
+		readOnly: true,
+	}
+}
+
 // PendingKeys returns the names of all keys with pending effects in
 // this Context. Callers use this to acquire per-key locks before
 // calling Flush — Flush's fork-choice critical section races with
@@ -206,6 +223,17 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.txSnapshot != nil {
 			return c.getSnapshotFromTx(key)
 		}
+		// Read-only fast path: a key we don't already hold and that no peer
+		// has announced has no committed value cluster-wide (when we're in the
+		// majority partition). Return a miss without subscribing — this is the
+		// whole point: read-misses cost nothing. A filter false-positive, or a
+		// key we hold locally, falls through to the normal subscribe + read.
+		if c.readOnly &&
+			c.engine.index.Contains(key) == nil &&
+			c.engine.inMajorityPartition() &&
+			!c.engine.clusterMaybeHasKey(key) {
+			return nil, nil, nil
+		}
 		// No unflushed effects for this key — delegate to committed state
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
@@ -219,7 +247,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.engine.broadcaster == nil {
 			compactThreshold = 5
 		}
-		if result != nil && chainLen >= compactThreshold {
+		if !c.readOnly && result != nil && chainLen >= compactThreshold {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
@@ -533,6 +561,18 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
+	// A read-only context may have answered a read-miss without subscribing.
+	// If a command then emits anyway (e.g. HGETEX setting a field TTL), it
+	// must subscribe first — exactly as flushTx does — so the effect
+	// dep-references our own SubscriptionEffect instead of being orphaned in
+	// the DAG. Idempotent and fast in the common case: the key existed, so
+	// GetSnapshot already subscribed and this is a no-op.
+	if c.readOnly {
+		if err := c.engine.ensureSubscribed(key); err != nil {
+			return err
+		}
+	}
+
 	if tracing.Enabled() {
 		_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
 			trace.WithAttributes(attribute.String("effect.key", key)))
@@ -761,8 +801,11 @@ func (c *Context) flushNonTx() error {
 		}
 
 		// Fire notification callbacks after effect is durable
-		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-			c.engine.OnKeyDataAdded(key)
+		if ck.shouldNotifyData {
+			c.engine.ownFilterAdd(key)
+			if c.engine.OnKeyDataAdded != nil {
+				c.engine.OnKeyDataAdded(key)
+			}
 		}
 		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
 			c.engine.OnKeyDeleted(key)
@@ -1346,8 +1389,11 @@ func (c *Context) flushTx() error {
 
 	// Fire notification callbacks after successful commit
 	for key, ck := range c.keys {
-		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-			c.engine.OnKeyDataAdded(key)
+		if ck.shouldNotifyData {
+			c.engine.ownFilterAdd(key)
+			if c.engine.OnKeyDataAdded != nil {
+				c.engine.OnKeyDataAdded(key)
+			}
 		}
 		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
 			c.engine.OnKeyDeleted(key)

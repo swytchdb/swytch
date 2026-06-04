@@ -287,6 +287,9 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	if conn.EffectsCtx != nil {
 		conn.EffectsCtx.SetTraceCtx(ctx)
 	}
+	if conn.ReadOnlyCtx != nil {
+		conn.ReadOnlyCtx.SetTraceCtx(ctx)
+	}
 
 	// Log command if debug mode is enabled
 	h.logger.LogCommand(cmd, conn.SelectedDB, conn.RemoteAddr)
@@ -380,10 +383,18 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		return
 	}
 
-	// Populate effects engine fields if available (must happen before dispatch and queueing)
+	// Populate effects engine fields if available (must happen before dispatch and queueing).
+	// Read-only, non-transactional commands use the read-only context so a
+	// read-miss can be answered from the cluster key filters without
+	// subscribing. Everything else (writes, and any command inside MULTI,
+	// where SSI reads must subscribe) uses the full write context.
 	if h.engine != nil && conn.EffectsCtx != nil {
 		cmd.Runtime = h.engine
-		cmd.Context = conn.EffectsCtx
+		if entry != nil && entry.Flags&shared.FlagWrite == 0 && !conn.InTransaction && conn.ReadOnlyCtx != nil {
+			cmd.Context = conn.ReadOnlyCtx
+		} else {
+			cmd.Context = conn.EffectsCtx
+		}
 	}
 
 	// If in transaction mode, queue commands instead of executing
@@ -1086,6 +1097,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 	}
 	if h.engine != nil {
 		conn.EffectsCtx = h.engine.NewContext()
+		conn.ReadOnlyCtx = h.engine.NewReadOnlyContext()
 	}
 
 	// Apply the authorization context from the origin node

@@ -455,6 +455,7 @@ func (e *Engine) ensureSubscribed(key string) error {
 				// returns them as the ReplicateTo response.
 				mu.Lock()
 				for _, nack := range nacks {
+					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}
@@ -517,6 +518,7 @@ done:
 				}
 				mu.Lock()
 				for _, nack := range nacks {
+					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}

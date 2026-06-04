@@ -74,6 +74,11 @@ type Connection struct {
 
 	// Effects engine context for migrated modules
 	EffectsCtx *effects.Context
+
+	// ReadOnlyCtx serves read-only, non-transactional commands. It answers
+	// read-misses from the cluster key filters without subscribing (free
+	// misses). Lazily created alongside EffectsCtx.
+	ReadOnlyCtx *effects.Context
 }
 
 // QueuedCommand stores a command queued during a transaction
