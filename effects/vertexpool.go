@@ -40,9 +40,9 @@ const vertexOverhead = 48
 
 // vertex wraps an immutable effect resident in the VertexPool. size caches
 // the entry's accounted bytes so eviction can decrement the total without
-// re-marshalling. refs counts how many resident keys' cached subdags include
-// this vertex (key membership); the sharded eviction policy drops a vertex
-// only once refs hits zero.
+// re-marshalling. refs counts how many index tips and cached subdags include
+// this vertex (key membership); reclaimUnreferenced frees a vertex only once
+// refs hits zero.
 type vertex struct {
 	eff  *pb.Effect
 	size int64
@@ -92,14 +92,15 @@ func (p *VertexPool) Get(tip Tip) (*pb.Effect, bool) {
 	return v.eff, true
 }
 
-// Put stores eff at tip, replacing any prior value and adjusting the byte
-// total by the delta. Effects are immutable, so a re-Put of the same tip is
-// normally identical; the delta keeps accounting correct regardless.
+// Put stores eff at tip on first insertion. A re-Put of an already-resident
+// tip keeps the existing vertex so its accumulated refcount survives: effects
+// are immutable (a Tip is written once), so the payload and byte cost are
+// identical and there is nothing to update. Replacing the vertex would reset
+// refs to 0, letting reclaimUnreferenced free an effect the index still holds
+// as a frontier tip — a premature free surfacing as a missing read.
 func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
 	nv := &vertex{eff: eff, size: effectSize(eff)}
-	if prev, loaded := p.m.LoadAndStore(tip, nv); loaded {
-		p.bytes.Add(nv.size - prev.size)
-	} else {
+	if _, loaded := p.m.LoadOrStore(tip, nv); !loaded {
 		p.bytes.Add(nv.size)
 	}
 }
