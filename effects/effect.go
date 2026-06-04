@@ -300,12 +300,19 @@ func NewEngine(cfg EngineConfig) *Engine {
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 
-	// Memory governor: keep process RSS near the target by sweeping
-	// below-LCA effects out of the vertex pool. Percent-based uses a
-	// fraction of available memory; absolute uses the exact byte budget
-	// from --maxmemory. The governor also sets GOMEMLIMIT so the GC
-	// cooperates with the target. System-key ("__swytch:") effects are
-	// pinned by sweepBelowLCA, never evicted.
+	// Eviction hooks: the bounded sweep pins system keys (never a victim)
+	// and, on evicting a cold key, hands its tips + leaf payload to
+	// onLeafEvicted, which releases refs and unsubscribes.
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	// Memory governor: keep process RSS near the target. Under pressure it
+	// first reclaims refs-0 vertices (below-LCA / orphans), then evicts cold
+	// keys whose active state still exceeds the budget. Percent-based uses a
+	// fraction of available memory; absolute uses the exact byte budget from
+	// --maxmemory. The governor also sets GOMEMLIMIT so the GC cooperates.
 	var memTarget int64
 	if cfg.MemoryLimitPercent > 0 && cfg.MemoryLimitPercent <= 1.0 {
 		memTarget = int64(float64(clox.GetAvailableMemory()) * cfg.MemoryLimitPercent)
@@ -852,10 +859,10 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		}
 	}
 	if canonicalIndexable {
-		if len(deps) > 0 {
-			e.index.RemoveTips(key, fromPbRefs(deps))
-		}
-		e.updateIndex(key, nil, r(notify.Origin))
+		// Consume deps and add the new tip in a single index transition so
+		// the tip refcount (reindexTipRefs) decrefs the consumed deps and
+		// increfs the arrival together.
+		e.updateIndex(key, keytrie.NewTipSet(fromPbRefs(deps)...), r(notify.Origin))
 	}
 
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -1093,10 +1100,9 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		}
 	}
 	if canonicalIndexable {
-		if len(deps) > 0 {
-			e.index.RemoveTips(key, fromPbRefs(deps))
-		}
-		e.updateIndex(key, nil, r(notify.Origin))
+		// Single index transition (consume deps + add arrival) so the tip
+		// refcount stays balanced — see HandleRemote.
+		e.updateIndex(key, keytrie.NewTipSet(fromPbRefs(deps)...), r(notify.Origin))
 	}
 
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -1675,59 +1681,49 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 	}
 }
 
-// handleEviction restores the "tip ⇒ fetchable bytes" invariant when
-// the cache loses the bytes behind a tip. Emits an unsubscribe
-// SubscriptionEffect as a proper DAG element — real offset from
-// nextOffset, Deps consuming the current tips so peers reduce us out
-// of the subscribers map — then drops local state. Future reads
-// re-subscribe and bootstrap fresh.
-//
-// The broadcast goes out BEFORE local teardown so this node remains
-// authoritative for any still-cached effects on the key (other tips
-// in the same chain) during the round-trip. We deliberately do NOT
-// add the unsub to our own effectCache; we're giving up authority,
-// not retaining its trail.
-//
-// Per-key idempotency via unsubInFlight: multiple effects on the
-// same key can evict in close succession, but only one goroutine
-// runs the broadcast + teardown. Invoked on a fresh goroutine
-// because evictNotify runs under cache shard.mu.
-func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect, triggerTips *keytrie.TipSet) {
-	if e.closed.Load() || evictedEffect == nil {
-		return
-	}
-	if isSystemKey(evictedEffect.Key) {
-		slog.Warn("handleEviction: system key evicted; pin invariant violated",
-			"key", string(evictedEffect.Key), "ref", evictedRef)
+// onLeafEvicted is the eviction-notify callback the index invokes after its
+// bounded sweep soft-deletes a victim key's leaf (the cold-key teardown). The
+// leaf's tips and cached subdag are released so their pool vertices fall to
+// refs-0 and reclaimUnreferenced frees the bytes, and the key is unsubscribed
+// cluster-wide so peers reduce us out of its subscriber set. Future reads
+// re-subscribe and bootstrap fresh. The leaf is already soft-deleted by the
+// sweep, so this only does the side effects.
+func (e *Engine) onLeafEvicted(key string, tips []Tip, data *leafState) {
+	if e.closed.Load() {
 		return
 	}
 
-	key := string(evictedEffect.Key)
-
-	if triggerTips == nil {
-		return
+	// Synchronous: release the index-tip refs and the cached subdag's refs
+	// so the vertices fall to refs-0 before the governor's reclaim pass. A
+	// frontier tip is held by both (incref'd twice), so it is decref'd twice.
+	for _, t := range tips {
+		e.effectCache.decref(t)
+	}
+	if data != nil {
+		if cs := data.subdag.Load(); cs != nil {
+			for t := range cs.nodes {
+				e.effectCache.decref(t)
+			}
+		}
 	}
 
-	if !e.isInActivePathCacheOnly(key, evictedRef, triggerTips.Tips()) {
-		slog.Debug("handleEviction: evicted effect below LCA, key still readable",
-			"key", key, "ref", evictedRef)
+	// Async: the unsubscribe broadcast is network I/O and must not run under
+	// the sweep lock. Future reads re-subscribe and bootstrap fresh.
+	go e.broadcastUnsubscribe(key, tips)
+}
+
+// broadcastUnsubscribe announces that this node has given up authority on key
+// by emitting an unsubscribe SubscriptionEffect as a proper DAG element (Deps
+// consume the dropped tips so peers reduce us out of the subscribers map),
+// then drops the local subscription.
+func (e *Engine) broadcastUnsubscribe(key string, tips []Tip) {
+	if e.closed.Load() {
 		return
 	}
-
-	if _, claimed := e.unsubInFlight.LoadOrStore(key, struct{}{}); claimed {
-		return
-	}
-	defer e.unsubInFlight.Delete(key)
-
-	tipSet := e.index.DeleteAndSnapshot(key, triggerTips)
-	if tipSet == nil {
-		return
-	}
-
 	if e.broadcaster != nil {
 		hlc := timestamppb.New(e.clock.Now())
 		offset := e.nextOffset()
-		deps := e.resolveTipDeps(tipSet.Tips())
+		deps := e.resolveTipDeps(tips)
 		unsub := &pb.Effect{
 			Key:            []byte(key),
 			Hlc:            hlc,
@@ -1743,132 +1739,11 @@ func (e *Engine) handleEviction(evictedRef Tip, evictedEffect *pb.Effect, trigge
 			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
 			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		} else {
-			slog.Error("handleEviction: marshal unsubscribe failed", "key", key, "error", err)
+			slog.Error("broadcastUnsubscribe: marshal failed", "key", key, "error", err)
 		}
 	}
-
 	e.subscriptions.Delete(key)
-
-	slog.Debug("handleEviction: dropped key and unsubscribed",
-		"key", key, "ref", evictedRef)
-}
-
-// isInActivePath checks whether evictedRef is in the DAG between the
-// current tips and the LCA snapshot. If it is, reconstruct would need
-// it and the key can't be served. If it's below the LCA, its state is
-// already folded into the snapshot and the key is still readable.
-func (e *Engine) isInActivePath(key string, evictedRef Tip, tips []Tip) bool {
-	visited := make(map[Tip]bool, len(tips)*4)
-	queue := make([]Tip, 0, len(tips))
-
-	for _, t := range tips {
-		if t == evictedRef {
-			return true
-		}
-		visited[t] = true
-		queue = append(queue, t)
-	}
-
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-
-		eff, err := e.getEffect(cur)
-		if err != nil {
-			return true
-		}
-
-		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
-			return false
-		}
-
-		var refs []*pb.EffectRef
-		if bind := eff.GetTxnBind(); bind != nil {
-			for _, kb := range bind.Keys {
-				if string(kb.Key) == key {
-					refs = []*pb.EffectRef{kb.NewTip}
-					break
-				}
-			}
-		} else {
-			refs = eff.GetDeps()
-		}
-
-		for _, ref := range refs {
-			dt := r(ref)
-			if dt == evictedRef {
-				return true
-			}
-			if visited[dt] {
-				continue
-			}
-			visited[dt] = true
-			queue = append(queue, dt)
-		}
-	}
-
-	return false
-}
-
-// isInActivePathCacheOnly is like isInActivePath but only uses locally
-// cached effects — no network fetches. If a dep is missing from the
-// cache, the chain is already broken and the effect is safe to evict
-// (handleEviction will drop the whole key). Used by the evict decider
-// which must not do I/O.
-func (e *Engine) isInActivePathCacheOnly(key string, evictedRef Tip, tips []Tip) bool {
-	if e.effectCache == nil {
-		return false
-	}
-	visited := make(map[Tip]bool, len(tips)*4)
-	queue := make([]Tip, 0, len(tips))
-
-	for _, t := range tips {
-		if t == evictedRef {
-			return true
-		}
-		visited[t] = true
-		queue = append(queue, t)
-	}
-
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-
-		eff, ok := e.effectCache.Get(cur, 0)
-		if !ok {
-			return false
-		}
-
-		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
-			return false
-		}
-
-		var refs []*pb.EffectRef
-		if bind := eff.GetTxnBind(); bind != nil {
-			for _, kb := range bind.Keys {
-				if string(kb.Key) == key {
-					refs = []*pb.EffectRef{kb.NewTip}
-					break
-				}
-			}
-		} else {
-			refs = eff.GetDeps()
-		}
-
-		for _, ref := range refs {
-			dt := r(ref)
-			if dt == evictedRef {
-				return true
-			}
-			if visited[dt] {
-				continue
-			}
-			visited[dt] = true
-			queue = append(queue, dt)
-		}
-	}
-
-	return false
+	slog.Debug("onLeafEvicted: evicted cold key", "key", key)
 }
 
 // Close performs graceful shutdown of the engine and its background components.

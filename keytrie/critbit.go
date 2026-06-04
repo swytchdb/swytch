@@ -35,6 +35,11 @@ import (
 
 const (
 	defaultCritbitArenaChunkSize = 2048
+
+	// maxLeafFreq caps the per-leaf access-frequency counter. The eviction
+	// policy protects leaves whose freq exceeds the shard's adaptive
+	// threshold; saturating keeps a hot key from running away.
+	maxLeafFreq = 15
 )
 
 // critNode is a flattened node that serves as both internal and leaf.
@@ -54,8 +59,14 @@ type critNode[T any] struct {
 	key       string                         // 16 bytes, offset 24 (leaf)
 	tips      atomic.Pointer[TipSet]         // 8 bytes,  offset 40 (leaf)
 	deleted   atomic.Bool                    // 4 bytes,  offset 44 (leaf)
-	data      atomic.Pointer[T]              // 8 bytes,  offset 48 (leaf payload)
-	_         [8]byte                        //           offset 56
+	// Eviction metadata (leaf). A leaf spans a second cache line now;
+	// these are written on the hot read path (freq bump) so they sit
+	// apart from the structural fields above. freq < 0 marks a ghost:
+	// a soft-deleted leaf retaining |freq| so a returning key warms back.
+	freq       atomic.Int32      // 4 bytes,  offset 48
+	_          [4]byte           //           offset 52
+	lastAccess atomic.Uint64     // 8 bytes,  offset 56 (LRU tiebreak)
+	data       atomic.Pointer[T] // 8 bytes,  offset 64 (leaf payload)
 }
 
 func noop() {}
@@ -73,6 +84,33 @@ type Critbit[T any] struct {
 
 	deletedCount atomic.Int64 // deleted-but-linked leaves still in the tree
 	reapRunning  atomic.Bool  // prevents concurrent reap goroutines
+
+	// clock is a monotonic counter stamped onto a leaf's lastAccess on each
+	// access, giving the eviction policy an LRU tiebreak among equal-freq
+	// leaves without a wall clock.
+	clock atomic.Uint64
+
+	// Eviction policy (lifted from CloxCache as a single bounded domain;
+	// see evict.go). Sweeps run serialized under evictMu — a cold path —
+	// while the read path only bumps per-leaf freq/lastAccess + the window
+	// counters. evictHand is the resumable in-order cursor that bounds each
+	// sweep to a fixed leaf budget regardless of keyspace size.
+	evictMu        sync.Mutex
+	evictHand      string
+	evictK         atomic.Int32  // protected-freq threshold (adaptive)
+	ghostCount     atomic.Int64  // soft-deleted leaves retained for warm restart
+	windowHits     atomic.Uint64 // live accesses in the current adapt window
+	windowOps      atomic.Uint64 // total accesses (live + ghost) in the window
+	evictedProt    atomic.Uint64 // evicted with freq > k (protected fallback)
+	evictedUnprot  atomic.Uint64 // evicted with freq <= k (unprotected)
+	reachedProt    atomic.Uint64 // leaves whose freq crossed k under pressure
+	prevHitRate    atomic.Uint64 // last window hit rate * 10000 (gradient input)
+	rateLow        atomic.Uint32 // adaptive low graduation threshold * 10000
+	rateHigh       atomic.Uint32 // adaptive high graduation threshold * 10000
+	lastKDir       atomic.Int32  // direction of the last k change (+1/-1/0)
+	lastAdaptCheck atomic.Uint64 // eviction count at the last adapt check
+	evictDecider   func(key string) bool
+	evictNotify    func(key string, tips []EffectRef, data *T)
 
 	initOnce sync.Once
 	arena    critbitArena[critNode[T]]
@@ -153,6 +191,9 @@ func (a *critbitArena[T]) clear() {
 func (c *Critbit[T]) ensureInit() {
 	c.initOnce.Do(func() {
 		c.arena.init(defaultCritbitArenaChunkSize)
+		c.evictK.Store(defaultProtectedFreqThreshold)
+		c.rateLow.Store(defaultRateLow)
+		c.rateHigh.Store(defaultRateHigh)
 	})
 }
 
@@ -161,6 +202,8 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n.isLeaf = true
 	n.key = key
 	n.tips.Store(ts)
+	n.freq.Store(1) // start warm enough to survive one sweep
+	n.lastAccess.Store(c.clock.Add(1))
 	return n
 }
 
@@ -270,7 +313,13 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 			if bestLeaf.tips.CompareAndSwap(old, new) {
 				if bestLeaf.deleted.CompareAndSwap(true, false) {
 					c.size.Add(1)
-					c.deletedCount.Add(-1)
+					// A ghost (freq < 0) was never counted as a deleted leaf;
+					// promote it instead of decrementing deletedCount.
+					if bestLeaf.freq.Load() < 0 {
+						c.promoteIfGhost(bestLeaf)
+					} else {
+						c.deletedCount.Add(-1)
+					}
 				}
 				c.reapMu.RUnlock(rt)
 				return nil, true
@@ -289,7 +338,13 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 			if bestLeaf.tips.CompareAndSwap(old, new) {
 				if bestLeaf.deleted.CompareAndSwap(true, false) {
 					c.size.Add(1)
-					c.deletedCount.Add(-1)
+					// A ghost (freq < 0) was never counted as a deleted leaf;
+					// promote it instead of decrementing deletedCount.
+					if bestLeaf.freq.Load() < 0 {
+						c.promoteIfGhost(bestLeaf)
+					} else {
+						c.deletedCount.Add(-1)
+					}
 				}
 				c.reapMu.RUnlock(rt)
 				return nil, true
@@ -418,28 +473,39 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 	return leaf.tips.Load()
 }
 
-// LoadData returns the leaf payload for key, or (nil, false) if the key is
-// missing/deleted or has no payload attached yet.
-func (c *Critbit[T]) LoadData(key string) (*T, bool) {
-	if c.closed.Load() {
-		return nil, false
+// bumpAccess records an access to leaf: it raises the frequency counter
+// (saturating at maxLeafFreq) and stamps lastAccess from the trie clock.
+// Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —
+// it is promoted explicitly when its key is re-inserted.
+func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
+	for {
+		f := leaf.freq.Load()
+		if f < 0 || f >= maxLeafFreq {
+			break
+		}
+		if leaf.freq.CompareAndSwap(f, f+1) {
+			// Count a leaf crossing into protected status under pressure, so
+			// adaptive-k can measure the graduation rate.
+			if f == c.evictK.Load() {
+				c.reachedProt.Add(1)
+			}
+			break
+		}
 	}
-	rootNode := c.root.Load()
-	if rootNode == nil {
-		return nil, false
-	}
-	leaf := c.findBestMatch(rootNode, key)
-	if leaf == nil || leaf.key != key || leaf.isDeleted() {
-		return nil, false
-	}
-	d := leaf.data.Load()
-	return d, d != nil
+	leaf.lastAccess.Store(c.clock.Add(1))
+	// Window accounting for adaptive-k: a live-leaf access is a hit.
+	c.windowHits.Add(1)
+	c.windowOps.Add(1)
 }
 
 // LoadOrStoreData returns the leaf payload for key, installing def if none is
 // present yet (CAS, so concurrent callers agree on a single payload). Returns
 // (nil, false) if the key is missing/deleted. The bool reports whether an
 // existing payload was loaded (true) rather than def being stored (false).
+//
+// Locating the payload counts as an access: it bumps the leaf's frequency and
+// last-access stamp, which is the signal the eviction policy learns from. The
+// read path (reconstruct) calls this on every read, hit or miss.
 func (c *Critbit[T]) LoadOrStoreData(key string, def *T) (*T, bool) {
 	if c.closed.Load() {
 		return nil, false
@@ -452,6 +518,7 @@ func (c *Critbit[T]) LoadOrStoreData(key string, def *T) (*T, bool) {
 	if leaf == nil || leaf.key != key || leaf.isDeleted() {
 		return nil, false
 	}
+	c.bumpAccess(leaf)
 	if cur := leaf.data.Load(); cur != nil {
 		return cur, true
 	}
@@ -980,7 +1047,8 @@ func (c *Critbit[T]) reap() int {
 		return 0
 	}
 	if root.isLeaf {
-		if root.isDeleted() {
+		// Ghosts (deleted, freq < 0) are retained for warm restart.
+		if root.isDeleted() && root.freq.Load() >= 0 {
 			c.root.Store(nil)
 			c.deletedCount.Add(-1)
 			return 1
@@ -1005,7 +1073,8 @@ func (c *Critbit[T]) reap() int {
 		pruned := false
 		for dir := range 2 {
 			child := node.child[dir].Load()
-			if child == nil || !child.isLeaf || !child.isDeleted() {
+			// Skip live leaves, internal nodes, and ghosts (freq < 0).
+			if child == nil || !child.isLeaf || !child.isDeleted() || child.freq.Load() < 0 {
 				continue
 			}
 

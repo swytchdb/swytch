@@ -1427,7 +1427,33 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 		offsets = append(offsets, lastOffset)
 		newTips := keytrie.NewTipSet(offsets...)
 		if _, ok := e.index.Insert(key, current, newTips); ok {
+			e.reindexTipRefs(current, newTips)
 			return
+		}
+	}
+}
+
+// reindexTipRefs adjusts vertex refcounts for an index tip-set transition
+// (old → new): each tip newly present is incref'd (the index now holds it),
+// each tip no longer present is decref'd. The index reference pins a frontier
+// tip in the pool independent of subdag caching, so a freshly written/arrived
+// tip is protected in the window before the next read rebuilds its subdag.
+func (e *Engine) reindexTipRefs(old, new *keytrie.TipSet) {
+	if e.effectCache == nil {
+		return
+	}
+	if new != nil {
+		for _, t := range new.Tips() {
+			if old == nil || !old.Contains(t) {
+				e.effectCache.incref(t)
+			}
+		}
+	}
+	if old != nil {
+		for _, t := range old.Tips() {
+			if new == nil || !new.Contains(t) {
+				e.effectCache.decref(t)
+			}
 		}
 	}
 }

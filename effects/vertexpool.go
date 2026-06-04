@@ -94,16 +94,6 @@ func (p *VertexPool) Get(tip Tip, _ uint64) (*pb.Effect, bool) {
 	return v.eff, true
 }
 
-// peek returns the effect at tip without recording a hit/miss. Used by the
-// engine's own DAG walks (active-path collection) so internal traversal does
-// not skew the access statistics.
-func (p *VertexPool) peek(tip Tip) (*pb.Effect, bool) {
-	if v, ok := p.m.Load(tip); ok {
-		return v.eff, true
-	}
-	return nil, false
-}
-
 // Put stores eff at tip, replacing any prior value and adjusting the byte
 // total by the delta. Effects are immutable, so a re-Put of the same tip is
 // normally identical; the delta keeps accounting correct regardless.
@@ -197,25 +187,54 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 			return
 		case <-ticker.C:
 			if int64(clox.GetProcessRSS()) > targetBytes {
-				e.sweepBelowLCA()
+				e.relieveMemoryPressure(targetBytes)
 			}
 		}
 	}
 }
 
-// sweepBelowLCA evicts every pool effect that is not in any subscribed key's
-// active path (its tips down to the nearest snapshot-with-state) and is not a
-// pinned system-key effect. Below-LCA history is already folded into a
-// snapshot, so dropping it is safe: reconstruct never needs it and the key
-// stays readable. Returns the bytes reclaimed.
-func (e *Engine) sweepBelowLCA() int64 {
+// maxEvictionsPerTick caps how many cold keys the governor evicts in one tick
+// so a single pass can't stall on a huge eviction storm (each eviction also
+// broadcasts an unsubscribe). Pressure persisting past the cap is handled on
+// the next tick.
+const maxEvictionsPerTick = 256
+
+// relieveMemoryPressure runs the two-axis reclaim under memory pressure: first
+// drop refs-0 vertices (below-LCA history and orphans — cheap, no eviction),
+// then, if the pool's own footprint still exceeds the target, evict cold keys
+// via the bounded sweep until under target or the per-tick cap is hit. Each
+// eviction releases the key's refs synchronously, so a final reclaim frees the
+// now-unreferenced vertices.
+func (e *Engine) relieveMemoryPressure(targetBytes int64) {
+	e.reclaimUnreferenced()
+	evicted := 0
+	for e.effectCache.Bytes() > targetBytes && evicted < maxEvictionsPerTick {
+		if !e.index.EvictBounded(0) {
+			break // nothing evictable this sweep
+		}
+		evicted++
+	}
+	if evicted > 0 {
+		e.reclaimUnreferenced()
+		slog.Debug("vertex pool: evicted cold keys under pressure",
+			"evicted", evicted, "remaining_bytes", e.effectCache.Bytes())
+	}
+}
+
+// reclaimUnreferenced drops every pool vertex whose key-membership refcount is
+// zero: it is held by no current index tip and no cached subdag, so it is
+// below some LCA or an orphan and safe to evict — reconstruct never needs it
+// and getEffect re-fetches on the rare miss. This replaces the activeSet walk:
+// the maintained refcount is the membership oracle, so reclamation is a single
+// pool pass with no per-key DAG traversal. System-key effects are pinned
+// defensively (their tips keep them referenced anyway). Returns bytes freed.
+func (e *Engine) reclaimUnreferenced() int64 {
 	if e.effectCache == nil {
 		return 0
 	}
-	active := e.activeSet()
 	var reclaimed int64
 	e.effectCache.rangeVertices(func(tip Tip, v *vertex) bool {
-		if _, ok := active[tip]; ok {
+		if v.refs.Load() > 0 {
 			return true
 		}
 		if v.eff != nil && isSystemKey(v.eff.Key) {
@@ -225,70 +244,8 @@ func (e *Engine) sweepBelowLCA() int64 {
 		return true
 	})
 	if reclaimed > 0 {
-		slog.Debug("vertex pool: swept below-LCA effects",
+		slog.Debug("vertex pool: reclaimed unreferenced effects",
 			"reclaimed", reclaimed, "remaining_bytes", e.effectCache.Bytes())
 	}
 	return reclaimed
-}
-
-// activeSet returns the union of every subscribed key's active-path tips —
-// each key walked from its current index tips down to (and including) the
-// nearest snapshot-with-state. Effects outside this set are below an LCA and
-// safe to evict. Pool-only: a missing dep just truncates that branch.
-func (e *Engine) activeSet() map[Tip]struct{} {
-	set := make(map[Tip]struct{})
-	for _, key := range e.index.Keys() {
-		ts := e.index.Contains(key)
-		if ts == nil {
-			continue
-		}
-		e.collectActivePath(key, ts.Tips(), set)
-	}
-	return set
-}
-
-// collectActivePath adds key's active-path vertices to set: a BFS from tips
-// following per-key dependencies, stopping at (and including) any snapshot
-// that carries folded state.
-func (e *Engine) collectActivePath(key string, tips []Tip, set map[Tip]struct{}) {
-	queue := make([]Tip, 0, len(tips))
-	for _, t := range tips {
-		if _, seen := set[t]; seen {
-			continue
-		}
-		set[t] = struct{}{}
-		queue = append(queue, t)
-	}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		eff, ok := e.effectCache.peek(cur)
-		if !ok {
-			continue
-		}
-		// A snapshot carrying state bounds the active path: it is kept (the
-		// LCA reconstruct needs it) but its ancestors are foldable.
-		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil {
-			continue
-		}
-		var refs []*pb.EffectRef
-		if bind := eff.GetTxnBind(); bind != nil {
-			for _, kb := range bind.Keys {
-				if string(kb.Key) == key {
-					refs = []*pb.EffectRef{kb.NewTip}
-					break
-				}
-			}
-		} else {
-			refs = eff.GetDeps()
-		}
-		for _, ref := range refs {
-			dt := r(ref)
-			if _, seen := set[dt]; seen {
-				continue
-			}
-			set[dt] = struct{}{}
-			queue = append(queue, dt)
-		}
-	}
 }
