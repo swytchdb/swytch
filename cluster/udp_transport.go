@@ -181,16 +181,3 @@ func MarshalNackPacket(nack *pb.NackNotify) ([]byte, error) {
 	copy(buf[1:], protoBytes)
 	return buf, nil
 }
-
-// parseNackPacket parses the plaintext body of a NACK packet.
-func parseNackPacket(data []byte) (*pb.NackNotify, error) {
-	if len(data) < 2 { // type(1) + at least 1 byte of proto
-		return nil, fmt.Errorf("nack packet too short: %d", len(data))
-	}
-
-	nack := &pb.NackNotify{}
-	if err := proto.Unmarshal(data[1:], nack); err != nil {
-		return nil, fmt.Errorf("unmarshal NackNotify: %w", err)
-	}
-	return nack, nil
-}

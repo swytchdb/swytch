@@ -112,6 +112,29 @@ func (m *mockBroadcaster) ForwardTransaction(_ context.Context, _ pb.NodeID, _ *
 	return nil, fmt.Errorf("not implemented")
 }
 
+// broadcastCount returns the number of BroadcastWithData/Broadcast calls,
+// safe to read while the async subscription announce goroutine is in flight.
+func (m *mockBroadcaster) broadcastCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.broadcasts)
+}
+
+// waitForBroadcast blocks until at least one async broadcast lands or the
+// deadline passes. The subscription announce is fire-and-forget (go), so its
+// effect is observable only after the goroutine runs.
+func waitForBroadcast(t *testing.T, bc *mockBroadcaster) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bc.broadcastCount() > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for async subscription broadcast")
+}
+
 // --- helpers ---
 
 func newTestEngine(bc Broadcaster) *Engine {
@@ -249,6 +272,9 @@ func TestFlushSafeMode(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	// A peer holds "k", so SafeMode has a durable-replication target and must
+	// take the synchronous first-ACK path (rather than the no-target downgrade).
+	e.peerFilterAdd(pb.NodeID(2), "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -267,12 +293,40 @@ func TestFlushSafeMode(t *testing.T) {
 	}
 }
 
+// TestFlushSafeMode_DowngradesWhenKeyHeldNowhere: a SafeMode write to a key no
+// peer holds has no durable-replication target — every peer would NACK
+// NotSubscribed — so the first-ACK wait is pure latency. While in the majority
+// partition the engine downgrades to the async broadcast path, mirroring the
+// read-only fast-miss.
+func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
+	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2}, allRegionPeersReachable: true}
+	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	// No peerFilterAdd: clusterMaybeHasKey("k") is false.
+
+	ctx := e.NewContext()
+	if err := ctx.Emit(dataEffect("k")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(bc.replicates) != 0 {
+		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", len(bc.replicates))
+	}
+	if len(bc.broadcasts) == 0 {
+		t.Fatal("key held nowhere: SafeMode should downgrade to async BroadcastWithData")
+	}
+}
+
 func TestFlushSafeModeError_ReplicateFailAfterPrecheck(t *testing.T) {
 	// When pre-check passes but Replicate fails, the write is already committed
 	// (index updated). Flush should succeed — the pre-check is the safety gate.
 	bc := &mockBroadcaster{replicateErr: errors.New("quorum unreachable"), allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": exercises the Replicate-fails path
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -288,6 +342,7 @@ func TestFlushSafeMode_AllowsWhenAllPeersReachable(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": real replication target
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {

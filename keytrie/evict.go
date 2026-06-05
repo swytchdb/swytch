@@ -86,6 +86,14 @@ func (c *Critbit[T]) SetRefDelta(fn func(added, removed []EffectRef, droppedData
 // keyspace the way CloxCache's hash-distributed slot scan was, so the LRU of
 // the sample tracks the global LRU rather than the LRU of a lexicographic
 // neighborhood.
+// EvictK returns the current protected-frequency eviction threshold (the
+// adaptive SLRU promotion bar maybeAdaptK tunes). It is the trie's analogue
+// of CloxCache's per-shard k; telemetry reports it as average_k. Returns the
+// default threshold until the eviction hooks are installed and adaptation runs.
+func (c *Critbit[T]) EvictK() float64 {
+	return float64(c.evictK.Load())
+}
+
 func (c *Critbit[T]) EvictBounded(maxScan int) bool {
 	if c.closed.Load() {
 		return false
@@ -213,10 +221,7 @@ func (c *Critbit[T]) promoteIfGhost(leaf *critNode[T]) {
 		if f >= 0 {
 			return
 		}
-		nf := -f + 1
-		if nf > maxLeafFreq {
-			nf = maxLeafFreq
-		}
+		nf := min(-f+1, maxLeafFreq)
 		if leaf.freq.CompareAndSwap(f, nf) {
 			c.ghostCount.Add(-1)
 			c.windowOps.Add(1)

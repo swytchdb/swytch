@@ -28,7 +28,19 @@ import (
 
 	"github.com/quic-go/quic-go"
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"google.golang.org/protobuf/proto"
+)
+
+// compressThreshold is the smallest payload worth zstd-compressing. Below this,
+// framing overhead outweighs any savings (heartbeats and ACKs are tiny), so
+// they ship raw.
+const compressThreshold = 512
+
+// compression flag values, written as the byte following the 8-byte sender header.
+const (
+	wireRaw  byte = 0
+	wireZstd byte = 1
 )
 
 // QUICNotifyTransport replaces the custom UDP transport (Noise + chunking + pacing)
@@ -80,9 +92,11 @@ func (t *QUICNotifyTransport) Stop() {
 	close(t.stopCh)
 }
 
-// Send opens a unidirectional QUIC stream, writes [2:senderNodeID LE][plaintext],
-// and closes the stream. QUIC handles encryption, retransmission, and flow control.
-// Returns the total bytes written and any error.
+// Send opens a unidirectional QUIC stream, writes
+// [8:senderNodeID LE][1:compressionFlag][body], and closes the stream. Payloads
+// at or above compressThreshold are zstd-compressed when that actually shrinks
+// them. QUIC handles encryption, retransmission, and flow control. Returns the
+// total bytes written and any error.
 func (t *QUICNotifyTransport) Send(peerID NodeId, plaintext []byte) (wireSize int, err error) {
 	conn := t.connFunc(peerID)
 	if conn == nil {
@@ -97,22 +111,31 @@ func (t *QUICNotifyTransport) Send(peerID NodeId, plaintext []byte) (wireSize in
 		return 0, err
 	}
 
-	// Write sender nodeID prefix so the receiver can identify us
-	var header [8]byte
-	binary.LittleEndian.PutUint64(header[:], uint64(t.nodeID))
+	// [8:senderNodeID LE][1:compressionFlag] so the receiver can identify us
+	// and know whether the body is compressed.
+	body := plaintext
+	var header [9]byte
+	binary.LittleEndian.PutUint64(header[:8], uint64(t.nodeID))
+	header[8] = wireRaw
+	if len(plaintext) >= compressThreshold {
+		if compressed := effects.Compress(plaintext); len(compressed) < len(plaintext) {
+			header[8] = wireZstd
+			body = compressed
+		}
+	}
 	if _, err := stream.Write(header[:]); err != nil {
 		stream.CancelWrite(1)
 		return 0, err
 	}
 
-	if _, err := stream.Write(plaintext); err != nil {
+	if _, err := stream.Write(body); err != nil {
 		stream.CancelWrite(1)
 		return 0, err
 	}
 
 	stream.Close() // sends FIN
 	RecordQUICStreamOpened()
-	return len(plaintext) + 8, nil
+	return len(body) + len(header), nil
 }
 
 // SendDirect sends a control packet (heartbeat, ACK) via a QUIC uni-stream.
@@ -138,7 +161,7 @@ func (t *QUICNotifyTransport) AcceptUniStreams(conn *quic.Conn) {
 }
 
 // handleInboundUniStream reads a complete message from a uni-stream and dispatches it.
-// Wire format: [8:senderNodeID LE][plaintext message]
+// Wire format: [8:senderNodeID LE][1:compressionFlag][body]
 func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *quic.ReceiveStream) {
 	// Read sender nodeID prefix
 	var header [8]byte
@@ -157,9 +180,10 @@ func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *qu
 		t.onPeerIdentified(peerID, conn)
 	}
 
-	// Read the plaintext message (limited to maxFrameSize to prevent abuse)
+	// Read [1:compressionFlag][body] (compressed body limited to maxFrameSize
+	// to prevent abuse; the decoder bounds the decompressed size).
 	data, err := io.ReadAll(io.LimitReader(stream, maxFrameSize))
-	if err != nil || len(data) < 1 {
+	if err != nil || len(data) < 2 {
 		if err != nil {
 			slog.Debug("failed to read uni-stream data", "peer", peerID, "error", err)
 			RecordQUICStreamError()
@@ -167,7 +191,17 @@ func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *qu
 		return
 	}
 
-	t.dispatchPlaintext(peerID, data)
+	flag, body := data[0], data[1:]
+	if flag == wireZstd {
+		body, err = effects.Decompress(body)
+		if err != nil {
+			slog.Debug("failed to decompress uni-stream data", "peer", peerID, "error", err)
+			RecordQUICStreamError()
+			return
+		}
+	}
+
+	t.dispatchPlaintext(peerID, body)
 }
 
 // dispatchPlaintext routes decrypted plaintext to the appropriate handler.

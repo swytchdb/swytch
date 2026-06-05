@@ -26,6 +26,42 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// Shared zstd encoder/decoder. klauspost/compress's EncodeAll and DecodeAll are
+// safe for concurrent use when the codec isn't also streaming, so a single
+// instance of each serves the whole process — both wire framing and HPKE sealing.
+var (
+	wireZEnc *zstd.Encoder
+	wireZDec *zstd.Decoder
+)
+
+func init() {
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		panic(fmt.Sprintf("zstd encoder init: %v", err))
+	}
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(128<<20))
+	if err != nil {
+		panic(fmt.Sprintf("zstd decoder init: %v", err))
+	}
+	wireZEnc = enc
+	wireZDec = dec
+}
+
+// Compress returns the zstd-compressed form of b. Safe for concurrent use.
+func Compress(b []byte) []byte {
+	return wireZEnc.EncodeAll(b, nil)
+}
+
+// Decompress reverses Compress. Decoded size is bounded (see decoder init) to
+// guard against decompression bombs from a misbehaving peer.
+func Decompress(b []byte) ([]byte, error) {
+	out, err := wireZDec.DecodeAll(b, nil)
+	if err != nil {
+		return nil, fmt.Errorf("zstd decompress: %w", err)
+	}
+	return out, nil
+}
+
 // Encryptor handles HPKE encryption/decryption with zstd compression.
 // Uses MLKEM768X25519 KEM for post-quantum hybrid safety, HKDF-SHA256 for KDF,
 // and AES-256-GCM for AEAD.
@@ -35,8 +71,6 @@ type Encryptor struct {
 	kem     hpke.KEM
 	kdf     hpke.KDF
 	aead    hpke.AEAD
-	zEnc    *zstd.Encoder
-	zDec    *zstd.Decoder
 }
 
 // NewEncryptor creates an Encryptor from raw public/private key bytes.
@@ -59,31 +93,19 @@ func NewEncryptor(pubKeyBytes, privKeyBytes []byte) (*Encryptor, error) {
 		}
 	}
 
-	zEnc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
-		return nil, fmt.Errorf("zstd encoder: %w", err)
-	}
-
-	zDec, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, fmt.Errorf("zstd decoder: %w", err)
-	}
-
 	return &Encryptor{
 		pubKey:  pub,
 		privKey: priv,
 		kem:     kem,
 		kdf:     kdf,
 		aead:    aead,
-		zEnc:    zEnc,
-		zDec:    zDec,
 	}, nil
 }
 
 // SealAndCompress compresses with zstd, then encrypts with HPKE.
 // The info parameter enables domain separation (e.g. "effect" vs "tip-recovery").
 func (enc *Encryptor) SealAndCompress(plaintext, info []byte) ([]byte, error) {
-	compressed := enc.zEnc.EncodeAll(plaintext, nil)
+	compressed := Compress(plaintext)
 	sealed, err := hpke.Seal(enc.pubKey, enc.kdf, enc.aead, info, compressed)
 	if err != nil {
 		return nil, fmt.Errorf("hpke seal: %w", err)
@@ -100,11 +122,7 @@ func (enc *Encryptor) OpenAndDecompress(sealed, info []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hpke open: %w", err)
 	}
-	decompressed, err := enc.zDec.DecodeAll(compressed, nil)
-	if err != nil {
-		return nil, fmt.Errorf("zstd decompress: %w", err)
-	}
-	return decompressed, nil
+	return Decompress(compressed)
 }
 
 // GenerateKeyPair generates a new HPKE MLKEM768X25519 keypair.

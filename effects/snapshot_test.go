@@ -1111,6 +1111,12 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 	remoteEngine.broadcaster = nackForwarder
 	bc.remoteEngine = remoteEngine
 
+	// Peer 2 holds "shared-key"; in a real cluster its SubscriptionEffect would
+	// have populated our filter. Without this, clusterMaybeHasKey is false and
+	// the subscribe takes the async-announce path (nothing to fetch) — but here
+	// there IS remote state to fetch, so the blocking bootstrap must run.
+	localEngine.peerFilterAdd(2, "shared-key")
+
 	// Now the local engine reads "shared-key" for the first time
 	r, _, _, err := localEngine.GetSnapshot("shared-key")
 	if err != nil {
@@ -1156,9 +1162,12 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{10, 20}, allRegionPeersReachable: true}
 	e := newSnapshotEngine(log)
 	e.broadcaster = bc
-	bc.nackTarget = e // wire up so empty NACKs arrive
+	bc.nackTarget = e // wired, but the async path won't drive it
 
-	// Peers exist but have no data for this key — empty NACKs
+	// Peers exist but none holds this key (clusterMaybeHasKey is false): there
+	// is nothing to bootstrap, so the subscribe takes the async-announce path —
+	// no blocking ReplicateTo rounds, just a fire-and-forget broadcast — and
+	// the read returns a miss.
 	r, _, _, err := e.GetSnapshot("missing-key")
 	if err != nil {
 		t.Fatal(err)
@@ -1166,10 +1175,11 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	if r != nil {
 		t.Fatal("expected nil when all peers have no data")
 	}
-	// Should have sent ReplicateTo to both peers twice (two rounds)
-	if len(bc.replicateToPeers) != 4 {
-		t.Fatalf("expected 4 ReplicateTo calls (2 peers x 2 rounds), got %d", len(bc.replicateToPeers))
+	if len(bc.replicateToPeers) != 0 {
+		t.Fatalf("nowhere-key subscribe must not block on ReplicateTo rounds, got %d", len(bc.replicateToPeers))
 	}
+	// The announce is fire-and-forget (go), so observe it through the lock.
+	waitForBroadcast(t, bc)
 }
 
 func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {

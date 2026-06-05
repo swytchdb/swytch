@@ -290,59 +290,75 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	targets := r.healthTable.AliveSymmetricPeers(r.localRegion, regions)
 
 	// Send to cross-region peers (fire-and-forget, off critical path)
-	go r.sendCrossRegion(notify, wireData, regions)
+	go r.sendCrossRegion(notify, regions)
 
 	// No alive same-region targets — fail immediately
 	if len(targets) == 0 {
 		return rejectedFuture(ErrNoPeers)
 	}
 
+	// Marshal the notify body once: it is byte-identical for every peer
+	// (only the per-request header varies), so AssembleNotifyPacket frames
+	// a packet per peer without re-serializing the effect. Re-marshalling
+	// per peer was O(peers × effectSize) of redundant work on every PUT.
+	body, err := proto.Marshal(notify)
+	if err != nil {
+		return rejectedFuture(fmt.Errorf("marshal notify packet: %w", err))
+	}
+
 	// One tracked request per peer; future resolves on FIRST ACK (first-ACK semantics).
 	future := &ReplicationFuture{done: make(chan struct{})}
 
-	trackedCount := 0
+	var trackedCount atomic.Int32
 	deadlineNano := time.Now().Add(r.replicationTimeout).UnixNano()
 
+	// Fan the per-peer sends out concurrently: each transport.Send opens a
+	// QUIC uni-stream that can block on flow control, so a serial loop made
+	// PUT latency grow linearly with same-region peer count. wg.Wait below
+	// keeps the expected/setupDone finalization correct (every expected.Add
+	// completes before we set setupDone).
+	var wg sync.WaitGroup
+	wg.Add(len(targets))
 	for _, targetID := range targets {
-		requestID := r.tracker.nextID.Add(1)
+		go func(targetID NodeId) {
+			defer wg.Done()
 
-		notifyPkt, err := MarshalNotifyPacket(requestID, notify)
-		if err != nil {
-			slog.Error("failed to marshal notify packet", "error", err)
-			continue
-		}
+			requestID := r.tracker.nextID.Add(1)
+			notifyPkt := AssembleNotifyPacket(requestID, body)
 
-		// Store tracked request BEFORE sending so the NACK handler can
-		// find it. On fast networks (localhost) the peer's response can
-		// arrive before Send() returns.
-		now := time.Now().UnixNano()
-		tr := &trackedRequest{
-			future:       future,
-			createdAt:    now,
-			lastSentAt:   now,
-			deadline:     deadlineNano,
-			peerID:       targetID,
-			packetData:   notifyPkt,
-			traceContext: notify.GetTraceContext(),
-		}
-		r.tracker.pending.Store(requestID, tr)
-		future.expected.Add(1)
+			// Store tracked request BEFORE sending so the NACK handler can
+			// find it. On fast networks (localhost) the peer's response can
+			// arrive before Send() returns.
+			now := time.Now().UnixNano()
+			tr := &trackedRequest{
+				future:       future,
+				createdAt:    now,
+				lastSentAt:   now,
+				deadline:     deadlineNano,
+				peerID:       targetID,
+				packetData:   notifyPkt,
+				traceContext: notify.GetTraceContext(),
+			}
+			r.tracker.pending.Store(requestID, tr)
+			future.expected.Add(1)
 
-		wireSize, err := r.transport.Send(targetID, notifyPkt)
-		if err != nil {
-			// Remove the pre-registered tracked request on send failure
-			r.tracker.pending.Delete(requestID)
-			future.expected.Add(-1)
-			slog.Error("same-region send failed, replication degraded",
-				"peer", targetID, "error", err)
-			continue
-		}
-		tr.packetSize = wireSize
-		RecordNotificationSent()
-		trackedCount++
+			wireSize, err := r.transport.Send(targetID, notifyPkt)
+			if err != nil {
+				// Remove the pre-registered tracked request on send failure
+				r.tracker.pending.Delete(requestID)
+				future.expected.Add(-1)
+				slog.Error("same-region send failed, replication degraded",
+					"peer", targetID, "error", err)
+				return
+			}
+			tr.packetSize = wireSize
+			RecordNotificationSent()
+			trackedCount.Add(1)
+		}(targetID)
 	}
+	wg.Wait()
 
-	if trackedCount == 0 {
+	if trackedCount.Load() == 0 {
 		slog.Error("all same-region sends failed", "targets", len(targets))
 		future.reject(ErrNoPeers)
 		return future
@@ -361,9 +377,14 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 
 // sendCrossRegion sends the notification to all cross-region peers.
 // Fire-and-forget — callers don't block on cross-region ACKs.
-func (r *Replicator) sendCrossRegion(notify *pb.OffsetNotify, wireData []byte, regions map[NodeId]string) {
-	var nullFuture *ReplicationFuture
+func (r *Replicator) sendCrossRegion(notify *pb.OffsetNotify, regions map[NodeId]string) {
 	deadlineNano := time.Now().Add(r.replicationTimeout).UnixNano()
+
+	// Marshal the notify body once and reuse it across peers (see Replicate).
+	var (
+		body       []byte
+		nullFuture *ReplicationFuture
+	)
 
 	for peerID, region := range regions {
 		if region == r.localRegion {
@@ -371,17 +392,18 @@ func (r *Replicator) sendCrossRegion(notify *pb.OffsetNotify, wireData []byte, r
 		}
 
 		if nullFuture == nil {
+			marshalled, err := proto.Marshal(notify)
+			if err != nil {
+				slog.Error("failed to marshal cross-region notify packet", "error", err)
+				return
+			}
+			body = marshalled
 			nullFuture = &ReplicationFuture{done: make(chan struct{})}
 			nullFuture.resolve()
 		}
 
 		requestID := r.tracker.nextID.Add(1)
-
-		notifyPkt, err := MarshalNotifyPacket(requestID, notify)
-		if err != nil {
-			slog.Error("failed to marshal cross-region notify packet", "error", err)
-			continue
-		}
+		notifyPkt := AssembleNotifyPacket(requestID, body)
 
 		now := time.Now().UnixNano()
 		tr := &trackedRequest{

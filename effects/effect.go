@@ -128,6 +128,10 @@ type Engine struct {
 	memGovStop chan struct{}
 	memGovWg   sync.WaitGroup
 
+	// memTarget is the resolved byte budget the governor holds the pool under
+	// (0 = unbounded). Exposed via MemoryTarget for heartbeat telemetry.
+	memTarget int64
+
 	closed atomic.Bool
 
 	// Transaction ID counter
@@ -324,6 +328,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	} else if cfg.MemoryLimit > 0 {
 		memTarget = cfg.MemoryLimit
 	}
+	e.memTarget = memTarget
 	e.startMemoryGovernor(memTarget)
 
 	e.safety.Store(&safetyMap{
@@ -358,6 +363,20 @@ func (e *Engine) generateTxnID() string {
 // the fetch handler (serves effects from cache when the log is unavailable).
 func (e *Engine) EffectCache() *VertexPool {
 	return e.effectCache
+}
+
+// AverageK exposes the index's current eviction threshold for telemetry.
+// k now lives on the critbit index (the vertex pool has no eviction policy of
+// its own), so heartbeat stats read it from here rather than the effect cache.
+func (e *Engine) AverageK() float64 {
+	return e.index.EvictK()
+}
+
+// MemoryTarget returns the byte budget the governor holds the vertex pool
+// under (0 = unbounded, no --maxmemory configured). The pool is byte-bounded
+// rather than slot-bounded, so this is its capacity for heartbeat telemetry.
+func (e *Engine) MemoryTarget() int64 {
+	return e.memTarget
 }
 
 // addPeerSubscriber records that peer is subscribed to key. Idempotent.

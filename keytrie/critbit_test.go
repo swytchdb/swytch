@@ -2088,35 +2088,29 @@ func TestReap_ConcurrentInsertAndReap(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Writer goroutine: continuously insert/delete
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for round := range 200 {
 			key := fmt.Sprintf("k%04d", round%1000)
 			c.Delete(key, c.Contains(key))
 			c.Insert(key, nil, NewTipSet(r(uint64(round+10000))))
 		}
-	}()
+	})
 
 	// Reaper goroutine: continuously reap
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			c.reap()
 		}
-	}()
+	})
 
 	// Reader goroutine: continuously read
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			for i := range 100 {
 				c.Contains(fmt.Sprintf("k%04d", i))
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 

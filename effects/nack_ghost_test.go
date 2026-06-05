@@ -202,7 +202,9 @@ func TestEnsureSubscribed_InstallsOnlyWalkableTips(t *testing.T) {
 	e := newTestEngine(bc)
 
 	// GetSnapshot drives ensureSubscribed; we just need bootstrap to run.
-	if err := e.ensureSubscribed(key); err != nil {
+	// Use the blocking variant: this test exercises the synchronous tip-walk
+	// install path, which the async-announce shortcut would skip.
+	if err := e.ensureSubscribedBlocking(key); err != nil {
 		t.Fatalf("ensureSubscribed returned error on partial reachability: %v", err)
 	}
 
@@ -266,7 +268,8 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 	e := newTestEngine(bc)
 	defer e.closed.Store(true) // stop retryBootstrap on test exit
 
-	err := e.ensureSubscribed(key)
+	// Blocking variant: exercises the "all tips unreachable → retry" path.
+	err := e.ensureSubscribedBlocking(key)
 	if !errors.Is(err, ErrBootstrapIncomplete) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
 	}
@@ -359,7 +362,7 @@ func TestRetryBootstrap_ShutdownUnblocksWaiters(t *testing.T) {
 
 	e := newTestEngine(bc)
 
-	if err := e.ensureSubscribed(key); !errors.Is(err, ErrBootstrapIncomplete) {
+	if err := e.ensureSubscribedBlocking(key); !errors.Is(err, ErrBootstrapIncomplete) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
 	}
 

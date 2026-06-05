@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,13 +90,7 @@ func tipsEqual(a, b []Tip) bool {
 		return false
 	}
 	for _, x := range a {
-		found := false
-		for _, y := range b {
-			if x == y {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(b, x)
 		if !found {
 			return false
 		}
@@ -351,12 +346,27 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 
 // ensureSubscribed records local subscription and emits a SubscriptionEffect.
 // On first access, broadcasts to ALL nodes and waits for NACKs with Tip sets
-// so we can fetch remote state before GetSnapshot proceeds.
+// so we can fetch remote state before GetSnapshot proceeds — UNLESS no peer
+// holds the key (authoritative in the majority partition), in which case it
+// announces the subscription fire-and-forget and returns without blocking
+// (there is no remote state to fetch). Used by reads and non-tx writes.
 //
 // Returns ErrRegionPartitioned if the node is in a minority partition and
 // cannot announce the subscription cluster-wide. Per the whitepaper (§3.3),
 // a node must be subscribed to a key before any read or write.
 func (e *Engine) ensureSubscribed(key string) error {
+	return e.ensureSubscribedMode(key, true)
+}
+
+// ensureSubscribedBlocking forces the synchronous bootstrap even when no peer
+// currently holds the key. The transactional commit path uses this: its
+// fork-choice base-sharing depends on the round-2 tip collection completing
+// before the bind is emitted, so it must never take the async-announce path.
+func (e *Engine) ensureSubscribedBlocking(key string) error {
+	return e.ensureSubscribedMode(key, false)
+}
+
+func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	state := &subscriptionState{ready: make(chan struct{})}
 	if existing, loaded := e.subscriptions.LoadOrStore(key, state); loaded {
 		if existing.incomplete.Load() {
@@ -411,6 +421,28 @@ func (e *Engine) ensureSubscribed(key string) error {
 	}
 
 	notify := BuildOffsetNotify(e.nodeID, offset, eff, data, nil)
+
+	// Async-announce fast path: when no peer in the cluster holds this key
+	// (authoritative while we're in the majority partition) there is no prior
+	// state to bootstrap — the blocking rounds below would collect nothing. We
+	// still MUST announce the subscription so future peer writes route to us
+	// (skipping it splits brain), but we can fire-and-forget: QUIC delivers
+	// reliably on a live connection, and peer-recovery re-announce
+	// (pubsub_router.OnPeerAdded) heals any peer whose connection was down.
+	// Never skip the announce; only skip the wait. The local install above is
+	// synchronous (so a subsequent Emit dep-references our SubscriptionEffect),
+	// but the network send is off the critical path: fire it in the background
+	// so the calling SET/GET returns immediately. QUIC delivers reliably on a
+	// live connection, and peer-recovery re-announce heals downed peers.
+	// System keys are exempt: they're excluded from the cluster key filters
+	// (so clusterMaybeHasKey is always false for them) and are how a node
+	// bootstraps cluster state — they must always do the blocking bootstrap.
+	if allowAsync && !isSystemKey([]byte(key)) &&
+		e.inMajorityPartition() && !e.clusterMaybeHasKey(key) {
+		go e.broadcaster.BroadcastWithData(notify, notify.EffectData)
+		succeeded = true
+		return nil
+	}
 
 	// Register bootstrap collector before broadcasting so NACKs aren't missed
 	collector := &bootstrapCollector{

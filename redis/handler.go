@@ -231,28 +231,39 @@ func (h *Handler) GetDatabaseManager() *shared.DatabaseManager {
 	return h.dbManager
 }
 
-// GetAdaptiveStats returns per-shard adaptive cache statistics
+// GetAdaptiveStats returns adaptive cache statistics. The eviction policy lives
+// on the engine's critbit index as a single domain, so this reports one entry
+// carrying its current protection threshold K.
 func (h *Handler) GetAdaptiveStats() []cache.AdaptiveStats {
-	// Return stats from database 0 as representative
-	if db := h.dbManager.GetDB(0); db != nil {
-		return db.AdaptiveStats()
+	if h.engine == nil {
+		return nil
 	}
-	return nil
+	return []cache.AdaptiveStats{{K: int32(h.engine.AverageK())}}
 }
 
-// GetCacheBytes returns current bytes used by cached items
+// GetCacheBytes returns the bytes resident in the engine's vertex pool.
 func (h *Handler) GetCacheBytes() int64 {
-	return h.dbManager.GetCacheBytes()
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().Bytes()
 }
 
-// GetItemCount returns current number of items in cache
+// GetItemCount returns the number of effects resident in the vertex pool.
 func (h *Handler) GetItemCount() int {
-	return h.dbManager.TotalItemCount()
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().EntryCount()
 }
 
-// GetCacheEvictions returns total evictions from the cache
+// GetCacheEvictions returns total evictions from the vertex pool.
 func (h *Handler) GetCacheEvictions() uint64 {
-	return h.dbManager.TotalEvictions()
+	if h.engine == nil {
+		return 0
+	}
+	_, _, evictions := h.engine.EffectCache().Stats()
+	return evictions
 }
 
 // RequiresAuth returns true if authentication is required

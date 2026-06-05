@@ -26,7 +26,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/swytchdb/swytch/cache"
 	"github.com/swytchdb/swytch/keytrie"
 )
 
@@ -111,33 +110,6 @@ func (db *Database) GetLock(key string) *sync.Mutex {
 // MakeKey creates the internal key for this database
 func (db *Database) MakeKey(key string) string {
 	return dbKey(db.index, key)
-}
-
-// EvictCacheOnly removes a key from the cache without touching the keytrie.
-// Used for cache invalidation when the key should be reconstructed from effects
-// on next access. Does NOT fire onChange callback.
-func (db *Database) EvictCacheOnly(key string) bool {
-	return false
-}
-
-// Stats returns cache statistics
-func (db *Database) Stats() (hits, misses, evictions uint64) {
-	return 0, 0, 0
-}
-
-// AdaptiveStats returns per-shard adaptive statistics
-func (db *Database) AdaptiveStats() []cache.AdaptiveStats {
-	return nil
-}
-
-// ItemCount returns the raw item count (may include expired items)
-func (db *Database) ItemCount() int {
-	return 0
-}
-
-// Evictions returns the total eviction count
-func (db *Database) Evictions() uint64 {
-	return 0
 }
 
 // Close is a no-op for individual databases (cache is shared)
@@ -238,26 +210,6 @@ func (dm *DatabaseManager) SwapDB(db1, db2 int) error {
 	// Swap pointers - each Database keeps its index field, so keys remain correctly prefixed
 	dm.databases[db1], dm.databases[db2] = dm.databases[db2], dm.databases[db1]
 	return nil
-}
-
-// TotalItemCount returns the raw item count (shared cache)
-func (dm *DatabaseManager) TotalItemCount() int {
-	return 0
-}
-
-// TotalEvictions returns total evictions (shared cache)
-func (dm *DatabaseManager) TotalEvictions() uint64 {
-	return 0
-}
-
-// GetCacheBytes returns current memory usage in bytes
-func (dm *DatabaseManager) GetCacheBytes() int64 {
-	return 0
-}
-
-// GetMemoryLimit returns the configured memory limit in bytes (0 = unlimited)
-func (dm *DatabaseManager) GetMemoryLimit() int64 {
-	return 0
 }
 
 // Close releases resources for the shared cache

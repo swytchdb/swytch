@@ -111,7 +111,6 @@ type Cache[K Key, V any] interface {
 	Close()
 }
 
-
 // CloxCache is a lock-free adaptive in-memory cache.
 // It stores generic keys of type K (string or []byte) and values of type V.
 type CloxCache[K Key, V any] struct {

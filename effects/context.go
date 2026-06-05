@@ -225,13 +225,20 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		}
 		// Read-only fast path: a key we don't already hold and that no peer
 		// has announced has no committed value cluster-wide (when we're in the
-		// majority partition). Return a miss without subscribing — this is the
-		// whole point: read-misses cost nothing. A filter false-positive, or a
+		// majority partition), so the read is a miss. We must NOT skip the
+		// subscription — staying silent means future peer writes never route to
+		// us and the key splits brain. Instead ensureSubscribed takes its
+		// async-announce path (no peer holds the key, so nothing to bootstrap;
+		// it installs locally and fire-and-forgets the SubscriptionEffect) and
+		// we return the miss without blocking. A filter false-positive, or a
 		// key we hold locally, falls through to the normal subscribe + read.
 		if c.readOnly &&
 			c.engine.index.Contains(key) == nil &&
 			c.engine.inMajorityPartition() &&
 			!c.engine.clusterMaybeHasKey(key) {
+			if err := c.engine.ensureSubscribed(key); err != nil {
+				return nil, nil, err
+			}
 			return nil, nil, nil
 		}
 		// No unflushed effects for this key — delegate to committed state
@@ -775,6 +782,20 @@ func (c *Context) flushNonTx() error {
 			for _, n := range ck.notifies {
 				n.TraceContext = bcastTrace
 			}
+			// SafeMode downgrade: if no other node in the cluster holds this
+			// key — and we're in the majority partition, so the filter view is
+			// authoritative — the first-ACK wait has no target. Every peer
+			// would NACK NotSubscribed and discard the write, so the wait is
+			// pure latency ending in a swallowed error. Broadcast async
+			// instead. This is the write-side mirror of the read-only
+			// fast-miss: a key that exists nowhere needs no synchronous
+			// handshake. Once any peer subscribes to the key,
+			// clusterMaybeHasKey turns true and SafeMode resumes waiting.
+			if mode == SafeMode &&
+				c.engine.inMajorityPartition() &&
+				!c.engine.clusterMaybeHasKey(key) {
+				mode = UnsafeMode
+			}
 			if mode == SafeMode {
 				// Pre-check already verified all peers are reachable.
 				// Index is updated, so the write is committed — replicate
@@ -844,9 +865,12 @@ func (c *Context) flushTx() error {
 	// Step 0.5: Ensure subscription for every key in the transaction.
 	// Per whitepaper §3.3, a node must subscribe before any read or write.
 	// If we're in a minority partition, ensureSubscribed returns an error
-	// and the transaction must abort.
+	// and the transaction must abort. Force the blocking bootstrap: the
+	// commit protocol's fork-choice base-sharing requires the round-2 tip
+	// collection to finish before the bind is emitted, so the txn path must
+	// not take the async-announce shortcut even for a key held nowhere.
 	for key := range c.keys {
-		if err := c.engine.ensureSubscribed(key); err != nil {
+		if err := c.engine.ensureSubscribedBlocking(key); err != nil {
 			c.reset()
 			return ErrRegionPartitioned
 		}

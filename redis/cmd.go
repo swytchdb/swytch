@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/swytch/cache"
 	"github.com/swytchdb/swytch/metrics"
 	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/swytchdb/swytch/telemetry"
@@ -312,18 +313,19 @@ Examples:
 				}
 				ec := activeRuntime.Engine.EffectCache()
 				hits, misses, evictions := ec.Stats()
-				// Capacity / AverageK / MemoryAvail were CloxCache-specific
-				// (fixed slot capacity, protected-freq K). The vertex pool is
-				// unbounded between governor sweeps, so they report zero until
-				// the sharded per-key eviction policy reintroduces them.
+				// Capacity is the pool's byte budget (it is byte-bounded, not
+				// slot-bounded), in the same unit as MemoryUsage/MemoryAvail.
 				return telemetry.HeartbeatStats{
 					Nodes:         nodes,
 					UptimeSeconds: int(adapter.UptimeSeconds()),
+					MemoryAvail:   int64(cache.GetAvailableMemory()),
 					MemoryUsage:   ec.Bytes(),
 					HitCount:      hits,
 					MissCount:     misses,
 					Evictions:     evictions,
 					EntryCount:    ec.EntryCount(),
+					Capacity:      int(activeRuntime.Engine.MemoryTarget()),
+					AverageK:      activeRuntime.Engine.AverageK(),
 				}
 			},
 		})

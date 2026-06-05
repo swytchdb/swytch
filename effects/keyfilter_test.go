@@ -90,9 +90,11 @@ func TestPeerWriteVisibleToReader(t *testing.T) {
 	}
 }
 
-// TestReadOnlyMissSkipsSubscribe is the core win: a read of a key no peer
-// holds returns nil without issuing any subscription broadcast.
-func TestReadOnlyMissSkipsSubscribe(t *testing.T) {
+// TestReadOnlyMissAnnouncesAsync is the core win: a read of a key no peer
+// holds returns nil without a blocking subscribe round-trip (no ReplicateTo),
+// but it must still announce the subscription fire-and-forget so future peer
+// writes route to us — never skip it. The subscription is installed locally.
+func TestReadOnlyMissAnnouncesAsync(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 
@@ -105,16 +107,19 @@ func TestReadOnlyMissSkipsSubscribe(t *testing.T) {
 		t.Fatalf("expected nil snapshot for absent key, got %v", result)
 	}
 	if len(bc.replicateToPeers) != 0 {
-		t.Fatalf("read-only miss must not subscribe, but ReplicateTo was called for %v", bc.replicateToPeers)
+		t.Fatalf("read-only miss must not block on a subscribe round-trip, but ReplicateTo was called for %v", bc.replicateToPeers)
 	}
-	if e.index.Contains("never-written") != nil {
-		t.Fatal("read-only miss must not install a subscription in the index")
+	if e.index.Contains("never-written") == nil {
+		t.Fatal("the async announce must install our own subscription in the index")
 	}
+	// The announce is fire-and-forget (go), so observe it through the lock.
+	waitForBroadcast(t, bc)
 }
 
-// TestReadWriteMissSubscribes confirms the contrast: a normal (write) context
-// still subscribes on a miss, so the optimization is read-only-context-scoped.
-func TestReadWriteMissSubscribes(t *testing.T) {
+// TestReadWriteMissAnnouncesAsync confirms the rule is uniform: a normal
+// (read-write) context also announces async on a miss — fire-and-forget, no
+// blocking ReplicateTo — rather than the old synchronous bootstrap.
+func TestReadWriteMissAnnouncesAsync(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 
@@ -122,9 +127,11 @@ func TestReadWriteMissSubscribes(t *testing.T) {
 	if _, _, err := ctx.GetSnapshot("never-written"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(bc.replicateToPeers) == 0 {
-		t.Fatal("a non-read-only context must subscribe on a miss")
+	if len(bc.replicateToPeers) != 0 {
+		t.Fatalf("read-write miss on a nowhere-key must not block on a subscribe round-trip, got %v", bc.replicateToPeers)
 	}
+	// The announce is fire-and-forget (go), so observe it through the lock.
+	waitForBroadcast(t, bc)
 }
 
 // TestReadOnlyHitSubscribes: once a peer has announced a key (filter hit), a
