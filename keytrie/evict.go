@@ -30,7 +30,13 @@ const (
 	// protected from eviction; below-or-equal are eviction candidates.
 	defaultProtectedFreqThreshold = 2
 
-	// adaptiveCheckInterval: re-evaluate k every N evictions.
+	// adaptiveCheckInterval: re-evaluate k every N evictions. Kept at CloxCache's
+	// 1000: once the eviction counter was split from reclaim churn, real cold-key
+	// evictions proved to flow fast enough that 1000 is reached readily — the
+	// earlier worry that EvictBounded was too low-volume to ever hit it was an
+	// artifact of the conflated counter. A 1000-sample window gives a far steadier
+	// graduation-rate estimate than a smaller one, so k moves deliberately instead
+	// of overshooting to the ceiling on noise.
 	adaptiveCheckInterval = 1000
 
 	// Default graduation-rate thresholds (× 10000), learned per domain.
@@ -92,6 +98,52 @@ func (c *Critbit[T]) SetRefDelta(fn func(added, removed []EffectRef, droppedData
 // default threshold until the eviction hooks are installed and adaptation runs.
 func (c *Critbit[T]) EvictK() float64 {
 	return float64(c.evictK.Load())
+}
+
+// EvictStats is a point-in-time snapshot of the adaptive eviction policy's
+// internal state, for telemetry. The counters (EvictedUnprotected/Protected,
+// ReachedProtected) are windowed — maybeAdaptK halves them periodically — so
+// they reflect recent behaviour, not lifetime totals. GraduationRate is the
+// quantity that actually drives k: when it exceeds RateHigh, k rises; below
+// RateLow, k falls.
+type EvictStats struct {
+	K                  int32   // current protected-freq threshold
+	GraduationRate     float64 // ReachedProtected / (EvictedUnprotected+EvictedProtected)
+	RateLow            float64 // learned threshold below which k decreases
+	RateHigh           float64 // learned threshold above which k increases
+	EvictedUnprotected uint64  // windowed: victims with freq <= k (cold, expected)
+	EvictedProtected   uint64  // windowed: victims with freq > k (forced — pressure too high)
+	ReachedProtected   uint64  // windowed: leaves that graduated past k
+	WindowHitRate      float64 // current adapt-window hit rate (self-tuning gradient input)
+	GhostCount         int64   // ghosts retained for warm restart
+}
+
+// EvictStats snapshots the adaptive policy's internals. Lock-free reads of the
+// same atomics maybeAdaptK uses; the snapshot is not transactionally consistent
+// across fields, which is fine for telemetry.
+func (c *Critbit[T]) EvictStats() EvictStats {
+	eu := c.evictedUnprot.Load()
+	ep := c.evictedProt.Load()
+	grad := c.reachedProt.Load()
+	var rate float64
+	if total := eu + ep; total > 0 {
+		rate = float64(grad) / float64(total)
+	}
+	var hitRate float64
+	if ops := c.windowOps.Load(); ops > 0 {
+		hitRate = float64(c.windowHits.Load()) / float64(ops)
+	}
+	return EvictStats{
+		K:                  c.evictK.Load(),
+		GraduationRate:     rate,
+		RateLow:            float64(c.rateLow.Load()) / 10000.0,
+		RateHigh:           float64(c.rateHigh.Load()) / 10000.0,
+		EvictedUnprotected: eu,
+		EvictedProtected:   ep,
+		ReachedProtected:   grad,
+		WindowHitRate:      hitRate,
+		GhostCount:         c.ghostCount.Load(),
+	}
 }
 
 func (c *Critbit[T]) EvictBounded(maxScan int) bool {
@@ -241,6 +293,17 @@ func (c *Critbit[T]) promoteIfGhost(leaf *critNode[T]) {
 // workload rather than using fixed cutoffs.
 func (c *Critbit[T]) maybeAdaptK() {
 	total := c.evictedUnprot.Load() + c.evictedProt.Load()
+	// Intentional unsigned underflow: the decay below halves the counters but
+	// leaves lastAdaptCheck at this pre-decay total, so the next eviction
+	// computes (smaller total) - (larger lastAdaptCheck), which wraps to a huge
+	// value >= the interval and re-triggers adaptation. That gives a short burst
+	// of back-to-back adapts as the counters decay toward the floor — letting k
+	// move several steps to track a workload shift instead of crawling one step
+	// per interval — then a quiet window until the counters climb again. This is
+	// a faithful port of CloxCache's adaptThreshold; it reads like a bug and was
+	// "fixed" once already (a lastAdaptCheck.Store(0) that killed the burst).
+	// Don't reintroduce that store. The underflow is also simply cheaper than
+	// tracking the burst with an explicit loop.
 	if total-c.lastAdaptCheck.Load() < adaptiveCheckInterval {
 		return
 	}
@@ -308,7 +371,9 @@ func (c *Critbit[T]) maybeAdaptK() {
 	if total > 100 {
 		c.evictedUnprot.Store(c.evictedUnprot.Load() / 2)
 		c.evictedProt.Store(c.evictedProt.Load() / 2)
-		c.lastAdaptCheck.Store(0)
+		// lastAdaptCheck is deliberately NOT reset here — see the underflow note
+		// at the top of this function. Halving the counters below the retained
+		// lastAdaptCheck is what arms the next-eviction re-trigger.
 	}
 }
 

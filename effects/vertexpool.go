@@ -70,9 +70,17 @@ type VertexPool struct {
 	m     *xsync.Map[Tip, *vertex]
 	bytes atomic.Int64
 
-	hits      atomic.Uint64
-	misses    atomic.Uint64
-	evictions atomic.Uint64
+	hits   atomic.Uint64
+	misses atomic.Uint64
+	// reclaimed counts vertices freed by reclaimUnreferenced (refs-0 below-LCA
+	// history and orphans) — pure storage churn, not cache eviction. delete()
+	// is its only increment site. coldEvictions counts keys the index's bounded
+	// sweep actually evicted under memory pressure (the real "evicted_keys"),
+	// bumped once per victim in onLeafEvicted. These were conflated before: the
+	// old single "evictions" counter only ever saw reclaim churn, so cold-key
+	// eviction was invisible in telemetry.
+	reclaimed     atomic.Uint64
+	coldEvictions atomic.Uint64
 }
 
 func newVertexPool() *VertexPool {
@@ -118,17 +126,24 @@ func (p *VertexPool) PutSized(tip Tip, eff *pb.Effect, protoLen int) {
 	}
 }
 
-// delete removes tip from the pool, decrements the byte total, and counts an
-// eviction. Returns the bytes freed, or 0 if tip was absent.
+// delete removes tip from the pool, decrements the byte total, and counts a
+// reclaim. Returns the bytes freed, or 0 if tip was absent. Its only caller is
+// reclaimUnreferenced, so this counts storage churn, not cache eviction — see
+// recordColdEviction for the latter.
 func (p *VertexPool) delete(tip Tip) int64 {
 	prev, loaded := p.m.LoadAndDelete(tip)
 	if !loaded {
 		return 0
 	}
 	p.bytes.Add(-prev.size)
-	p.evictions.Add(1)
+	p.reclaimed.Add(1)
 	return prev.size
 }
+
+// recordColdEviction counts one key evicted by the index's bounded sweep under
+// memory pressure. Called once per victim from onLeafEvicted — the cold-key
+// eviction the old conflated counter never saw.
+func (p *VertexPool) recordColdEviction() { p.coldEvictions.Add(1) }
 
 // rangeVertices iterates every resident vertex. The callback must not call
 // the pool's mutating methods on the same tip mid-iteration other than
@@ -160,10 +175,20 @@ func (p *VertexPool) Bytes() int64 { return p.bytes.Load() }
 // EntryCount returns the number of resident effects.
 func (p *VertexPool) EntryCount() int { return p.m.Size() }
 
-// Stats returns cumulative hit, miss, and eviction counts.
-func (p *VertexPool) Stats() (hits, misses, evictions uint64) {
-	return p.hits.Load(), p.misses.Load(), p.evictions.Load()
+// Stats returns cumulative hit, miss, and reclaim counts. The third value is
+// reclaimUnreferenced churn (vertices freed), not cache eviction — use
+// ColdEvictions for keys dropped under memory pressure.
+func (p *VertexPool) Stats() (hits, misses, reclaimed uint64) {
+	return p.hits.Load(), p.misses.Load(), p.reclaimed.Load()
 }
+
+// ColdEvictions returns the number of keys the index's bounded sweep evicted
+// under memory pressure — the real "evicted_keys", distinct from reclaim churn.
+func (p *VertexPool) ColdEvictions() uint64 { return p.coldEvictions.Load() }
+
+// Reclaimed returns the number of vertices freed by reclaimUnreferenced
+// (below-LCA history and orphans) — storage churn, not cache eviction.
+func (p *VertexPool) Reclaimed() uint64 { return p.reclaimed.Load() }
 
 // startMemoryGovernor launches the background loop that keeps process RSS near
 // targetBytes by sweeping below-LCA effects out of the vertex pool. It also

@@ -990,6 +990,7 @@ type AdaptiveStats struct {
 	LearnedRateLow  float64 // learned low threshold (rate below which k decreases)
 	LearnedRateHigh float64 // learned high threshold (rate above which k increases)
 	WindowHitRate   float64 // current window hit rate
+	GhostCount      int64   // soft-deleted leaves retained for warm restart (keytrie only; 0 for CloxCache)
 }
 
 // GetAdaptiveStats returns adaptive threshold stats for all shards

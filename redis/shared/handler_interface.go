@@ -232,8 +232,11 @@ type CommandHandler interface {
 	// GetItemCount returns current number of items in cache
 	GetItemCount() int
 
-	// GetCacheEvictions returns total evictions from the cache
+	// GetCacheEvictions returns keys evicted under memory pressure (evicted_keys)
 	GetCacheEvictions() uint64
+
+	// GetVerticesReclaimed returns vertices freed by reclaim (storage churn)
+	GetVerticesReclaimed() uint64
 
 	// RequiresAuth returns true if authentication is required
 	RequiresAuth() bool

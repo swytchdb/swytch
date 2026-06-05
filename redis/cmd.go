@@ -312,7 +312,7 @@ Examples:
 					nodes = len(activeRuntime.PeerManager.PeerIDs()) + 1
 				}
 				ec := activeRuntime.Engine.EffectCache()
-				hits, misses, evictions := ec.Stats()
+				hits, misses, _ := ec.Stats()
 				// Capacity is the pool's byte budget (it is byte-bounded, not
 				// slot-bounded), in the same unit as MemoryUsage/MemoryAvail.
 				return telemetry.HeartbeatStats{
@@ -322,7 +322,7 @@ Examples:
 					MemoryUsage:   ec.Bytes(),
 					HitCount:      hits,
 					MissCount:     misses,
-					Evictions:     evictions,
+					Evictions:     ec.ColdEvictions(),
 					EntryCount:    ec.EntryCount(),
 					Capacity:      int(activeRuntime.Engine.MemoryTarget()),
 					AverageK:      activeRuntime.Engine.AverageK(),

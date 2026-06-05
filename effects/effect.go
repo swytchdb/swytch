@@ -372,6 +372,11 @@ func (e *Engine) AverageK() float64 {
 	return e.index.EvictK()
 }
 
+// EvictStats exposes the index's adaptive-eviction internals for telemetry.
+func (e *Engine) EvictStats() keytrie.EvictStats {
+	return e.index.EvictStats()
+}
+
 // MemoryTarget returns the byte budget the governor holds the vertex pool
 // under (0 = unbounded, no --maxmemory configured). The pool is byte-bounded
 // rather than slot-bounded, so this is its capacity for heartbeat telemetry.
@@ -1771,6 +1776,11 @@ func (e *Engine) onLeafEvicted(key string, tips []Tip, _ *leafState) {
 	if e.closed.Load() {
 		return
 	}
+
+	// Count the real cold-key eviction here (once per victim) — the bounded
+	// sweep chose this key under memory pressure. Distinct from the vertex
+	// reclaim churn delete() counts.
+	e.effectCache.recordColdEviction()
 
 	// Async: the unsubscribe broadcast is network I/O and must not run under
 	// the sweep lock. Future reads re-subscribe and bootstrap fresh.

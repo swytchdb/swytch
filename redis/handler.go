@@ -233,12 +233,24 @@ func (h *Handler) GetDatabaseManager() *shared.DatabaseManager {
 
 // GetAdaptiveStats returns adaptive cache statistics. The eviction policy lives
 // on the engine's critbit index as a single domain, so this reports one entry
-// carrying its current protection threshold K.
+// (ShardID 0) carrying the full internal state of the adaptive-k loop.
 func (h *Handler) GetAdaptiveStats() []cache.AdaptiveStats {
 	if h.engine == nil {
 		return nil
 	}
-	return []cache.AdaptiveStats{{K: int32(h.engine.AverageK())}}
+	s := h.engine.EvictStats()
+	return []cache.AdaptiveStats{{
+		ShardID:            0,
+		K:                  s.K,
+		GraduationRate:     s.GraduationRate,
+		EvictedUnprotected: s.EvictedUnprotected,
+		EvictedProtected:   s.EvictedProtected,
+		ReachedProtected:   s.ReachedProtected,
+		LearnedRateLow:     s.RateLow,
+		LearnedRateHigh:    s.RateHigh,
+		WindowHitRate:      s.WindowHitRate,
+		GhostCount:         s.GhostCount,
+	}}
 }
 
 // GetCacheBytes returns the bytes resident in the engine's vertex pool.
@@ -257,13 +269,22 @@ func (h *Handler) GetItemCount() int {
 	return h.engine.EffectCache().EntryCount()
 }
 
-// GetCacheEvictions returns total evictions from the vertex pool.
+// GetCacheEvictions returns the number of keys evicted under memory pressure by
+// the index's bounded sweep (the real "evicted_keys"), not reclaim churn.
 func (h *Handler) GetCacheEvictions() uint64 {
 	if h.engine == nil {
 		return 0
 	}
-	_, _, evictions := h.engine.EffectCache().Stats()
-	return evictions
+	return h.engine.EffectCache().ColdEvictions()
+}
+
+// GetVerticesReclaimed returns the number of vertices freed by reclaimUnreferenced
+// (below-LCA history and orphans) — storage churn distinct from cache eviction.
+func (h *Handler) GetVerticesReclaimed() uint64 {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().Reclaimed()
 }
 
 // RequiresAuth returns true if authentication is required

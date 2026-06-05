@@ -506,9 +506,15 @@ func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
 			break
 		}
 		if leaf.freq.CompareAndSwap(f, f+1) {
-			// Count a leaf crossing into protected status under pressure, so
-			// adaptive-k can measure the graduation rate.
-			if f == c.evictK.Load() {
+			// Count a leaf crossing into protected status, but only under
+			// eviction pressure — the graduation rate is graduated/evictions, so
+			// a graduation logged while nothing is evicting (cold start, cache
+			// not yet full) inflates the numerator against a zero denominator and
+			// pushes k around on noise. evicted>0 is the keytrie analogue of
+			// CloxCache's entryCount>=capacity guard: once a victim has been
+			// taken we are, by definition, under pressure. The extra loads only
+			// run at the f==k crossing (once per leaf lifetime), not every read.
+			if f == c.evictK.Load() && c.evictedUnprot.Load()+c.evictedProt.Load() > 0 {
 				c.reachedProt.Add(1)
 			}
 			break

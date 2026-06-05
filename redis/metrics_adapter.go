@@ -20,6 +20,7 @@
 package redis
 
 import (
+	"github.com/swytchdb/swytch/cache"
 	"github.com/swytchdb/swytch/metrics"
 	"github.com/swytchdb/swytch/redis/shared"
 )
@@ -80,9 +81,14 @@ func (a *MetricsAdapter) HitRate() float64 {
 	return a.stats.HitRate()
 }
 
-// Evictions returns the total number of cache evictions.
+// Evictions returns keys evicted under memory pressure (evicted_keys).
 func (a *MetricsAdapter) Evictions() uint64 {
 	return a.handler.GetCacheEvictions()
+}
+
+// Reclaimed returns vertices freed by reclaim (storage churn, not eviction).
+func (a *MetricsAdapter) Reclaimed() uint64 {
+	return a.handler.GetVerticesReclaimed()
 }
 
 // ItemCount returns the current number of items in the cache.
@@ -130,14 +136,10 @@ func (a *MetricsAdapter) CmdLatencyP99() float64 {
 	return a.stats.CmdLatencyP99().Seconds()
 }
 
-// AdaptiveKThresholds returns the adaptive K threshold for each shard.
-func (a *MetricsAdapter) AdaptiveKThresholds() map[int]int32 {
-	stats := a.handler.GetAdaptiveStats()
-	result := make(map[int]int32, len(stats))
-	for _, s := range stats {
-		result[s.ShardID] = s.K
-	}
-	return result
+// AdaptiveStats returns the per-domain adaptive eviction statistics (K plus the
+// internal graduation-rate / learned-threshold state that drives it).
+func (a *MetricsAdapter) AdaptiveStats() []cache.AdaptiveStats {
+	return a.handler.GetAdaptiveStats()
 }
 
 // BytesRead returns the total bytes read from network.
