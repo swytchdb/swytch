@@ -48,6 +48,11 @@ type StatsProvider interface {
 	ItemCount() int
 	MemoryBytes() int64
 	MaxMemoryBytes() int64
+	// ArenaBytes is the critbit index slot-array footprint (trie skeleton);
+	// VertexCount is the number of effects resident in the vertex pool. Together
+	// they isolate the two memory consumers — trie nodes vs effect payloads.
+	ArenaBytes() int64
+	VertexCount() int
 
 	// Latency stats (in seconds)
 	GetLatencyP50() float64
@@ -96,6 +101,8 @@ type Collector struct {
 	itemsCount         *prometheus.Desc
 	memoryBytes        *prometheus.Desc
 	memoryMaxBytes     *prometheus.Desc
+	arenaBytes         *prometheus.Desc
+	vertexCount        *prometheus.Desc
 	latencySeconds     *prometheus.Desc
 	adaptiveKThreshold *prometheus.Desc
 	graduationRate     *prometheus.Desc
@@ -182,6 +189,16 @@ func NewCollector(provider StatsProvider) *Collector {
 		memoryMaxBytes: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "memory_max_bytes"),
 			"Maximum memory configured for cache in bytes",
+			nil, nil,
+		),
+		arenaBytes: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "arena_bytes"),
+			"Critbit index slot-array footprint in bytes (trie skeleton; distinct from memory_bytes which is vertex-pool effect payloads)",
+			nil, nil,
+		),
+		vertexCount: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "vertex_count"),
+			"Effects resident in the vertex pool",
 			nil, nil,
 		),
 		latencySeconds: prometheus.NewDesc(
@@ -301,6 +318,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.itemsCount
 	ch <- c.memoryBytes
 	ch <- c.memoryMaxBytes
+	ch <- c.arenaBytes
+	ch <- c.vertexCount
 	ch <- c.latencySeconds
 	ch <- c.adaptiveKThreshold
 	ch <- c.graduationRate
@@ -351,6 +370,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.itemsCount, prometheus.GaugeValue, float64(c.provider.ItemCount()))
 	ch <- prometheus.MustNewConstMetric(c.memoryBytes, prometheus.GaugeValue, float64(c.provider.MemoryBytes()))
 	ch <- prometheus.MustNewConstMetric(c.memoryMaxBytes, prometheus.GaugeValue, float64(c.provider.MaxMemoryBytes()))
+	ch <- prometheus.MustNewConstMetric(c.arenaBytes, prometheus.GaugeValue, float64(c.provider.ArenaBytes()))
+	ch <- prometheus.MustNewConstMetric(c.vertexCount, prometheus.GaugeValue, float64(c.provider.VertexCount()))
 
 	// Latency stats
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.GetLatencyP50(), "get", "0.5")

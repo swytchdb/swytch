@@ -19,7 +19,10 @@
 
 package keytrie
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // Eviction policy constants, lifted from CloxCache. The trie runs the policy
 // as a single bounded domain (see Critbit.EvictBounded) rather than over
@@ -55,9 +58,18 @@ const (
 	// hitRateWindowSize: accesses per adaptation window.
 	hitRateWindowSize = 2000
 
-	// defaultEvictScan: leaves scanned per bounded sweep when the caller
-	// passes 0. Bounds sweep latency independent of keyspace size.
-	defaultEvictScan = 64
+	// sweepPercent: fraction of the live leaf set the eviction sweep examines as
+	// its base window, picking the LRU unprotected (freq <= k) victim among them.
+	// Proportional (like CloxCache's per-shard sweep) so a large keyspace still
+	// samples enough leaves to find a cold one — a fixed small budget can't, which
+	// is what let the adaptive k rail to the ceiling. If the base window holds no
+	// unprotected candidate, the sweep escalates toward a full pass and stops at
+	// the first unprotected leaf; only a fully-protected arena evicts a hot leaf.
+	sweepPercent = 15
+
+	// minSweep: floor for the base window so a small trie still scans a useful
+	// sample rather than a sub-1% sliver.
+	minSweep = 128
 )
 
 // SetEvictHooks installs the consumer callbacks the eviction sweep uses.
@@ -146,122 +158,197 @@ func (c *Critbit[T]) EvictStats() EvictStats {
 	}
 }
 
+// EvictBounded evicts a single leaf (or reclaims one ghost). It is a thin
+// wrapper over EvictBatch for one-at-a-time callers and tests; maxScan is
+// ignored (EvictBatch sizes its own window). Returns true if it reclaimed
+// anything.
 func (c *Critbit[T]) EvictBounded(maxScan int) bool {
-	if c.closed.Load() {
-		return false
-	}
-	if maxScan <= 0 {
-		maxScan = defaultEvictScan
+	return c.EvictBatch(1) > 0
+}
+
+// EvictBatch sweeps the leaf arena once and reclaims up to want leaves, so the
+// scan cost is amortized across many evictions — this is what lets the memory
+// governor drain under heavy write load instead of paying a full sweep per key.
+//
+// It evicts the LRU `want` of the cold (freq <= k) leaves in the window: keeping
+// the *oldest* cold leaves means a just-written key (high lastAccess) is spared,
+// preserving read-your-writes. If the window holds no cold leaf, it falls back —
+// once — to reclaiming the oldest ghost (already-evicted dead weight pinning a
+// chunk), then to evicting the LRU protected leaf. Returns the count reclaimed.
+func (c *Critbit[T]) EvictBatch(want int) int {
+	if c.closed.Load() || want <= 0 {
+		return 0
 	}
 
 	c.evictMu.Lock()
 	defer c.evictMu.Unlock()
 
 	k := c.evictK.Load()
+	// Window: wide enough to choose the want oldest cold leaves with some
+	// selectivity (so recent writes are spared), with the proportional floor.
+	window := max(want*2, int(c.size.Load())*sweepPercent/100, minSweep)
 
+	type cand struct {
+		leaf   *critNode[T]
+		access uint64
+	}
+	cands := make([]cand, 0, window)
 	var (
-		lowVictim *critNode[T]
-		lowAccess = uint64(math.MaxUint64)
-		fbVictim  *critNode[T]
-		fbAccess  = uint64(math.MaxUint64)
+		oldestGhost *critNode[T]
+		ghostAccess = uint64(math.MaxUint64)
+		fbVictim    *critNode[T]
+		fbAccess    = uint64(math.MaxUint64)
 	)
 
-	c.sampleLeaves(maxScan, func(leaf *critNode[T]) {
-		if leaf.isDeleted() { // already evicted / ghost
+	// Hold the reap read-lock across the sweep and the claims. It excludes the
+	// reap write lock — the only thing that frees/reclaims a leaf slot — so a
+	// published leaf's fields (including the non-atomic key) cannot be mutated
+	// mid-read.
+	rt := c.reapMu.RLock()
+
+	c.sweepLeaves(window, func(leaf *critNode[T]) {
+		access := leaf.lastAccess.Load()
+		if leaf.deleted.Load() {
+			// The sweep only forwards deleted leaves that are ghosts (freq < 0).
+			if access < ghostAccess {
+				oldestGhost, ghostAccess = leaf, access
+			}
 			return
 		}
 		if c.evictDecider != nil && !c.evictDecider(leaf.key) {
-			return // pinned
-		}
-		access := leaf.lastAccess.Load()
-		f := leaf.freq.Load()
-		if f <= k && access < lowAccess {
-			lowVictim, lowAccess = leaf, access
+			return // pinned (e.g. a system key)
 		}
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access
 		}
+		if leaf.freq.Load() <= k {
+			cands = append(cands, cand{leaf, access})
+		}
 	})
 
-	victim := lowVictim
-	protected := false
-	if victim == nil {
-		victim, protected = fbVictim, true
-	}
-	if victim == nil {
-		return false
+	// Keep the want oldest cold candidates (LRU); recent writes have higher
+	// lastAccess and are left alone.
+	if len(cands) > want {
+		sort.Slice(cands, func(i, j int) bool { return cands[i].access < cands[j].access })
+		cands = cands[:want]
 	}
 
-	// Soft-delete under the reap read-lock (mirrors DeleteAndSnapshot) so the
-	// reaper can't unlink the leaf mid-mutation.
-	rt := c.reapMu.RLock()
-	if victim.isDeleted() || !victim.deleted.CompareAndSwap(false, true) {
-		c.reapMu.RUnlock(rt)
-		return false
+	type evicted struct {
+		key  string
+		tips *TipSet
+		data *T
 	}
-	tips := victim.tips.Load()
-	data := victim.data.Load()
-	key := victim.key
-	victim.tips.Store(nil)
-	victim.data.Store(nil)
-	c.size.Add(-1)
-
-	// Ghost an unprotected victim — retain its frequency (negated) so a
-	// returning key warms back instead of restarting cold — when under the
-	// ghost budget; otherwise fully delete it. A ghost is a deleted leaf the
-	// reaper skips (freq < 0); a full delete (freq >= 0) gets unlinked.
-	ghosted := false
-	if !protected && c.ghostCount.Load() < c.ghostCap() {
-		for {
-			f := victim.freq.Load()
-			nf := -f
-			if nf >= 0 {
-				nf = -1
-			}
-			if victim.freq.CompareAndSwap(f, nf) {
-				break
-			}
+	victims := make([]evicted, 0, len(cands))
+	for _, cd := range cands {
+		leaf := cd.leaf
+		// Claim: deleted=false means a live, linked leaf, so a successful CAS
+		// false→true is an atomic claim. A lost CAS means a concurrent delete won.
+		if !leaf.deleted.CompareAndSwap(false, true) {
+			continue
 		}
-		c.ghostCount.Add(1)
-		ghosted = true
+		tips := leaf.tips.Load()
+		data := leaf.data.Load()
+		leaf.tips.Store(nil)
+		leaf.data.Store(nil)
+		c.size.Add(-1)
+		if c.ghostCount.Load() < c.ghostCap() {
+			// Ghost: retain the frequency (negated) for a warm restart.
+			for {
+				f := leaf.freq.Load()
+				nf := -f
+				if nf >= 0 {
+					nf = -1
+				}
+				if leaf.freq.CompareAndSwap(f, nf) {
+					break
+				}
+			}
+			c.ghostCount.Add(1)
+		} else {
+			c.deletedCount.Add(1)
+			c.enqueueReap(leaf)
+		}
+		victims = append(victims, evicted{leaf.key, tips, data})
+	}
+
+	// Fallback when the window held no cold leaf: reclaim the oldest ghost ahead
+	// of evicting a hot key; only with neither do we take the LRU protected leaf.
+	reclaimedGhost := false
+	if len(victims) == 0 {
+		if oldestGhost != nil {
+			c.reclaimGhost(oldestGhost)
+			reclaimedGhost = true
+			// Count the reclaim as an unprotected eviction (a ghost is a
+			// previously-cold key) so the adaptive-k clock keeps advancing — without
+			// this, k freezes exactly when ghost reclaims dominate (cold-scarce).
+			c.evictedUnprot.Add(1)
+		} else if fbVictim != nil && fbVictim.deleted.CompareAndSwap(false, true) {
+			tips := fbVictim.tips.Load()
+			data := fbVictim.data.Load()
+			fbVictim.tips.Store(nil)
+			fbVictim.data.Store(nil)
+			c.size.Add(-1)
+			c.deletedCount.Add(1)
+			c.enqueueReap(fbVictim)
+			victims = append(victims, evicted{fbVictim.key, tips, data})
+			c.evictedProt.Add(1)
+		}
 	} else {
-		c.deletedCount.Add(1)
+		c.evictedUnprot.Add(uint64(len(victims)))
 	}
 	c.reapMu.RUnlock(rt)
 
-	if protected {
-		c.evictedProt.Add(1)
-	} else {
-		c.evictedUnprot.Add(1)
-	}
-
-	// Release the evicted leaf's tip and payload references; evictNotify is
-	// then only responsible for the teardown side effects (unsubscribe).
-	c.fireTipDelta(tips, nil, data)
-
-	if c.evictNotify != nil {
-		var tipRefs []EffectRef
-		if tips != nil {
-			tipRefs = tips.Tips()
+	// Release tip/payload references and notify, outside the lock (the consumer
+	// callbacks may re-enter the trie).
+	for _, v := range victims {
+		c.fireTipDelta(v.tips, nil, v.data)
+		if c.evictNotify != nil {
+			var tipRefs []EffectRef
+			if v.tips != nil {
+				tipRefs = v.tips.Tips()
+			}
+			c.evictNotify(v.key, tipRefs, v.data)
 		}
-		c.evictNotify(key, tipRefs, data)
 	}
 
 	c.maybeAdaptK()
-	if !ghosted {
-		c.maybeReap()
+	c.maybeReap()
+
+	if reclaimedGhost {
+		return 1
 	}
-	return true
+	return len(victims)
 }
 
 // ghostCap bounds how many ghosts (freq-only memory of evicted keys) the trie
-// retains, roughly the live key count — ghost leaves carry no tips/data, just
-// the node, so this keeps freq memory proportional to the working set.
+// retains. A ghost is a still-linked dead leaf, so it pins its arena chunk from
+// reclamation — the cost cloxcache (fixed slots) never had. So this is kept to a
+// fraction of the live set rather than ~100% of it: enough to remember a recent
+// evicted working set for warm restart, without holding a large share of chunks
+// hostage. The eviction fallback (reclaimGhost) also draws ghosts back down when
+// cold candidates run short. Tunable.
 func (c *Critbit[T]) ghostCap() int64 {
-	if n := c.size.Load(); n > 16 {
-		return n
+	return max(c.size.Load()/8, 16)
+}
+
+// reclaimGhost converts a ghost (deleted, freq < 0) into a full delete so it is
+// unlinked and its chunk can be reclaimed. It is the eviction fallback used
+// ahead of evicting a live protected key: a ghost carries no tips/data (cleared
+// when it was first evicted), so there is nothing to release — it is pure dead
+// weight. Returns false if the ghost was concurrently promoted back to live.
+func (c *Critbit[T]) reclaimGhost(g *critNode[T]) bool {
+	for {
+		f := g.freq.Load()
+		if f >= 0 {
+			return false // promoted back to a live leaf under us
+		}
+		if g.freq.CompareAndSwap(f, 0) {
+			c.ghostCount.Add(-1)
+			c.deletedCount.Add(1)
+			c.enqueueReap(g)
+			return true
+		}
 	}
-	return 16
 }
 
 // promoteIfGhost reactivates a ghost leaf (freq < 0) into a live one with its
@@ -377,56 +464,44 @@ func (c *Critbit[T]) maybeAdaptK() {
 	}
 }
 
-// sampleLeaves calls fn on up to n live leaves drawn by independent random
-// root-to-leaf descents (a random child at each internal node). It mirrors
-// CloxCache's hash-distributed slot sampling: each descent lands somewhere
-// uncorrelated with key order, so the caller's LRU-of-sample approximates the
-// global LRU instead of the LRU of a contiguous key range. A leaf's draw
-// probability is 2^-depth, so shallow leaves are mildly oversampled — the same
-// trade-off as Redis's random-sample LRU.
-//
-// Ghost/deleted leaves are skipped and re-drawn so n counts live candidates;
-// total descents are capped at 4n so a ghost-heavy trie can't spin. Lock-free
-// read traversal. Runs under evictMu, the only mutator of evictRand.
-func (c *Critbit[T]) sampleLeaves(n int, fn func(*critNode[T])) {
-	root := c.root.Load()
-	if root == nil {
+// sweepLeaves forwards leaves to fn by advancing a persistent CLOCK hand over the
+// leaf arena's slots — the trie analogue of CloxCache's slot scan, with
+// sequential array reads instead of per-sample tree descent. It forwards live
+// leaves (counted toward the base budget) and ghosts (freq < 0, not counted, so
+// the caller can pick the oldest as an eviction fallback). It skips uninitialized
+// slots, reclaimed-chunk holes, and unlink-pending leaves. It stops after base
+// live leaves or one full pass — there is no escalation: when the window has no
+// cold leaf the caller reclaims a ghost rather than hunting further. The hand
+// persists across calls. Runs under evictMu (sole mutator of evictHand) and the
+// reap read-lock.
+func (c *Critbit[T]) sweepLeaves(base int, fn func(*critNode[T])) {
+	chunks, chunkSize := c.leafArena.chunkSnapshot()
+	total := uint64(len(chunks)) * chunkSize
+	if total == 0 {
 		return
 	}
+	if base < 1 {
+		base = 1
+	}
 
-	seen := 0
-	for attempts := 0; seen < n && attempts < n*4; attempts++ {
-		cur := root
-		for cur != nil && !cur.isLeaf {
-			dir := int(c.nextRand() & 1)
-			next := cur.child[dir].Load()
-			if next == nil { // mid-reap transient; take the sibling
-				next = cur.child[1-dir].Load()
+	hand := c.evictHand
+	live := 0
+	var i uint64
+	for ; live < base && i < total; i++ {
+		idx := (hand + i) % total
+		chunk := chunks[idx/chunkSize]
+		if chunk == nil {
+			continue // chunk was reclaimed (all its leaves died)
+		}
+		n := &chunk[idx%chunkSize]
+		if n.deleted.Load() {
+			if n.freq.Load() < 0 {
+				fn(n) // ghost — forwarded for the reclaim fallback, not counted
 			}
-			cur = next
+			continue // ghosts/uninitialized/unlink-pending don't count as live
 		}
-		if cur == nil || !cur.isLeaf {
-			continue
-		}
-		if cur.isDeleted() { // ghost/deleted: doesn't count toward the budget
-			continue
-		}
-		fn(cur)
-		seen++
+		fn(n)
+		live++
 	}
-}
-
-// nextRand advances the sweep's xorshift64 PRNG. Seeded lazily from the trie
-// clock so an un-accessed trie still yields a usable stream. Caller holds
-// evictMu, so no synchronization is required.
-func (c *Critbit[T]) nextRand() uint64 {
-	x := c.evictRand
-	if x == 0 {
-		x = c.clock.Load() | 1 // xorshift64 must not start at zero
-	}
-	x ^= x << 13
-	x ^= x >> 7
-	x ^= x << 17
-	c.evictRand = x
-	return x
+	c.evictHand = hand + i
 }

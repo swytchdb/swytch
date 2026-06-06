@@ -96,6 +96,16 @@ func (a *MetricsAdapter) ItemCount() int {
 	return a.handler.GetItemCount()
 }
 
+// ArenaBytes returns the critbit index's slot-array footprint (trie skeleton).
+func (a *MetricsAdapter) ArenaBytes() int64 {
+	return a.handler.GetArenaBytes()
+}
+
+// VertexCount returns the number of effects resident in the vertex pool.
+func (a *MetricsAdapter) VertexCount() int {
+	return a.handler.GetVertexCount()
+}
+
 // MemoryBytes returns the current memory used by cached items.
 func (a *MetricsAdapter) MemoryBytes() int64 {
 	return a.handler.GetCacheBytes()

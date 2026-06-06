@@ -232,6 +232,13 @@ type CommandHandler interface {
 	// GetItemCount returns current number of items in cache
 	GetItemCount() int
 
+	// GetArenaBytes returns the critbit index's slot-array footprint (trie
+	// skeleton), distinct from GetCacheBytes (vertex pool effect bytes)
+	GetArenaBytes() int64
+
+	// GetVertexCount returns the number of effects resident in the vertex pool
+	GetVertexCount() int
+
 	// GetCacheEvictions returns keys evicted under memory pressure (evicted_keys)
 	GetCacheEvictions() uint64
 

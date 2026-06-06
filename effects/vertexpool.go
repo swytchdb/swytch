@@ -249,31 +249,38 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 	}
 }
 
-// maxEvictionsPerTick caps how many cold keys the governor evicts in one tick
-// so a single pass can't stall on a huge eviction storm (each eviction also
-// broadcasts an unsubscribe). Pressure persisting past the cap is handled on
-// the next tick.
-const maxEvictionsPerTick = 256
+// evictBatchSize is how many keys one EvictBatch call harvests per sweep. The
+// sweep cost is amortized across the batch, so the governor drains at the batch's
+// pace rather than one-sweep-per-key. It also bounds one reap read-lock hold.
+const evictBatchSize = 4096
+
+// maxDrainPerTick caps total evictions in a single governor tick so a runaway
+// overage can't make one tick evict the whole cache at once; the remainder is
+// drained on following ticks. Sized well above the old fixed 256 so eviction can
+// actually keep up with a heavy write rate.
+const maxDrainPerTick = 1 << 18 // 262144
 
 // relieveMemoryPressure runs the two-axis reclaim under memory pressure: first
 // drop refs-0 vertices (below-LCA history and orphans — cheap, no eviction),
-// then, if the pool's own footprint still exceeds the target, evict cold keys
-// via the bounded sweep until under target or the per-tick cap is hit. Each
-// eviction releases the key's refs synchronously, so a final reclaim frees the
-// now-unreferenced vertices.
+// then, while the pool still exceeds target, evict cold keys in batches and
+// reclaim their now-unreferenced vertices after each batch. The loop drains
+// dynamically — as many batches as the overage needs — rather than stopping at a
+// fixed per-tick count, so eviction can match the write rate instead of falling
+// behind it.
 func (e *Engine) relieveMemoryPressure(targetBytes int64) {
 	e.reclaimUnreferenced()
-	evicted := 0
-	for e.effectCache.Bytes() > targetBytes && evicted < maxEvictionsPerTick {
-		if !e.index.EvictBounded(0) {
+	drained := 0
+	for e.effectCache.Bytes() > targetBytes && drained < maxDrainPerTick {
+		n := e.index.EvictBatch(evictBatchSize)
+		if n == 0 {
 			break // nothing evictable this sweep
 		}
-		evicted++
+		drained += n
+		e.reclaimUnreferenced() // release the just-evicted keys' vertices
 	}
-	if evicted > 0 {
-		e.reclaimUnreferenced()
-		slog.Debug("vertex pool: evicted cold keys under pressure",
-			"evicted", evicted, "remaining_bytes", e.effectCache.Bytes())
+	if drained > 0 {
+		slog.Debug("vertex pool: drained cold keys under pressure",
+			"evicted", drained, "remaining_bytes", e.effectCache.Bytes())
 	}
 }
 

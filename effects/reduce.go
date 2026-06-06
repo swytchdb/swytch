@@ -92,19 +92,11 @@ func ReduceChain(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect
 			continue
 		}
 
-		// SubscriptionEffect: track subscriber state (commutative metadata)
-		if sub := e.GetSubscription(); sub != nil {
-			if r == nil {
-				r = &pb.ReducedEffect{Commutative: true}
-			}
-			if r.Subscribers == nil {
-				r.Subscribers = make(map[uint64]bool)
-			}
-			if sub.Unsubscribe {
-				delete(r.Subscribers, sub.SubscriberNodeId)
-			} else {
-				r.Subscribers[sub.SubscriberNodeId] = true
-			}
+		// SubscriptionEffect: subscriber tracking is no longer part of the data
+		// reduction pipeline — it lives on leafState.subscribers (authoritative,
+		// maintained incrementally) and is stamped into a snapshot's reduced
+		// state at emit time, not rebuilt on every read. Skip it here.
+		if e.GetSubscription() != nil {
 			continue
 		}
 
@@ -488,10 +480,10 @@ func cloneReduced(r *pb.ReducedEffect) *pb.ReducedEffect {
 		c.OrderedElements = make([]*pb.ReducedElement, len(r.OrderedElements))
 		copy(c.OrderedElements, r.OrderedElements)
 	}
-	if r.Subscribers != nil {
-		c.Subscribers = make(map[uint64]bool, len(r.Subscribers))
-		maps.Copy(c.Subscribers, r.Subscribers)
-	}
+	// Subscribers is intentionally NOT cloned: it is not part of the read/data
+	// reduction pipeline. A snapshot's State.Subscribers is read directly from
+	// the cached effect at bootstrap; copying it on every read was the O(N)
+	// per-read cost this refactor removes.
 	return c
 }
 

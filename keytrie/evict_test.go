@@ -19,7 +19,11 @@
 
 package keytrie
 
-import "testing"
+import (
+	"fmt"
+	"runtime"
+	"testing"
+)
 
 func tip(seq uint64) EffectRef { return EffectRef{1, seq} }
 
@@ -83,6 +87,157 @@ func TestEvictBounded_GhostPromoteOnReinsert(t *testing.T) {
 	if g := c.ghostCount.Load(); g != 0 {
 		t.Fatalf("ghostCount = %d; want 0 after promotion", g)
 	}
+}
+
+// TestEvictBatch_EvictsOldestColdInOnePass verifies batched eviction: one sweep
+// reclaims many victims, and it takes the LRU (oldest) cold leaves, sparing the
+// most-recently-written ones (read-your-writes).
+func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+
+	const n = 100
+	keys := make([]string, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("k-%04d", i) // inserted in order → ascending lastAccess
+		c.Insert(keys[i], nil, NewTipSet(tip(uint64(i+1))))
+	}
+
+	if got := c.EvictBatch(30); got != 30 {
+		t.Fatalf("EvictBatch(30) = %d; want 30 evicted in one pass", got)
+	}
+
+	for i, k := range keys {
+		present := c.Contains(k) != nil
+		if i < 30 && present {
+			t.Fatalf("key %s is among the 30 oldest and should be evicted", k)
+		}
+		if i >= 30 && !present {
+			t.Fatalf("key %s is recent and should be spared", k)
+		}
+	}
+}
+
+// TestEvictBounded_ReclaimsGhostBeforeHotKey verifies the ghost-as-fallback
+// policy: when the sweep finds no cold (unprotected) live leaf but ghosts exist,
+// eviction reclaims the oldest ghost instead of evicting a hot (protected) key.
+func TestEvictBounded_ReclaimsGhostBeforeHotKey(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+
+	all := []string{"cold-1", "cold-2", "hot-1", "hot-2"}
+	for _, k := range all {
+		c.Insert(k, nil, NewTipSet(tip(1)))
+	}
+	// Drive the hot keys above k (=2) so they're protected.
+	for range 5 {
+		c.LoadOrStoreData("hot-1", &struct{}{})
+		c.LoadOrStoreData("hot-2", &struct{}{})
+	}
+	// Evict the two cold keys — each is the LRU unprotected leaf, so it becomes a ghost.
+	c.EvictBounded(64)
+	c.EvictBounded(64)
+	ghostsBefore := c.ghostCount.Load()
+	if ghostsBefore < 1 {
+		t.Fatalf("expected ghosts after evicting cold keys, got %d", ghostsBefore)
+	}
+
+	// Now only protected keys are live. The next eviction must reclaim a ghost.
+	if !c.EvictBounded(64) {
+		t.Fatal("EvictBounded returned false; expected a ghost reclaim")
+	}
+	if got := c.ghostCount.Load(); got >= ghostsBefore {
+		t.Fatalf("ghostCount %d -> %d; expected a ghost to be reclaimed", ghostsBefore, got)
+	}
+	for _, k := range []string{"hot-1", "hot-2"} {
+		if c.Contains(k) == nil {
+			t.Fatalf("hot key %s was evicted; a ghost should have been reclaimed instead", k)
+		}
+	}
+}
+
+// TestReap_QueueDrainUnlinks verifies the queue-driven reap: deleting a key
+// enqueues its leaf, and draining the queue unlinks it via a direct (search-free)
+// splice, leaving deletedCount at zero and survivors intact. Reaping is async
+// (Delete may also kick a background drain), so we drain-and-yield until settled.
+func TestReap_QueueDrainUnlinks(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	keys := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}
+	tips := make([]*TipSet, len(keys))
+	for i, k := range keys {
+		tips[i] = NewTipSet(tip(uint64(i + 1)))
+		c.Insert(k, nil, tips[i])
+	}
+	for i := range 4 {
+		c.Delete(keys[i], tips[i])
+	}
+
+	settled := false
+	for range 10000 {
+		for c.drainReap() > 0 {
+		}
+		if c.deletedCount.Load() == 0 {
+			settled = true
+			break
+		}
+		runtime.Gosched()
+	}
+	if !settled {
+		t.Fatalf("deletedCount = %d after draining; want 0 (all queued leaves unlinked)", c.deletedCount.Load())
+	}
+
+	for i, k := range keys {
+		got := c.Contains(k)
+		if i < 4 && got != nil {
+			t.Fatalf("deleted key %s still present after queue drain", k)
+		}
+		if i >= 4 && got == nil {
+			t.Fatalf("surviving key %s missing after queue drain", k)
+		}
+	}
+}
+
+// TestChunkReclaim_DropsFullyDeadChunk verifies that once every leaf in an arena
+// chunk has been deleted and reaped, the chunk is dropped from the arena (a nil
+// placeholder), while leaves in other chunks survive. Single-threaded, so leaf
+// allocation is sequential: the first chunkSize distinct keys land in leaf chunk 0.
+func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	const extra = 500
+	n := defaultCritbitArenaChunkSize + extra
+
+	keys := make([]string, n)
+	tips := make([]*TipSet, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("key-%08d", i)
+		tips[i] = NewTipSet(tip(uint64(i + 1)))
+		c.Insert(keys[i], nil, tips[i])
+	}
+
+	if got := len(c.leafArena.list.Load().chunks); got < 2 {
+		t.Fatalf("expected at least 2 leaf chunks after %d inserts, got %d", n, got)
+	}
+
+	// Delete every key whose leaf lives in chunk 0, then reap to completion.
+	for i := range defaultCritbitArenaChunkSize {
+		c.Delete(keys[i], tips[i])
+	}
+	for c.reap() > 0 {
+	}
+
+	if chunks := c.leafArena.list.Load().chunks; chunks[0] != nil {
+		t.Fatalf("leaf chunk 0 should be reclaimed (nil) after all its leaves died; still present")
+	}
+
+	// Survivors (chunk 1+) must remain readable, and the sweep must tolerate the
+	// reclaimed chunk.
+	for i := defaultCritbitArenaChunkSize; i < n; i++ {
+		if c.Contains(keys[i]) == nil {
+			t.Fatalf("surviving key %s missing after chunk reclaim", keys[i])
+		}
+	}
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.EvictBounded(64) // must not panic on the nil chunk
 }
 
 // TestEvictBounded_GhostNotReaped verifies the reaper leaves ghost leaves in

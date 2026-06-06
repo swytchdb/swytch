@@ -81,6 +81,19 @@ type contextKey struct {
 	// Notification intent — tracks whether this key should wake blocked clients
 	shouldNotifyData   bool // an INSERT_OP was the last data-modifying op on this key
 	shouldNotifyDelete bool // a full-key REMOVE was the last data-modifying op
+
+	// Pending peer-subscriber mutations from SubscriptionEffects emitted on this
+	// key. Applied in Flush AFTER updateIndex creates the leaf — the subscriber
+	// set lives on the leaf (leafState.subscribers), so addPeerSubscriber is a
+	// no-op until the leaf exists. The first effect on a key is often the
+	// SubscriptionEffect itself, so applying at Emit time would drop it.
+	subOps []subOp
+}
+
+// subOp is a deferred peer-subscriber mutation; see contextKey.subOps.
+type subOp struct {
+	peer        pb.NodeID
+	unsubscribe bool
 }
 
 // ContextSavepoint is an opaque snapshot of a Context's pending
@@ -259,6 +272,12 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 				"key", key,
 				"chainLen", chainLen,
 				"tips", tips)
+			// Stamp the authoritative subscriber set onto the snapshot's state.
+			// Reads no longer carry Subscribers (it left the reduce pipeline),
+			// so the compaction snapshot is where the set is persisted for a
+			// future bootstrapping peer to recover after the raw
+			// SubscriptionEffects have been compacted away.
+			result.Subscribers = c.engine.snapshotSubscribers(key)
 			snapEff := &pb.SnapshotEffect{
 				Collection: result.Collection,
 				State:      result,
@@ -672,7 +691,29 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	ck.lastOffset = offset
 	ck.notifies = append(ck.notifies, notify)
 
+	// Defer peer-subscriber tracking to Flush: the subscriber set lives on the
+	// key's leaf, which updateIndex only creates at Flush time. Self-subscribes
+	// are filtered inside addPeerSubscriber when applied.
+	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
+		ck.subOps = append(ck.subOps, subOp{
+			peer:        pb.NodeID(sub.SubscriberNodeId),
+			unsubscribe: sub.Unsubscribe,
+		})
+	}
+
 	return nil
+}
+
+// applySubOps applies a key's deferred peer-subscriber mutations after its leaf
+// has been created by updateIndex.
+func (c *Context) applySubOps(key string, ck *contextKey) {
+	for _, op := range ck.subOps {
+		if op.unsubscribe {
+			c.engine.removePeerSubscriber(key, op.peer)
+		} else {
+			c.engine.addPeerSubscriber(key, op.peer)
+		}
+	}
 }
 
 // rawEmit is the core write path: serialize, write to log, cache, and
@@ -686,16 +727,6 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 
 	slog.Debug("Emit: wrote effect",
 		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
-
-	// Track foreign peer subscriptions so flushTx's collectSubscribers
-	// sees them. Self-subscribes are filtered inside addPeerSubscriber.
-	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
-		if sub.Unsubscribe {
-			c.engine.removePeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
-		} else {
-			c.engine.addPeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
-		}
-	}
 
 	// Marshal once and reuse the length for the pool's byte accounting (avoids
 	// a redundant proto.Size walk) and the bytes for the notify. The standalone
@@ -766,6 +797,7 @@ func (c *Context) flushNonTx() error {
 		}
 		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
+		c.applySubOps(key, ck)
 
 		if c.engine.broadcaster != nil {
 			var bcastTrace []byte
@@ -956,6 +988,7 @@ func (c *Context) flushTx() error {
 	// Step 1: Update index + broadcast individual effects per key
 	for key, ck := range c.keys {
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
+		c.applySubOps(key, ck)
 
 		// Register as pending tx tip
 		var preTxDeps []Tip
@@ -1428,26 +1461,48 @@ func (c *Context) flushTx() error {
 	return nil
 }
 
-// collectSubscribers gathers unique subscriber node IDs across all touched keys.
-// Reads from the engine's peerSubscribers map — maintained incrementally by
-// ensureSubscribed (peers that NACK back are subscribed) and HandleRemote
-// (foreign SubscriptionEffect arrival/unsubscribe). Reading the DAG via
-// reconstruct here was the prior implementation; it produced subscribers:0
-// whenever reconstruct legitimately returned a Subscribers-less result
-// (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
+// collectSubscribers gathers unique subscriber node IDs across all touched
+// keys, filtered to peers that are still current cluster members. Subscriber
+// sets live on each key's leaf (leafState.subscribers), maintained
+// incrementally by ensureSubscribed (peers that NACK back are subscribed) and
+// HandleRemote (foreign SubscriptionEffect arrival/unsubscribe). Reading the
+// DAG via reconstruct here was the prior implementation; it produced
+// subscribers:0 whenever reconstruct legitimately returned a Subscribers-less
+// result (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
 // which silently dropped the bind broadcast and produced missing verdict
 // snapshots downstream.
+//
+// The membership filter is what lets a departed peer's stale id fall out
+// lazily instead of needing an eager scrub on peer removal: PeerIDs() shrinks
+// only on genuine topology removal, so a member that is merely unreachable
+// stays in the required set (flushTx then aborts when it can't respond,
+// preserving AtMostOneCommit), while a truly departed peer is dropped so the
+// key can still make progress.
 func (c *Context) collectSubscribers() []pb.NodeID {
+	var members map[pb.NodeID]struct{}
+	if c.engine.broadcaster != nil {
+		ids := c.engine.broadcaster.PeerIDs()
+		members = make(map[pb.NodeID]struct{}, len(ids))
+		for _, id := range ids {
+			members[id] = struct{}{}
+		}
+	}
 	seen := make(map[pb.NodeID]struct{})
 	for key := range c.keys {
-		inner, ok := c.engine.peerSubscribers.Load(key)
-		if !ok {
+		ls, _ := c.engine.index.LoadOrStoreData(key, &leafState{})
+		if ls == nil {
 			continue
 		}
-		inner.Range(func(id pb.NodeID, _ struct{}) bool {
+		ls.subMu.Lock()
+		for id := range ls.subscribers {
+			if members != nil {
+				if _, ok := members[id]; !ok {
+					continue
+				}
+			}
 			seen[id] = struct{}{}
-			return true
-		})
+		}
+		ls.subMu.Unlock()
 	}
 	result := make([]pb.NodeID, 0, len(seen))
 	for id := range seen {

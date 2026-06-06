@@ -58,6 +58,17 @@ type leafState struct {
 	// — the reachable DAG is immutable — so a tip change yields a different key
 	// and misses; see GetSnapshot for the store/serve invariant.
 	reduced atomic.Pointer[reducedResult]
+
+	// subscribers is the set of peer node IDs subscribed to this key, used by
+	// flushTx to address bind broadcast without re-deriving it from the DAG
+	// (reconstruct's Subscribers accumulator can return empty for legitimate
+	// reasons — verdict-only snapshot at LCA, all-lost bind set, NoopEffect
+	// chain). It lives on the leaf so it is reclaimed automatically when the key
+	// is evicted; a departed peer's stale id is filtered against current
+	// membership at broadcast time (collectSubscribers), so no eager scrub on
+	// peer removal is needed. Guarded by subMu; lazily allocated.
+	subMu       sync.Mutex
+	subscribers map[pb.NodeID]struct{}
 }
 
 // reducedResult is a cached materialized read keyed on the exact tip set it was
@@ -583,6 +594,11 @@ done:
 			slog.Debug("ensureSubscribed: bootstrap completed with partial reachability",
 				"key", key, "installed", installed, "skipped", skipped)
 		}
+		// Recover subscribers that have been compacted into snapshots. The
+		// NACK-response seeding above only learns peers that are live and
+		// authoritative right now; a peer subscribed before the last compaction
+		// (or one currently partitioned away) survives only in snapshot state.
+		e.seedSubscribersFromDag(key)
 		succeeded = true
 		return nil
 	}
@@ -598,6 +614,71 @@ done:
 	state.incomplete.Store(true)
 	go e.retryBootstrap(key, state, unique)
 	return ErrBootstrapIncomplete
+}
+
+// seedSubscribersFromDag derives the net subscriber set for key from its DAG
+// and merges it into leafState, augmenting the NACK-response seeding done
+// during the bootstrap probe. This recovers subscribers compacted into
+// snapshots whose raw SubscriptionEffects are no longer in the chain.
+//
+// Snapshots' State.Subscribers provide the base — each already folds the
+// sub/unsub events below it. Raw SubscriptionEffects above the snapshot
+// frontier apply in causal (topo) order. An unsubscribe wins over a later
+// snapshot-union that still lists the peer (the "minus interim unsubscribes"
+// rule): a tombstone blocks re-adding it, and a subsequent re-subscribe clears
+// the tombstone. Erring toward exclusion is the safe direction — a missing
+// subscriber is repaired by live notifications, whereas resurrecting an
+// unsubscribed peer would re-establish it as a holder and defeat eviction.
+// Verdict snapshots (State == nil) carry no subscribers and are skipped.
+func (e *Engine) seedSubscribersFromDag(key string) {
+	cs := e.index.Contains(key)
+	if cs == nil {
+		return
+	}
+	tips := cs.Tips()
+	if len(tips) == 0 {
+		return
+	}
+	d := newDag(e, key, "")
+	if err := d.prepare(tips); err != nil {
+		slog.Debug("seedSubscribersFromDag: prepare failed", "key", key, "error", err)
+		return
+	}
+
+	net := make(map[pb.NodeID]struct{})
+	tombstoned := make(map[pb.NodeID]struct{})
+	for _, t := range d.topoOrder {
+		eff := d.nodes[t]
+		if snap := eff.GetSnapshot(); snap != nil {
+			if snap.State != nil {
+				for id, ok := range snap.State.Subscribers {
+					if !ok {
+						continue
+					}
+					p := pb.NodeID(id)
+					if _, dead := tombstoned[p]; dead {
+						continue
+					}
+					net[p] = struct{}{}
+				}
+			}
+			continue
+		}
+		if sub := eff.GetSubscription(); sub != nil {
+			p := pb.NodeID(sub.SubscriberNodeId)
+			if sub.Unsubscribe {
+				delete(net, p)
+				tombstoned[p] = struct{}{}
+			} else {
+				net[p] = struct{}{}
+				delete(tombstoned, p)
+			}
+		}
+	}
+
+	for id := range net {
+		e.addPeerSubscriber(key, id)
+	}
 }
 
 // walkAndInstall validates each tip with a single-tip walk; tips

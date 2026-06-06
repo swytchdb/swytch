@@ -269,6 +269,23 @@ func (h *Handler) GetItemCount() int {
 	return h.engine.EffectCache().EntryCount()
 }
 
+// GetArenaBytes returns the critbit index's slot-array footprint (trie
+// skeleton), distinct from GetCacheBytes (vertex pool effect bytes).
+func (h *Handler) GetArenaBytes() int64 {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.ArenaBytes()
+}
+
+// GetVertexCount returns the number of effects resident in the vertex pool.
+func (h *Handler) GetVertexCount() int {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.VertexCount()
+}
+
 // GetCacheEvictions returns the number of keys evicted under memory pressure by
 // the index's bounded sweep (the real "evicted_keys"), not reclaim churn.
 func (h *Handler) GetCacheEvictions() uint64 {

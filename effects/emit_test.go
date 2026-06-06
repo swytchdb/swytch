@@ -148,7 +148,6 @@ func newTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       newVertexPool(),
 	}
@@ -701,6 +700,15 @@ func (m *txnMockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byt
 // --- txn integration tests ---
 
 func newTxnTestEngine(bc Broadcaster) *Engine {
+	// Subscriber tests address peer 99 (peerNodeID). collectSubscribers filters
+	// subscribers against current membership (broadcaster.PeerIDs()), so the
+	// peer must be a registered member or it would be dropped as departed.
+	// Register it (and a healthy partition, since registering a member
+	// activates the partition guard) when the test didn't set membership.
+	if m, ok := bc.(*txnMockBroadcaster); ok && m.peerIDs == nil {
+		m.peerIDs = []pb.NodeID{99}
+		m.allRegionPeersReachable = true
+	}
 	e := &Engine{
 		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
@@ -711,7 +719,6 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		effectCache:       newVertexPool(),
 	}
@@ -720,7 +727,11 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 }
 
 func TestFlushTx_NoSubscribers_CommitsImmediately(t *testing.T) {
+	// Genuinely empty cluster: no peers at all, so ensureSubscribed makes no
+	// bootstrap probes and the bind is never replicated. Explicit empty
+	// membership opts out of newTxnTestEngine's default peer seeding.
 	bc := &txnMockBroadcaster{}
+	bc.peerIDs = []pb.NodeID{}
 	e := newTxnTestEngine(bc)
 
 	ctx := e.NewContext()
