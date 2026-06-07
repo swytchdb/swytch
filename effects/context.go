@@ -1088,7 +1088,14 @@ func (c *Context) flushTx() error {
 	for key, ck := range c.keys {
 		var consumedTips []*pb.EffectRef
 		if ck.initialTips != nil {
-			consumedTips = toPbRefs(ck.initialTips.Tips())
+			// ConsumedTips is a cluster-visible causal reference, subject to
+			// the same SSI rule as eff.Deps: it must name committed state,
+			// never a foreign in-flight tx tip. resolveTipDeps substitutes any
+			// such tip for its pre-tx committed base — the same call that
+			// produced this key's data-effect Deps at Emit time. Without it the
+			// bind records an uncommitted (and possibly aborting) peer write as
+			// part of its committed base.
+			consumedTips = toPbRefs(c.engine.resolveTipDeps(ck.initialTips.Tips()))
 		}
 		kb := &pb.TransactionalBindEffect_KeyBind{
 			Key:          []byte(key),
@@ -1188,7 +1195,9 @@ func (c *Context) flushTx() error {
 	for key, ck := range c.keys {
 		var consumedTips []Tip
 		if ck.initialTips != nil {
-			consumedTips = ck.initialTips.Tips()
+			// Same substitution as the cluster-visible bind above, so the
+			// local NACK-conflict view matches what peers see.
+			consumedTips = c.engine.resolveTipDeps(ck.initialTips.Tips())
 		}
 		ptxn.keys = append(ptxn.keys, pendingTxnKey{
 			key:          key,
