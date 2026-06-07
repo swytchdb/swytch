@@ -121,6 +121,13 @@ type Engine struct {
 	// (0 = unbounded). Exposed via MemoryTarget for heartbeat telemetry.
 	memTarget int64
 
+	// evictBudget is the number of keys the governor wants evicted, computed each
+	// tick from the live-heap overage. The write path drains it inline (see
+	// drainEvictBudget) so insertion is back-pressured by eviction — you cannot
+	// add faster than you make room. The governor drains any leftover for the
+	// idle/low-write case. Zero means at/under target: writes evict nothing.
+	evictBudget atomic.Int64
+
 	closed atomic.Bool
 
 	// Transaction ID counter

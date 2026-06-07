@@ -735,6 +735,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		if c.engine.effectCache != nil {
 			c.engine.effectCache.Put(offset, eff)
 		}
+		c.engine.backpressure()
 		return offset, nil, nil
 	}
 
@@ -745,6 +746,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	if c.engine.effectCache != nil {
 		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
+	c.engine.backpressure()
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
@@ -1587,16 +1589,16 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 	}
 }
 
-// applyRefDelta is the trie's refDelta hook and the single owner of vertex
-// refcount maintenance. The trie calls it on every leaf tip-set transition —
-// insert, RemoveTips, delete, eviction — so no removal path can silently skip
-// the decref (the leaks that arose when reconstruct's RemoveTips and
-// FlushIndex's Delete bypassed the old per-call-site protocol). It increfs the
-// added index tips, decrefs the removed ones, and releases the references held
-// by a dropped leaf payload (its cached subdag's nodes). A frontier tip is
-// held by both the index and the subdag, so it is incref'd twice (here +
-// publishSubdag) and decref'd twice (here for the tip + here for the subdag).
-func (e *Engine) applyRefDelta(added, removed []Tip, dropped *leafState) {
+// applyRefDelta is the trie's refDelta hook for index-tip refcounting. The trie
+// calls it on every leaf tip-set transition — insert, RemoveTips, delete,
+// eviction — so no removal path can silently skip the decref. It increfs the
+// added index tips and decrefs the removed ones; that pins the chain *head*.
+// Everything below the head is pinned by dep-refcounting (each effect increfs the
+// deps it builds on; see VertexPool.PutSized), so when an evicted leaf's tip is
+// decref'd here and reclaimed, the dep-decref in delete() cascades the reclaim
+// down the rest of that key's chain. The cached subdag and reduced memo hold no
+// refs (pure caches), so a dropped leaf needs no extra release here.
+func (e *Engine) applyRefDelta(added, removed []Tip, _ *leafState) {
 	if e.effectCache == nil {
 		return
 	}
@@ -1605,13 +1607,6 @@ func (e *Engine) applyRefDelta(added, removed []Tip, dropped *leafState) {
 	}
 	for _, t := range removed {
 		e.effectCache.decref(t)
-	}
-	if dropped != nil {
-		if cs := dropped.subdag.Load(); cs != nil {
-			for t := range cs.nodes {
-				e.effectCache.decref(t)
-			}
-		}
 	}
 }
 

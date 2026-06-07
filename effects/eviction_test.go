@@ -20,12 +20,297 @@
 package effects
 
 import (
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 )
+
+// TestReclaim_KeepsUnreadKeyValue is the regression test for the dep-refcount
+// fix: a key that is written but never read has no subdag, so before the fix its
+// value-carrying data effect (which sits below the type-tag tip) was refs==0 and
+// reclaimUnreferenced deleted it — losing the value. With dep-refcounting the
+// type-tag tip increfs the data effect it builds on, so reclaim leaves it alone
+// and the later read still returns the value.
+func TestReclaim_KeepsUnreadKeyValue(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetRefDelta(e.applyRefDelta)
+
+	dataOff := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
+		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("hello"))},
+	})
+	tagOff := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(20), NodeId: 1, Deps: []*pb.EffectRef{toPbRef(dataOff)},
+		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_STRING}},
+	})
+	e.index.Insert("k", nil, keytrie.NewTipSet(tagOff)) // tip = type-tag, value sits below it
+
+	e.reclaimUnreferenced() // key never read → no subdag; must not shred the chain
+
+	r, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Scalar == nil || string(r.Scalar.GetRaw()) != "hello" {
+		t.Fatalf("value lost to reclamation: got %v — data effect was reclaimed out from under the tip", r)
+	}
+}
+
+// TestRefcount_ConcurrentReadsVsReclaim stresses the race between reads that
+// incref (publishSubdag / reduced memo) and the governor's reclaimUnreferenced
+// running concurrently. reclaim checks refs==0 then deletes in two steps; if a
+// read increfs in that window, reclaim frees a vertex that is now referenced —
+// the pool stops counting it while the subdag/reduced still holds it (an
+// uncounted leak, Bytes() < truth). After the stress, evicting every key must
+// still leave the pool empty; a leftover vertex is a vertex the pool lost track
+// of. Run under -race to also surface the data race directly.
+func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetRefDelta(e.applyRefDelta)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	const keys = 64
+	names := make([]string, keys)
+	for k := 0; k < keys; k++ {
+		key := fmt.Sprintf("user:c%d", k)
+		names[k] = key
+		off := log.putEffect(&pb.Effect{
+			Key: []byte(key), Hlc: sTs(int64(k + 1)), NodeId: 1,
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d", k)))},
+		})
+		e.index.Insert(key, nil, keytrie.NewTipSet(off))
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _, _, _ = e.GetSnapshot(names[(i+g)%keys])
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			e.reclaimUnreferenced()
+		}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	for iter := 0; e.index.Size() > 0; iter++ {
+		if e.index.EvictBatch(256) == 0 {
+			break
+		}
+		if iter > keys*2 {
+			t.Fatalf("eviction stuck: %d keys still indexed", e.index.Size())
+		}
+	}
+	e.reclaimUnreferenced()
+
+	if cnt := e.effectCache.EntryCount(); cnt != 0 {
+		t.Fatalf("concurrent reads vs reclaim: pool not empty after evict-all: %d vertices / %d bytes "+
+			"(reclaim freed a vertex a concurrent incref had just referenced)", cnt, e.effectCache.Bytes())
+	}
+}
+
+// TestRefcount_SubscriptionLifecycleEvictAll probes the subscription subsystem —
+// the second-largest per-key consumer in production heaps and the one the other
+// refcount tests never touch (engine.GetSnapshot doesn't subscribe). Each key is
+// subscribed via the real ensureSubscribed path (which pools + indexes a
+// SubscriptionEffect and adds an e.subscriptions entry) and read. After evicting
+// every key, both the pool and the subscriptions map must be empty: a leftover
+// pool vertex means the subscription effect's ref wasn't released; a leftover
+// subscriptions entry means eviction's teardown didn't delete it.
+func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetRefDelta(e.applyRefDelta)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("user:s%d", i)
+		if err := e.ensureSubscribed(key); err != nil {
+			t.Fatalf("ensureSubscribed(%s): %v", key, err)
+		}
+		if _, _, _, err := e.GetSnapshot(key); err != nil {
+			t.Fatalf("GetSnapshot(%s): %v", key, err)
+		}
+	}
+	if sz := e.subscriptions.Size(); sz != n {
+		t.Fatalf("expected %d subscriptions, got %d", n, sz)
+	}
+
+	for iter := 0; e.index.Size() > 0; iter++ {
+		if e.index.EvictBatch(256) == 0 {
+			break
+		}
+		if iter > n*2 {
+			t.Fatalf("eviction stuck: %d keys still indexed", e.index.Size())
+		}
+	}
+	e.reclaimUnreferenced()
+
+	if cnt := e.effectCache.EntryCount(); cnt != 0 {
+		t.Fatalf("pool not empty after evicting all subscribed keys: %d vertices / %d bytes",
+			cnt, e.effectCache.Bytes())
+	}
+	// broadcastUnsubscribe (which deletes the subscriptions entry) runs async off
+	// onLeafEvicted; give it a bounded window to drain.
+	deadline := time.Now().Add(2 * time.Second)
+	for e.subscriptions.Size() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if sz := e.subscriptions.Size(); sz != 0 {
+		t.Fatalf("subscriptions map leaked %d entries after evicting every key", sz)
+	}
+}
+
+// TestRefcount_ChurnEvictAllReclaimsPool is the adversarial version: many keys,
+// each re-written several times through the real write path (updateIndex, which
+// fires the refDelta hook to incref the new tip and decref the consumed one)
+// with a read after every write (rebuilding the subdag and reduced memo, which
+// re-incref). This is the production shape — repeated writes growing per-key
+// chains, repeated reads churning the caches. After evicting every key and
+// reclaiming, the pool must be empty: dropping a leaf has to release its tip,
+// subdag, and reduced-memo refs no matter how long the chain or how many times
+// the caches were rebuilt. A non-empty pool is a missing decref somewhere on the
+// write/read/evict cycle.
+func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetRefDelta(e.applyRefDelta)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	const keys = 100
+	const rewrites = 10
+	for k := 0; k < keys; k++ {
+		key := fmt.Sprintf("user:k%d", k)
+		var curTip Tip
+		hasCur := false
+		for w := 0; w < rewrites; w++ {
+			eff := &pb.Effect{
+				Key: []byte(key), Hlc: sTs(int64(k*1000 + w + 1)), NodeId: 1,
+				Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d-%d", k, w)))},
+			}
+			if hasCur {
+				eff.Deps = []*pb.EffectRef{toPbRef(curTip)}
+			}
+			off := log.putEffect(eff)
+			var consumed *keytrie.TipSet
+			if hasCur {
+				consumed = keytrie.NewTipSet(curTip)
+			}
+			e.updateIndex(key, consumed, off)
+			curTip = off
+			hasCur = true
+			if _, _, _, err := e.GetSnapshot(key); err != nil {
+				t.Fatalf("GetSnapshot(%s) w=%d: %v", key, w, err)
+			}
+		}
+	}
+
+	for iter := 0; e.index.Size() > 0; iter++ {
+		if e.index.EvictBatch(256) == 0 {
+			break
+		}
+		if iter > keys*2 {
+			t.Fatalf("eviction stuck: %d keys still indexed", e.index.Size())
+		}
+	}
+	e.reclaimUnreferenced()
+
+	if cnt := e.effectCache.EntryCount(); cnt != 0 {
+		t.Fatalf("churn: pool not empty after evict-all + reclaim: %d vertices / %d bytes still resident "+
+			"(missing decref on the write/read/evict cycle)", cnt, e.effectCache.Bytes())
+	}
+}
+
+// TestRefcount_EvictAllReclaimsPool is the load-bearing invariant test for the
+// vertex-pool refcount protocol. Every per-key structure that pins a vertex —
+// the index tip, the cached subdag (publishSubdag), and the reduced-result memo
+// (GetSnapshot) — must release its ref when the leaf is dropped. Build N keys
+// through the real read path (Insert + GetSnapshot, which publishes the subdag
+// and stores the reduced memo, both incref'ing vertices), then evict every key
+// and reclaim. If a single incref lacks a matching decref, the stranded vertex
+// stays at refs>0 and survives reclamation — so the pool is non-empty, which is
+// exactly the leak. A correct protocol leaves the pool completely empty.
+func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetRefDelta(e.applyRefDelta)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	const n = 300
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("user:k%d", i)
+		off := log.putEffect(&pb.Effect{
+			Key: []byte(key), Hlc: sTs(int64(10 + i)), NodeId: 1,
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("value-%d", i)))},
+		})
+		e.index.Insert(key, nil, keytrie.NewTipSet(off))
+		// Read it so the subdag and reduced memo are built and pin their vertices.
+		if _, _, _, err := e.GetSnapshot(key); err != nil {
+			t.Fatalf("GetSnapshot(%s): %v", key, err)
+		}
+	}
+
+	if got := e.effectCache.EntryCount(); got < n {
+		t.Fatalf("expected at least %d pooled effects after %d writes, got %d", n, n, got)
+	}
+
+	// Evict every key. EvictBatch fires the trie's refDelta (decref) synchronously
+	// for each dropped leaf, releasing its tip + subdag + reduced-memo refs.
+	for iter := 0; e.index.Size() > 0; iter++ {
+		if e.index.EvictBatch(512) == 0 {
+			break
+		}
+		if iter > n {
+			t.Fatalf("eviction made no progress: %d keys still indexed", e.index.Size())
+		}
+	}
+	e.reclaimUnreferenced()
+
+	if cnt := e.effectCache.EntryCount(); cnt != 0 {
+		t.Fatalf("pool not empty after evict-all + reclaim: %d vertices still resident — "+
+			"a vertex stranded at refs>0 means an incref without a matching decref (the leak)", cnt)
+	}
+}
 
 // TestEvictBounded_PinsSystemKey asserts the eviction sweep never selects a
 // "__swytch:" key as a victim (the registered decider pins it), while a

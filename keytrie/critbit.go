@@ -132,6 +132,7 @@ type Critbit[T any] struct {
 	rateHigh       atomic.Uint32 // adaptive high graduation threshold * 10000
 	lastKDir       atomic.Int32  // direction of the last k change (+1/-1/0)
 	lastAdaptCheck atomic.Uint64 // eviction count at the last adapt check
+	lastEvictClock atomic.Uint64 // trie clock at the last EvictBatch; detects eviction resuming after a pause
 	evictDecider   func(key string) bool
 	evictNotify    func(key string, tips []EffectRef, data *T)
 	evictActive    atomic.Bool // true once eviction hooks are installed

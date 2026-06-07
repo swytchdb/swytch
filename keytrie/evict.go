@@ -58,17 +58,11 @@ const (
 	// hitRateWindowSize: accesses per adaptation window.
 	hitRateWindowSize = 2000
 
-	// sweepPercent: fraction of the live leaf set the eviction sweep examines as
-	// its base window, picking the LRU unprotected (freq <= k) victim among them.
-	// Proportional (like CloxCache's per-shard sweep) so a large keyspace still
-	// samples enough leaves to find a cold one — a fixed small budget can't, which
-	// is what let the adaptive k rail to the ceiling. If the base window holds no
-	// unprotected candidate, the sweep escalates toward a full pass and stops at
-	// the first unprotected leaf; only a fully-protected arena evicts a hot leaf.
-	sweepPercent = 15
-
-	// minSweep: floor for the base window so a small trie still scans a useful
-	// sample rather than a sub-1% sliver.
+	// minSweep: floor for the per-call sweep window so a small trie still scans a
+	// useful sample rather than a sub-1% sliver. The window is now bounded to a
+	// small multiple of want (see EvictBatch) rather than a fraction of the whole
+	// keyspace, so eviction is O(want) and can run inline on the write path; the
+	// persistent clock hand covers the rest of the arena across successive calls.
 	minSweep = 128
 )
 
@@ -183,10 +177,34 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	c.evictMu.Lock()
 	defer c.evictMu.Unlock()
 
+	// Eviction here is bursty — driven by memory pressure, it pauses when under
+	// target and resumes when over (unlike CloxCache, where a write over capacity
+	// always precipitated an eviction, so eviction was continuous). reachedProt
+	// (the graduation_rate numerator) is bumped on the read path but only decayed
+	// by maybeAdaptK on the eviction path, so across a pause it accumulates with
+	// nothing balancing it: graduation_rate explodes on resume and rails adaptive
+	// k. When eviction resumes after a real gap (the read clock advanced past a
+	// full adapt window with no EvictBatch), reset the windowed graduation/eviction
+	// counters so the rate measures this episode from scratch. The learned k and
+	// rate thresholds persist — only the windowed measurement restarts.
+	now := c.clock.Load()
+	if last := c.lastEvictClock.Load(); last != 0 && now-last > hitRateWindowSize {
+		c.reachedProt.Store(0)
+		c.evictedUnprot.Store(0)
+		c.evictedProt.Store(0)
+		c.lastAdaptCheck.Store(0)
+	}
+	c.lastEvictClock.Store(now)
+
 	k := c.evictK.Load()
 	// Window: wide enough to choose the want oldest cold leaves with some
-	// selectivity (so recent writes are spared), with the proportional floor.
-	window := max(want*2, int(c.size.Load())*sweepPercent/100, minSweep)
+	// selectivity (so recent writes are spared), but bounded to a small multiple
+	// of want rather than a fraction of the whole keyspace. The persistent clock
+	// hand (evictHand in sweepLeaves) advances across calls, so successive sweeps
+	// still cover the entire arena — capping the per-call window just keeps an
+	// eviction O(want) so it can run inline on the write path as back-pressure
+	// rather than paying an O(keyspace) sweep per batch.
+	window := max(want*2, minSweep)
 
 	type cand struct {
 		leaf   *critNode[T]

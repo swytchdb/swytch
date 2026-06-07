@@ -74,6 +74,11 @@ type leafState struct {
 // reducedResult is a cached materialized read keyed on the exact tip set it was
 // derived from. The result is treated as immutable: serve and store both clone,
 // so no consumer can mutate the shared copy (filterSnapshot rewrites fields).
+//
+// result aliases the value byte slices of the effects it was reduced from
+// (cloneData/cloneReduced share Raw slices rather than copying). Those effects
+// are in the active window and kept resident by dep-refcounting, so the memo
+// needs no refcount of its own.
 type reducedResult struct {
 	tips     []Tip
 	result   *pb.ReducedEffect
@@ -135,10 +140,11 @@ func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
 }
 
 // publishSubdag installs d's prepared structure as the leaf's cached subdag.
-// The CAS ensures only the winning builder mutates the key-membership
-// refcounts: the new subdag's vertices are incref'd and the replaced subdag's
-// are decref'd exactly once. A losing builder discards its copy and leaves
-// refcounts untouched — its read still proceeds from d's local structure.
+// The subdag is a pure read cache: it does NOT refcount its nodes. The active
+// chain it caches is already kept resident by dep-refcounting (each effect
+// increfs the deps it builds on; see VertexPool.PutSized), so reconstruct's
+// inputs survive regardless of whether a subdag exists. A losing CAS builder
+// simply discards its copy.
 func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
 	cs := &cachedDag{
 		tips:      append([]Tip(nil), tips...),
@@ -146,17 +152,7 @@ func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
 		topoOrder: d.topoOrder,
 		lcaTip:    d.lcaTip,
 	}
-	old := ls.subdag.Load()
-	if ls.subdag.CompareAndSwap(old, cs) {
-		for t := range cs.nodes {
-			e.effectCache.incref(t)
-		}
-		if old != nil {
-			for t := range old.nodes {
-				e.effectCache.decref(t)
-			}
-		}
-	}
+	ls.subdag.CompareAndSwap(ls.subdag.Load(), cs)
 }
 
 // verdictEntry holds a snapshot's verdict for a txnID; snapshotTip is the
@@ -317,6 +313,10 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 			return nil, nil, 0, nil
 		}
 		if horizonClear && ls != nil {
+			// The reduced memo is a pure read cache. Its result aliases the value
+			// bytes of effects in the active window, but those are kept resident by
+			// dep-refcounting (the chain from the live tip down stays pinned), so
+			// the memo needs no refcount of its own.
 			ls.reduced.Store(&reducedResult{
 				tips:     append([]Tip(nil), tipOffsets...),
 				result:   cloneReduced(result),

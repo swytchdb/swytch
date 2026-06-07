@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // r is a test helper: r(v) creates an EffectRef with nodeID=0 and offset=v.
@@ -1988,10 +1989,20 @@ func TestReap_UnlinksDeletedLeaf(t *testing.T) {
 	c.Insert("b", nil, NewTipSet(r(2)))
 	c.Delete("a", c.Contains("a"))
 
-	if n := c.reap(); n != 1 {
-		t.Fatalf("expected 1 reaped, got %d", n)
+	// Delete may kick off the async reaper (maybeReap), which drains the deleted
+	// leaf in the background and races this synchronous reap(). Either reaper
+	// unlinks "a" — so asserting reap()'s own count is nondeterministic. Drive
+	// reaping to completion (deletedCount back to 0) and assert the durable
+	// invariant instead: "a" gone, "b" survives. Both reapers serialize on
+	// reapMu and unlinkLeaf is idempotent, so this converges regardless of timing.
+	deadline := time.Now().Add(2 * time.Second)
+	for c.deletedCount.Load() > 0 && time.Now().Before(deadline) {
+		c.reap()
 	}
 
+	if dc := c.deletedCount.Load(); dc != 0 {
+		t.Fatalf("deleted leaf not reaped: deletedCount=%d", dc)
+	}
 	if c.Contains("b") == nil {
 		t.Fatal("live key 'b' should survive reap")
 	}

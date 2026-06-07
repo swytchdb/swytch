@@ -20,9 +20,11 @@
 package effects
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 	"runtime/debug"
+	"runtime/metrics"
 	"sync/atomic"
 	"time"
 
@@ -44,11 +46,12 @@ import (
 // safe direction (under-counting lets RSS overshoot the target).
 const vertexOverhead = 96
 
-// vertex wraps an immutable effect resident in the VertexPool. size caches
-// the entry's accounted bytes so eviction can decrement the total without
-// re-marshalling. refs counts how many index tips and cached subdags include
-// this vertex (key membership); reclaimUnreferenced frees a vertex only once
-// refs hits zero.
+// vertex wraps an immutable effect resident in the VertexPool. size is a
+// per-vertex byte estimate (protoLen + vertexOverhead) kept only for reclaim
+// telemetry — it is no longer summed into a pool footprint (Bytes() reads the
+// runtime's live heap instead). refs counts how many index tips and cached
+// subdags include this vertex (key membership); reclaimUnreferenced frees a
+// vertex only once refs hits zero.
 type vertex struct {
 	eff  *pb.Effect
 	size int64
@@ -58,17 +61,20 @@ type vertex struct {
 // VertexPool is the engine's deserialized effect store: a map from Tip to
 // its effect, replacing the per-offset CloxCache. Presence in the pool means
 // "resident locally"; absence means getEffect must fetch the bytes from a
-// peer. The pool is dumb storage with byte accounting — it has no eviction
-// policy of its own. Eviction is driven by the engine memory governor, which
-// is the only component that knows a key's active DAG path and can therefore
-// choose safe victims.
+// peer. The pool is dumb storage — it has no eviction policy of its own.
+// Eviction is driven by the engine memory governor, which is the only component
+// that knows a key's active DAG path and can therefore choose safe victims.
+//
+// The pool does NOT meter its own footprint: a protoLen-based sum undercounted
+// each decoded effect graph ~3x and was blind to the off-pool per-key state
+// (subdags, reduced memos, subscriptions) that grows alongside it. Bytes()
+// reports the runtime's exact live heap instead — see Bytes.
 //
 // Per-key refcounting (incref/decref) lets eviction drop whole keys and
 // reclaim only the vertices no other key still needs; a vertex is referenced
 // by every index tip and cached subdag that includes it.
 type VertexPool struct {
-	m     *xsync.Map[Tip, *vertex]
-	bytes atomic.Int64
+	m *xsync.Map[Tip, *vertex]
 
 	hits   atomic.Uint64
 	misses atomic.Uint64
@@ -119,23 +125,40 @@ func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
 // the proto.Size walk Put would do. protoLen is the marshalled effect size (the
 // length of MarshalEffect's output, or the wire protoData); vertexOverhead is
 // added on top. Re-Put semantics match Put: an already-resident tip is kept.
+//
+// On first store, the effect increfs each of its deps: emitting (or ingesting) an
+// effect that builds on prior state is a new reference to that state, so the whole
+// chain from a live tip down stays resident even for keys that were never read
+// (no subdag exists to pin them). Snapshot effects are the cutoff — they capture
+// their deps' state into a reduced form, so they deliberately do NOT pin their
+// deps, which is what lets reclaimUnreferenced free below-snapshot history. The
+// matching decref is in delete().
 func (p *VertexPool) PutSized(tip Tip, eff *pb.Effect, protoLen int) {
 	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
-	if _, loaded := p.m.LoadOrStore(tip, nv); !loaded {
-		p.bytes.Add(nv.size)
+	if _, loaded := p.m.LoadOrStore(tip, nv); loaded {
+		return // already resident; its deps were incref'd on the first store
+	}
+	if eff.GetSnapshot() == nil {
+		for _, dep := range eff.Deps {
+			p.incref(r(dep))
+		}
 	}
 }
 
-// delete removes tip from the pool, decrements the byte total, and counts a
-// reclaim. Returns the bytes freed, or 0 if tip was absent. Its only caller is
-// reclaimUnreferenced, so this counts storage churn, not cache eviction — see
-// recordColdEviction for the latter.
+// delete removes tip from the pool, releases the chain references the effect held
+// (its dep increfs from PutSized — cascading reclaim down the chain once its top
+// is freed), and counts a reclaim. Returns the per-vertex size estimate freed
+// (telemetry only), or 0 if tip was absent. Its only caller is reclaimUnreferenced.
 func (p *VertexPool) delete(tip Tip) int64 {
 	prev, loaded := p.m.LoadAndDelete(tip)
 	if !loaded {
 		return 0
 	}
-	p.bytes.Add(-prev.size)
+	if prev.eff != nil && prev.eff.GetSnapshot() == nil {
+		for _, dep := range prev.eff.Deps {
+			p.decref(r(dep))
+		}
+	}
 	p.reclaimed.Add(1)
 	return prev.size
 }
@@ -152,25 +175,71 @@ func (p *VertexPool) rangeVertices(fn func(tip Tip, v *vertex) bool) {
 	p.m.Range(fn)
 }
 
+// vertexTombstone marks a vertex reclaimUnreferenced has claimed for deletion.
+// It is deeply negative so the refcount can never climb back to a live (>=0)
+// value through ordinary increfs, and so incref can detect the claim and refuse
+// to resurrect it. Reclaim CAS-claims 0 -> vertexTombstone, then deletes.
+const vertexTombstone = math.MinInt32 / 2
+
 // incref bumps the key-membership refcount of the vertex at tip, if resident.
 // A no-op for a non-resident tip (e.g. an effect served from the wire-parse
 // fallback that never entered the pool) — refcounting only governs pooled
 // vertices.
+//
+// It must not resurrect a vertex reclaimUnreferenced has already claimed for
+// deletion (refs < 0): the claim-then-delete is atomic with this CAS, so a
+// concurrent reader that walks a just-claimed tip simply treats it as absent
+// (the effect is still reachable via getEffect / a re-fetch). Without this
+// guard, a read could incref between reclaim's refs==0 check and its delete,
+// leaving the pool to free a vertex the read still references — a vertex that
+// stays resident off the pool's books (Bytes() drifts below true memory).
 func (p *VertexPool) incref(tip Tip) {
 	if v, ok := p.m.Load(tip); ok {
-		v.refs.Add(1)
+		for {
+			r := v.refs.Load()
+			if r < 0 {
+				return // claimed for reclamation; do not resurrect
+			}
+			if v.refs.CompareAndSwap(r, r+1) {
+				return
+			}
+		}
 	}
 }
 
 // decref lowers the key-membership refcount of the vertex at tip, if resident.
+// A refcount that goes negative means a decref had no matching incref — a
+// refcount-protocol bug that would let reclaimUnreferenced free a vertex the
+// index or a cache still references (a missing read), or strand it forever
+// (a leak). It is never correct, so it panics rather than silently underflowing.
 func (p *VertexPool) decref(tip Tip) {
 	if v, ok := p.m.Load(tip); ok {
-		v.refs.Add(-1)
+		if n := v.refs.Add(-1); n < 0 {
+			panic(fmt.Sprintf("vertex refcount underflow: tip=%v refs=%d (decref without matching incref)", tip, n))
+		}
 	}
 }
 
-// Bytes returns the accounted memory held by the pool.
-func (p *VertexPool) Bytes() int64 { return p.bytes.Load() }
+// Bytes returns the process's live heap as marked by the last GC
+// (/gc/heap/live:bytes). This is the exact, total memory signal the governor
+// triggers and sizes eviction on, and it counts everything that grows per key —
+// decoded effect graphs in the pool, off-pool subdags/reduced memos/subscription
+// state, the trie — not just the pool's slice. A protoLen-based pool sum
+// undercounted each decoded graph ~3x and was blind to the off-pool half, so
+// triggering on it let the heap reach 10GB while the pool read 3GB.
+//
+// It deliberately uses /gc/heap/live (live objects only) rather than HeapAlloc
+// (/memory/classes/heap/objects), which is live + not-yet-collected garbage and
+// sawtooths up to the GC goal (~2x live at GOGC=100). Triggering on HeapAlloc
+// fired eviction on the garbage peaks while the true working set was under
+// target. /gc/heap/live updates once per GC cycle — stable between cycles and,
+// under a churning workload, fresh well within the governor's 1s tick. metrics.Read
+// is cheap and non-STW.
+func (p *VertexPool) Bytes() int64 {
+	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	metrics.Read(s)
+	return int64(s[0].Value.Uint64())
+}
 
 // EntryCount returns the number of resident effects.
 func (p *VertexPool) EntryCount() int { return p.m.Size() }
@@ -233,82 +302,133 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 		case <-e.memGovStop:
 			return
 		case <-ticker.C:
-			// Trigger on the pool's own footprint — the bytes eviction can
-			// actually reclaim — not process RSS. RSS includes heap
-			// fragmentation, stacks, and GC overhead the pool can't shed, so
-			// triggering on it while relieveMemoryPressure stops on
-			// effectCache.Bytes() either over-evicts (when the pool dominates
-			// RSS) or burns full-pool scans evicting nothing (when it doesn't).
-			// GOMEMLIMIT (set to 95% of target in startMemoryGovernor) keeps
-			// total RSS in check via the GC; the governor keeps the pool under
-			// target.
-			if e.effectCache.Bytes() > targetBytes {
-				e.relieveMemoryPressure(targetBytes)
+			// 1. Reclaim refs-0 vertices unconditionally. They are below-LCA history
+			//    and orphans the GC still marks as live (the pool map references
+			//    them), so letting them pile up between ticks inflates the live-heap
+			//    reading with reclaimable garbage — the governor would then size a
+			//    deficit against memory that's about to free itself. Proactive
+			//    reclaim keeps Bytes() tracking the true working set.
+			e.reclaimUnreferenced()
+			// 2. Drain any budget the write path didn't (idle / low write rate), so
+			//    a quiet node still converges to target.
+			e.drainEvictBudget(maxDrainPerTick)
+			// 3. Re-measure and set the deficit for the write path to drain over the
+			//    next second as back-pressure. Sized as overage / true per-key
+			//    footprint (live heap / live keys), straight from the runtime.
+			live := e.effectCache.Bytes()
+			over := live - targetBytes
+			if over <= 0 {
+				e.evictBudget.Store(0)
+				continue
 			}
+			keys := e.index.Size()
+			if keys == 0 {
+				e.evictBudget.Store(0)
+				continue
+			}
+			avgPerKey := max(live/keys, 64)
+			e.evictBudget.Store(min(over/avgPerKey, maxDrainPerTick))
 		}
 	}
 }
 
-// evictBatchSize is how many keys one EvictBatch call harvests per sweep. The
-// sweep cost is amortized across the batch, so the governor drains at the batch's
-// pace rather than one-sweep-per-key. It also bounds one reap read-lock hold.
+// evictBatchSize is how many keys one EvictBatch call harvests per sweep when the
+// governor drains in bulk. Inline write-path drains use a much smaller cap.
 const evictBatchSize = 4096
 
-// maxDrainPerTick caps total evictions in a single governor tick so a runaway
-// overage can't make one tick evict the whole cache at once; the remainder is
-// drained on following ticks. Sized well above the old fixed 256 so eviction can
-// actually keep up with a heavy write rate.
+// inlineEvictCap bounds how many keys a single write may evict while draining the
+// budget, so back-pressure stays a steady per-insert tax rather than an
+// occasional multi-thousand-key latency spike on one unlucky write.
+const inlineEvictCap = 8
+
+// maxDrainPerTick caps the deficit the governor sets (and bulk-drains) per tick so
+// a runaway overage can't try to evict the whole cache at once; the remainder is
+// re-measured and drained on following ticks.
 const maxDrainPerTick = 1 << 18 // 262144
 
-// relieveMemoryPressure runs the two-axis reclaim under memory pressure: first
-// drop refs-0 vertices (below-LCA history and orphans — cheap, no eviction),
-// then, while the pool still exceeds target, evict cold keys in batches and
-// reclaim their now-unreferenced vertices after each batch. The loop drains
-// dynamically — as many batches as the overage needs — rather than stopping at a
-// fixed per-tick count, so eviction can match the write rate instead of falling
-// behind it.
-func (e *Engine) relieveMemoryPressure(targetBytes int64) {
-	e.reclaimUnreferenced()
-	drained := 0
-	for e.effectCache.Bytes() > targetBytes && drained < maxDrainPerTick {
-		n := e.index.EvictBatch(evictBatchSize)
-		if n == 0 {
-			break // nothing evictable this sweep
-		}
-		drained += n
-		e.reclaimUnreferenced() // release the just-evicted keys' vertices
-	}
-	if drained > 0 {
-		slog.Debug("vertex pool: drained cold keys under pressure",
-			"evicted", drained, "remaining_bytes", e.effectCache.Bytes())
+// backpressure is the write-path hook: an insert over the memory target pays for
+// a small bounded slice of eviction before returning, so insertion throughput is
+// clamped to eviction throughput — you cannot add faster than you make room. A
+// cheap atomic-load no-op in the common under-target case (budget == 0).
+func (e *Engine) backpressure() {
+	if e.evictBudget.Load() > 0 {
+		e.drainEvictBudget(inlineEvictCap)
 	}
 }
 
-// reclaimUnreferenced drops every pool vertex whose key-membership refcount is
-// zero: it is held by no current index tip and no cached subdag, so it is
-// below some LCA or an orphan and safe to evict — reconstruct never needs it
-// and getEffect re-fetches on the rare miss. This replaces the activeSet walk:
-// the maintained refcount is the membership oracle, so reclamation is a single
-// pool pass with no per-key DAG traversal. System-key effects are pinned
-// defensively (their tips keep them referenced anyway). Returns bytes freed.
+// drainEvictBudget evicts up to maxKeys keys, decrementing the shared evictBudget
+// the governor set from the live-heap overage. It is the single drain path for
+// both the governor (idle case, large maxKeys) and the write path (back-pressure,
+// inlineEvictCap). Concurrent writers share the budget via the atomic, so a burst
+// spreads the eviction work across the inserts causing it — insertion cannot
+// outrun eviction because every insert over budget does the evicting itself.
+//
+// Stops early when the budget is exhausted (at/under target) or when a sweep finds
+// nothing evictable (all pinned / empty window this pass); the persistent clock
+// hand means the next call resumes elsewhere in the arena.
+func (e *Engine) drainEvictBudget(maxKeys int) {
+	for maxKeys > 0 {
+		b := e.evictBudget.Load()
+		if b <= 0 {
+			return
+		}
+		want := int(min(b, int64(maxKeys), evictBatchSize))
+		n := e.index.EvictBatch(want)
+		if n == 0 {
+			return // nothing evictable right now; leave the budget for next time
+		}
+		e.evictBudget.Add(-int64(n))
+		maxKeys -= n
+	}
+	// Note: no reclaimUnreferenced here. EvictBatch already released each dropped
+	// leaf's tips, subdag, reduced memo, and subscription synchronously (via the
+	// refDelta hook + onLeafEvicted); the now-refs-0 pool vertices are swept by the
+	// governor's per-tick reclaim. A full pool scan must never run on the inline
+	// write-path drain.
+}
+
+// reclaimUnreferenced drops every pool vertex whose refcount is zero: it is held
+// by no current index tip and no effect that deps on it, so nothing reconstruct
+// walks from a live tip can reach it — it is below a snapshot or a true orphan,
+// and safe to free (getEffect re-fetches on the rare miss). The maintained
+// refcount is the membership oracle, so reclamation needs no per-key DAG walk.
+//
+// It loops to a fixpoint: deleting a vertex decrefs the deps it built on (see
+// delete), which can drop a parent further down the chain to refs==0, so freeing
+// the top of a now-dead chain (e.g. an evicted key's tip) cascades the reclaim
+// all the way down to its snapshot over successive passes. Bounded by chain depth
+// (compaction keeps that small). System-key effects are pinned defensively.
 func (e *Engine) reclaimUnreferenced() int64 {
 	if e.effectCache == nil {
 		return 0
 	}
-	var reclaimed int64
-	e.effectCache.rangeVertices(func(tip Tip, v *vertex) bool {
-		if v.refs.Load() > 0 {
+	var total int64
+	for {
+		var reclaimed int64
+		e.effectCache.rangeVertices(func(tip Tip, v *vertex) bool {
+			if v.eff != nil && isSystemKey(v.eff.Key) {
+				return true
+			}
+			// Atomically claim a refs==0 vertex for deletion. The CAS fails if a
+			// concurrent incref bumped it above 0 between now and the snapshot the
+			// range saw — in which case the vertex is referenced again and must
+			// survive. Only after a successful claim (which incref treats as
+			// "absent", refusing to resurrect) is it safe to delete. Without the CAS
+			// this check-then-delete races incref and frees a referenced vertex.
+			if !v.refs.CompareAndSwap(0, vertexTombstone) {
+				return true
+			}
+			reclaimed += e.effectCache.delete(tip)
 			return true
+		})
+		total += reclaimed
+		if reclaimed == 0 {
+			break // a full pass freed nothing — the cascade is drained
 		}
-		if v.eff != nil && isSystemKey(v.eff.Key) {
-			return true
-		}
-		reclaimed += e.effectCache.delete(tip)
-		return true
-	})
-	if reclaimed > 0 {
-		slog.Debug("vertex pool: reclaimed unreferenced effects",
-			"reclaimed", reclaimed, "remaining_bytes", e.effectCache.Bytes())
 	}
-	return reclaimed
+	if total > 0 {
+		slog.Debug("vertex pool: reclaimed unreferenced effects",
+			"est_bytes_freed", total, "live_heap", e.effectCache.Bytes())
+	}
+	return total
 }
