@@ -37,7 +37,6 @@ import (
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
-	"github.com/swytchdb/swytch/keytrie"
 )
 
 // ServerConfig holds configuration for the SQL server.
@@ -145,7 +144,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if engine == nil {
 		engine = effects.NewEngine(effects.EngineConfig{
 			NodeID:      pb.NewNodeID(),
-			Index:       keytrie.New(),
 			DefaultMode: effects.SafeMode,
 		})
 		ownsEngine = true

@@ -37,14 +37,27 @@ type TipSet struct {
 	tips []EffectRef // deduplicated, immutable once created
 }
 
+// smallTipSetDedup is the size below which NewTipSet deduplicates with a linear
+// scan instead of a map. Tip sets are almost always one or two tips, so the
+// map allocation is pure overhead on the hot write/ingest path; an O(n²) scan
+// over a handful of refs is cheaper than allocating and populating a map.
+const smallTipSetDedup = 8
+
 // NewTipSet creates a new TipSet from the given refs, deduplicating them.
 func NewTipSet(refs ...EffectRef) *TipSet {
 	if len(refs) == 0 {
 		return &TipSet{}
 	}
-	// Deduplicate using map
-	seen := make(map[EffectRef]struct{}, len(refs))
 	deduped := make([]EffectRef, 0, len(refs))
+	if len(refs) <= smallTipSetDedup {
+		for _, r := range refs {
+			if !slices.Contains(deduped, r) {
+				deduped = append(deduped, r)
+			}
+		}
+		return &TipSet{tips: deduped}
+	}
+	seen := make(map[EffectRef]struct{}, len(refs))
 	for _, r := range refs {
 		if _, ok := seen[r]; !ok {
 			seen[r] = struct{}{}

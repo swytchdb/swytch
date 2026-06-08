@@ -24,7 +24,6 @@ import (
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
-	"github.com/swytchdb/swytch/keytrie"
 )
 
 // TestEngineAcceptsObservationEffect proves that the effects engine
@@ -34,9 +33,7 @@ import (
 // the correct behaviour until Phase 5 fork-choice logic lands.
 func TestEngineAcceptsObservationEffect(t *testing.T) {
 	eng := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1,
-		Index:       keytrie.New(),
-		DefaultMode: effects.SafeMode,
+		NodeID: 1, DefaultMode: effects.SafeMode,
 	})
 	defer func() {
 		if err := eng.Close(); err != nil {
@@ -79,9 +76,7 @@ func TestEngineAcceptsObservationEffect(t *testing.T) {
 // RowWriteEffect.
 func TestEngineAcceptsRowWriteEffect(t *testing.T) {
 	eng := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1,
-		Index:       keytrie.New(),
-		DefaultMode: effects.SafeMode,
+		NodeID: 1, DefaultMode: effects.SafeMode,
 	})
 	defer func() {
 		if err := eng.Close(); err != nil {

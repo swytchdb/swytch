@@ -35,8 +35,8 @@ import (
 
 func newHorizonTestEngine() *Engine {
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
-		index:             keytrie.New(),
+		effectCache:       newVertexPool(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
@@ -44,8 +44,6 @@ func newHorizonTestEngine() *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -77,8 +75,8 @@ func installFakeTimers(h *HorizonSet) func() {
 
 func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
-		index:             keytrie.New(),
+		effectCache:       newVertexPool(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
@@ -86,8 +84,6 @@ func TestHorizonSet_StandaloneEngineNilHorizon(t *testing.T) {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	if e.horizon != nil {

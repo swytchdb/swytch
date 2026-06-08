@@ -74,6 +74,11 @@ type Connection struct {
 
 	// Effects engine context for migrated modules
 	EffectsCtx *effects.Context
+
+	// ReadOnlyCtx serves read-only, non-transactional commands. It answers
+	// read-misses from the cluster key filters without subscribing (free
+	// misses). Lazily created alongside EffectsCtx.
+	ReadOnlyCtx *effects.Context
 }
 
 // QueuedCommand stores a command queued during a transaction
@@ -227,8 +232,18 @@ type CommandHandler interface {
 	// GetItemCount returns current number of items in cache
 	GetItemCount() int
 
-	// GetCacheEvictions returns total evictions from the cache
+	// GetArenaBytes returns the critbit index's slot-array footprint (trie
+	// skeleton), distinct from GetCacheBytes (vertex pool effect bytes)
+	GetArenaBytes() int64
+
+	// GetVertexCount returns the number of effects resident in the vertex pool
+	GetVertexCount() int
+
+	// GetCacheEvictions returns keys evicted under memory pressure (evicted_keys)
 	GetCacheEvictions() uint64
+
+	// GetVerticesReclaimed returns vertices freed by reclaim (storage churn)
+	GetVerticesReclaimed() uint64
 
 	// RequiresAuth returns true if authentication is required
 	RequiresAuth() bool

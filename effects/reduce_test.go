@@ -561,55 +561,6 @@ func TestReduceBranch_SkipsNonDataEffects(t *testing.T) {
 
 // --- Subscription reduction tests ---
 
-func TestReduceBranch_SubscriptionCollected(t *testing.T) {
-	effects := []*pb.Effect{
-		makeDataEffect("k", 1, 1, scalarInsertRaw([]byte("val"))),
-		{Key: []byte("k"), Hlc: rTs(2), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 10}}},
-		{Key: []byte("k"), Hlc: rTs(3), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 20}}},
-	}
-	r := ReduceBranch(effects)
-	if len(r.Subscribers) != 2 {
-		t.Fatalf("expected 2 subscribers, got %d", len(r.Subscribers))
-	}
-	if _, ok := r.Subscribers[10]; !ok {
-		t.Fatal("expected node 10 subscribed")
-	}
-	if _, ok := r.Subscribers[20]; !ok {
-		t.Fatal("expected node 20 subscribed")
-	}
-}
-
-func TestReduceBranch_UnsubscribeRemoves(t *testing.T) {
-	effects := []*pb.Effect{
-		{Key: []byte("k"), Hlc: rTs(1), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 10}}},
-		{Key: []byte("k"), Hlc: rTs(2), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 20}}},
-		{Key: []byte("k"), Hlc: rTs(3), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 10, Unsubscribe: true}}},
-	}
-	r := ReduceBranch(effects)
-	if len(r.Subscribers) != 1 {
-		t.Fatalf("expected 1 subscriber, got %d", len(r.Subscribers))
-	}
-	if _, ok := r.Subscribers[10]; ok {
-		t.Fatal("node 10 should have been unsubscribed")
-	}
-	if _, ok := r.Subscribers[20]; !ok {
-		t.Fatal("expected node 20 subscribed")
-	}
-}
-
-func TestReduceBranch_SubscriptionOnlyNoData(t *testing.T) {
-	effects := []*pb.Effect{
-		{Key: []byte("k"), Hlc: rTs(1), NodeId: 1, Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 5}}},
-	}
-	r := ReduceBranch(effects)
-	if r == nil {
-		t.Fatal("expected non-nil for subscription-only branch")
-	}
-	if _, ok := r.Subscribers[5]; !ok {
-		t.Fatal("expected node 5 subscribed")
-	}
-}
-
 // --- Serialization reduction tests ---
 
 func TestReduceBranch_SerializationRequest(t *testing.T) {

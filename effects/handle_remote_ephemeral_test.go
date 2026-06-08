@@ -38,7 +38,7 @@ func newTestEngineForEphemeral(t *testing.T) *Engine {
 	log := newSnapshotLog()
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       &mockBroadcaster{},
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
@@ -47,8 +47,6 @@ func newTestEngineForEphemeral(t *testing.T) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})

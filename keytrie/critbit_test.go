@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // r is a test helper: r(v) creates an EffectRef with nodeID=0 and offset=v.
@@ -123,7 +124,7 @@ func TestTipSetNilReceiver(t *testing.T) {
 // --- Critbit tests adapted for TipSet ---
 
 func TestCritbitBasicOperations(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	// Empty tree
@@ -199,7 +200,7 @@ func TestCritbitBasicOperations(t *testing.T) {
 }
 
 func TestCritbitInsertCASFailure(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	ts1 := NewTipSet(r(100))
@@ -226,7 +227,7 @@ func TestCritbitInsertCASFailure(t *testing.T) {
 }
 
 func TestCritbitInsertNewKeySuccess(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	ts := NewTipSet(r(42))
@@ -245,7 +246,7 @@ func TestCritbitInsertNewKeySuccess(t *testing.T) {
 }
 
 func TestCritbitCloseBehavior(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 
 	ts := NewTipSet(r(100))
 	c.Insert("foo", nil, ts)
@@ -273,7 +274,7 @@ func TestCritbitCloseBehavior(t *testing.T) {
 }
 
 func TestCritbitNilCallbacks(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("foo", nil, NewTipSet(r(1)))
@@ -282,7 +283,7 @@ func TestCritbitNilCallbacks(t *testing.T) {
 }
 
 func TestCritbitMultipleKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"apple", "banana", "cherry", "date", "elderberry"}
@@ -309,7 +310,7 @@ func TestCritbitMultipleKeys(t *testing.T) {
 }
 
 func TestCritbitRange(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"c", "a", "b", "e", "d"}
@@ -335,7 +336,7 @@ func TestCritbitRange(t *testing.T) {
 }
 
 func TestCritbitRangeWithDeleted(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for _, key := range []string{"a", "b", "c", "d", "e"} {
@@ -363,7 +364,7 @@ func TestCritbitRangeWithDeleted(t *testing.T) {
 }
 
 func TestCritbitRangeFrom(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for _, key := range []string{"a", "b", "c", "d", "e"} {
@@ -428,7 +429,7 @@ func TestCritbitRangeFrom(t *testing.T) {
 }
 
 func TestCritbitRangeFromWithDeleted(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for _, key := range []string{"a", "b", "c", "d", "e"} {
@@ -447,7 +448,7 @@ func TestCritbitRangeFromWithDeleted(t *testing.T) {
 }
 
 func TestCritbitRangePrefix(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"foo:1", "foo:2", "bar:1", "foo:3", "baz:1"}
@@ -467,7 +468,7 @@ func TestCritbitRangePrefix(t *testing.T) {
 }
 
 func TestCritbitFirstLastWithPrefix(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"memtier-1", "memtier-2", "memtier-3", "other-1"}
@@ -487,7 +488,7 @@ func TestCritbitFirstLastWithPrefix(t *testing.T) {
 }
 
 func TestCritbitFirstWithDeletedLeaf(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("memtier-1", nil, NewTipSet(EffectRef{0, 0}))
@@ -516,7 +517,7 @@ func TestCritbitFirstWithDeletedLeaf(t *testing.T) {
 }
 
 func TestCritbitLastWithDeletedLeaf(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("memtier-1", nil, NewTipSet(EffectRef{0, 0}))
@@ -535,7 +536,7 @@ func TestCritbitLastWithDeletedLeaf(t *testing.T) {
 }
 
 func TestCritbitNextPrevWithPrefix(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"key:1", "key:2", "key:3", "key:4", "key:5"}
@@ -567,7 +568,7 @@ func TestCritbitNextPrevWithPrefix(t *testing.T) {
 }
 
 func TestCritbitClaim(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("foo", nil, NewTipSet(r(100)))
@@ -594,7 +595,7 @@ func TestCritbitClaim(t *testing.T) {
 }
 
 func TestCritbitClaimDeletedKey(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("foo", nil, NewTipSet(r(100)))
@@ -610,7 +611,7 @@ func TestCritbitClaimDeletedKey(t *testing.T) {
 }
 
 func TestCritbitConcurrentInsert(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	const numGoroutines = 10
@@ -640,7 +641,7 @@ func TestCritbitConcurrentInsert(t *testing.T) {
 }
 
 func TestCritbitConcurrentInsertDelete(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	const numGoroutines = 10
@@ -687,7 +688,7 @@ func TestCritbitConcurrentInsertDelete(t *testing.T) {
 
 func TestCritbitConcurrentInsertThenContains(t *testing.T) {
 	for iter := range 100 {
-		c := NewCritbit()
+		c := NewCritbit[struct{}]()
 
 		const numGoroutines = 10
 		const keysPerGoroutine = 10
@@ -727,7 +728,7 @@ func TestCritbitConcurrentInsertThenContains(t *testing.T) {
 }
 
 func TestCritbitConcurrentInsertCASStress(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	// Single key, many concurrent writers — all should eventually succeed
@@ -769,7 +770,7 @@ func TestCritbitConcurrentInsertCASStress(t *testing.T) {
 }
 
 func TestCritbitMatchPattern(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"foo", "foobar", "bar", "baz", "food"}
@@ -794,7 +795,7 @@ func TestCritbitMatchPattern(t *testing.T) {
 }
 
 func TestCritbitEdgeCases(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	// Empty string key
@@ -852,7 +853,7 @@ func TestCritbitHighestBit(t *testing.T) {
 }
 
 func BenchmarkCritbitInsert(b *testing.B) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	b.ResetTimer()
@@ -863,7 +864,7 @@ func BenchmarkCritbitInsert(b *testing.B) {
 }
 
 func BenchmarkCritbitContains(b *testing.B) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for i := range 10000 {
@@ -877,7 +878,7 @@ func BenchmarkCritbitContains(b *testing.B) {
 }
 
 func BenchmarkCritbitDelete(b *testing.B) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for i := 0; i < b.N; i++ {
@@ -892,7 +893,7 @@ func BenchmarkCritbitDelete(b *testing.B) {
 }
 
 func TestCritbitBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	makeKey := func(ms, seq uint64) string {
@@ -975,7 +976,7 @@ func TestCritbitBinaryKeys(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysDebug(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	makeKey := func(ms, seq uint64) string {
@@ -1147,7 +1148,7 @@ func TestCritbitGetDirectionEdgeCases(t *testing.T) {
 }
 
 func TestCritbitBinaryKeys0xFF(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{"\xFF", "\x00", "\xFF\xFF", "\xFF\x00", "\x00\xFF"}
@@ -1191,7 +1192,7 @@ func TestCritbitBinaryKeys0xFF(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysFullByteRange(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for i := range 256 {
@@ -1230,7 +1231,7 @@ func TestCritbitBinaryKeysFullByteRange(t *testing.T) {
 }
 
 func TestCritbitBinaryKeyDelete(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x00\x01", nil, NewTipSet(r(1)))
@@ -1276,7 +1277,7 @@ func TestCritbitBinaryKeyDelete(t *testing.T) {
 }
 
 func TestCritbitBinaryContainsMissing(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x01\x02\x03", nil, NewTipSet(r(1)))
@@ -1298,7 +1299,7 @@ func TestCritbitBinaryContainsMissing(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysVaryingLength(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := []string{
@@ -1351,7 +1352,7 @@ func TestCritbitBinaryKeysVaryingLength(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysPrefixOfEachOther(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x01\x02", nil, NewTipSet(r(1)))
@@ -1384,7 +1385,7 @@ func TestCritbitBinaryKeysPrefixOfEachOther(t *testing.T) {
 	}
 
 	// Edge case: \x01 vs \x01\x00 — extension byte is 0x00, triggers hb=0x80 fallback
-	c2 := NewCritbit()
+	c2 := NewCritbit[struct{}]()
 	defer c2.Close()
 
 	c2.Insert("\x01", nil, NewTipSet(r(10)))
@@ -1411,7 +1412,7 @@ func TestCritbitBinaryKeysPrefixOfEachOther(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysEmbeddedNulls(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	keys := map[string]uint64{
@@ -1463,7 +1464,7 @@ func TestCritbitBinaryKeysEmbeddedNulls(t *testing.T) {
 }
 
 func TestCritbitBinaryPrefixOperations(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x01\x00\x01", nil, NewTipSet(r(1)))
@@ -1530,7 +1531,7 @@ func TestCritbitBinaryPrefixOperations(t *testing.T) {
 }
 
 func TestCritbitRangeFromBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	for i := 1; i <= 5; i++ {
@@ -1594,7 +1595,7 @@ func TestCritbitRangeFromBinaryKeys(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysSingleBitDifference(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	// Insert keys that are powers of 2 (single bit set) plus zero
@@ -1652,7 +1653,7 @@ func TestCritbitBinaryKeysSingleBitDifference(t *testing.T) {
 }
 
 func TestCritbitBinaryKeysNavigationStress(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	// Insert 50 two-byte keys
@@ -1736,7 +1737,7 @@ func TestCritbitBinaryKeysNavigationStress(t *testing.T) {
 }
 
 func TestCritbitMixedBinaryAndASCII(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	ascii := []string{"foo:bar", "hello", "world"}
@@ -1800,7 +1801,7 @@ func TestCritbitMixedBinaryAndASCII(t *testing.T) {
 }
 
 func TestCritbitMatchPatternBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x01\x02\x03", nil, NewTipSet(r(1)))
@@ -1835,7 +1836,7 @@ func TestCritbitMatchPatternBinaryKeys(t *testing.T) {
 }
 
 func TestCritbitTryClaimBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x00\x01", nil, NewTipSet(r(1)))
@@ -1867,7 +1868,7 @@ func TestCritbitTryClaimBinaryKeys(t *testing.T) {
 }
 
 func TestCritbitSnapshotBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x00\x01", nil, NewTipSet(r(1)))
@@ -1912,7 +1913,7 @@ func TestCritbitSnapshotBinaryKeys(t *testing.T) {
 }
 
 func TestCritbitRemoveTipsBinaryKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	defer c.Close()
 
 	c.Insert("\x00\x01", nil, NewTipSet(r(10), r(20), r(30)))
@@ -1952,14 +1953,14 @@ func TestCritbitRemoveTipsBinaryKeys(t *testing.T) {
 // --- Reaper tests ---
 
 func TestReap_EmptyTree(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	if n := c.reap(); n != 0 {
 		t.Fatalf("expected 0 reaped from empty tree, got %d", n)
 	}
 }
 
 func TestReap_SingleDeletedRoot(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	c.Delete("a", c.Contains("a"))
 	// Delete triggers auto-reap; wait for the goroutine to finish
@@ -1972,7 +1973,7 @@ func TestReap_SingleDeletedRoot(t *testing.T) {
 }
 
 func TestReap_SingleLiveRoot(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	if n := c.reap(); n != 0 {
 		t.Fatalf("expected 0 reaped from live root, got %d", n)
@@ -1983,15 +1984,25 @@ func TestReap_SingleLiveRoot(t *testing.T) {
 }
 
 func TestReap_UnlinksDeletedLeaf(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	c.Insert("b", nil, NewTipSet(r(2)))
 	c.Delete("a", c.Contains("a"))
 
-	if n := c.reap(); n != 1 {
-		t.Fatalf("expected 1 reaped, got %d", n)
+	// Delete may kick off the async reaper (maybeReap), which drains the deleted
+	// leaf in the background and races this synchronous reap(). Either reaper
+	// unlinks "a" — so asserting reap()'s own count is nondeterministic. Drive
+	// reaping to completion (deletedCount back to 0) and assert the durable
+	// invariant instead: "a" gone, "b" survives. Both reapers serialize on
+	// reapMu and unlinkLeaf is idempotent, so this converges regardless of timing.
+	deadline := time.Now().Add(2 * time.Second)
+	for c.deletedCount.Load() > 0 && time.Now().Before(deadline) {
+		c.reap()
 	}
 
+	if dc := c.deletedCount.Load(); dc != 0 {
+		t.Fatalf("deleted leaf not reaped: deletedCount=%d", dc)
+	}
 	if c.Contains("b") == nil {
 		t.Fatal("live key 'b' should survive reap")
 	}
@@ -2001,7 +2012,7 @@ func TestReap_UnlinksDeletedLeaf(t *testing.T) {
 }
 
 func TestReap_PreservesAllLiveKeys(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	for i := range 100 {
 		c.Insert(fmt.Sprintf("key-%03d", i), nil, NewTipSet(r(uint64(i))))
 	}
@@ -2034,7 +2045,7 @@ func TestReap_PreservesAllLiveKeys(t *testing.T) {
 }
 
 func TestReap_MultiplePassesNeeded(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	for i := range 20 {
 		c.Insert(fmt.Sprintf("k%02d", i), nil, NewTipSet(r(uint64(i))))
 	}
@@ -2058,7 +2069,7 @@ func TestReap_MultiplePassesNeeded(t *testing.T) {
 }
 
 func TestReap_ReinsertAfterReap(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 	c.Insert("a", nil, NewTipSet(r(1)))
 	c.Insert("b", nil, NewTipSet(r(2)))
 	c.Delete("a", c.Contains("a"))
@@ -2078,7 +2089,7 @@ func TestReap_ReinsertAfterReap(t *testing.T) {
 }
 
 func TestReap_ConcurrentInsertAndReap(t *testing.T) {
-	c := NewCritbit()
+	c := NewCritbit[struct{}]()
 
 	// Pre-populate
 	for i := range 1000 {
@@ -2088,35 +2099,29 @@ func TestReap_ConcurrentInsertAndReap(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Writer goroutine: continuously insert/delete
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for round := range 200 {
 			key := fmt.Sprintf("k%04d", round%1000)
 			c.Delete(key, c.Contains(key))
 			c.Insert(key, nil, NewTipSet(r(uint64(round+10000))))
 		}
-	}()
+	})
 
 	// Reaper goroutine: continuously reap
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			c.reap()
 		}
-	}()
+	})
 
 	// Reader goroutine: continuously read
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			for i := range 100 {
 				c.Contains(fmt.Sprintf("k%04d", i))
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 

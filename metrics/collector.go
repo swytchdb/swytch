@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/swytchdb/swytch/cache"
 )
 
 // StatsProvider defines the interface for retrieving server statistics.
@@ -43,9 +44,15 @@ type StatsProvider interface {
 	CacheMisses() uint64
 	HitRate() float64
 	Evictions() uint64
+	Reclaimed() uint64
 	ItemCount() int
 	MemoryBytes() int64
 	MaxMemoryBytes() int64
+	// ArenaBytes is the critbit index slot-array footprint (trie skeleton);
+	// VertexCount is the number of effects resident in the vertex pool. Together
+	// they isolate the two memory consumers — trie nodes vs effect payloads.
+	ArenaBytes() int64
+	VertexCount() int
 
 	// Latency stats (in seconds)
 	GetLatencyP50() float64
@@ -55,8 +62,9 @@ type StatsProvider interface {
 	CmdLatencyP50() float64
 	CmdLatencyP99() float64
 
-	// Adaptive K threshold per shard
-	AdaptiveKThresholds() map[int]int32
+	// Adaptive eviction stats per domain (K plus the internal graduation-rate
+	// and learned-threshold state that drives it)
+	AdaptiveStats() []cache.AdaptiveStats
 
 	// Network stats
 	BytesRead() uint64
@@ -89,11 +97,22 @@ type Collector struct {
 	cacheMissesTotal   *prometheus.Desc
 	cacheHitRate       *prometheus.Desc
 	evictionsTotal     *prometheus.Desc
+	reclaimedTotal     *prometheus.Desc
 	itemsCount         *prometheus.Desc
 	memoryBytes        *prometheus.Desc
 	memoryMaxBytes     *prometheus.Desc
+	arenaBytes         *prometheus.Desc
+	vertexCount        *prometheus.Desc
 	latencySeconds     *prometheus.Desc
 	adaptiveKThreshold *prometheus.Desc
+	graduationRate     *prometheus.Desc
+	rateLow            *prometheus.Desc
+	rateHigh           *prometheus.Desc
+	evictedUnprotected *prometheus.Desc
+	evictedProtected   *prometheus.Desc
+	reachedProtected   *prometheus.Desc
+	windowHitRate      *prometheus.Desc
+	ghostCount         *prometheus.Desc
 	bytesReadTotal     *prometheus.Desc
 	bytesWrittenTotal  *prometheus.Desc
 	uptimeSeconds      *prometheus.Desc
@@ -149,7 +168,12 @@ func NewCollector(provider StatsProvider) *Collector {
 		),
 		evictionsTotal: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "evictions_total"),
-			"Total cache evictions",
+			"Keys evicted under memory pressure by the bounded sweep (evicted_keys)",
+			nil, nil,
+		),
+		reclaimedTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "reclaimed_total"),
+			"Vertices freed by reclaim (below-LCA history/orphans) — storage churn, not eviction",
 			nil, nil,
 		),
 		itemsCount: prometheus.NewDesc(
@@ -167,6 +191,16 @@ func NewCollector(provider StatsProvider) *Collector {
 			"Maximum memory configured for cache in bytes",
 			nil, nil,
 		),
+		arenaBytes: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "arena_bytes"),
+			"Critbit index slot-array footprint in bytes (trie skeleton; distinct from memory_bytes which is vertex-pool effect payloads)",
+			nil, nil,
+		),
+		vertexCount: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "vertex_count"),
+			"Effects resident in the vertex pool",
+			nil, nil,
+		),
 		latencySeconds: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "latency_seconds"),
 			"Operation latency in seconds",
@@ -175,6 +209,46 @@ func NewCollector(provider StatsProvider) *Collector {
 		adaptiveKThreshold: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_k_threshold"),
 			"Adaptive K threshold per shard",
+			[]string{"shard"}, nil,
+		),
+		graduationRate: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_graduation_rate"),
+			"Fraction of evicted candidates that graduated past k — drives k up when above rate_high, down when below rate_low",
+			[]string{"shard"}, nil,
+		),
+		rateLow: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_rate_low"),
+			"Learned graduation-rate threshold below which k decreases",
+			[]string{"shard"}, nil,
+		),
+		rateHigh: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_rate_high"),
+			"Learned graduation-rate threshold above which k increases",
+			[]string{"shard"}, nil,
+		),
+		evictedUnprotected: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_evicted_unprotected"),
+			"Windowed count of victims evicted with freq <= k (cold, expected)",
+			[]string{"shard"}, nil,
+		),
+		evictedProtected: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_evicted_protected"),
+			"Windowed count of victims evicted with freq > k (forced — pressure too high)",
+			[]string{"shard"}, nil,
+		),
+		reachedProtected: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_reached_protected"),
+			"Windowed count of leaves that graduated past k (graduation-rate numerator)",
+			[]string{"shard"}, nil,
+		),
+		windowHitRate: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "adaptive_window_hit_rate"),
+			"Current adapt-window hit rate (self-tuning gradient input)",
+			[]string{"shard"}, nil,
+		),
+		ghostCount: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "ghost_count"),
+			"Ghost leaves retained for warm restart after eviction",
 			[]string{"shard"}, nil,
 		),
 		bytesReadTotal: prometheus.NewDesc(
@@ -240,11 +314,22 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.cacheMissesTotal
 	ch <- c.cacheHitRate
 	ch <- c.evictionsTotal
+	ch <- c.reclaimedTotal
 	ch <- c.itemsCount
 	ch <- c.memoryBytes
 	ch <- c.memoryMaxBytes
+	ch <- c.arenaBytes
+	ch <- c.vertexCount
 	ch <- c.latencySeconds
 	ch <- c.adaptiveKThreshold
+	ch <- c.graduationRate
+	ch <- c.rateLow
+	ch <- c.rateHigh
+	ch <- c.evictedUnprotected
+	ch <- c.evictedProtected
+	ch <- c.reachedProtected
+	ch <- c.windowHitRate
+	ch <- c.ghostCount
 	ch <- c.bytesReadTotal
 	ch <- c.bytesWrittenTotal
 	ch <- c.uptimeSeconds
@@ -281,9 +366,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.cacheMissesTotal, prometheus.CounterValue, float64(c.provider.CacheMisses()))
 	ch <- prometheus.MustNewConstMetric(c.cacheHitRate, prometheus.GaugeValue, c.provider.HitRate())
 	ch <- prometheus.MustNewConstMetric(c.evictionsTotal, prometheus.CounterValue, float64(c.provider.Evictions()))
+	ch <- prometheus.MustNewConstMetric(c.reclaimedTotal, prometheus.CounterValue, float64(c.provider.Reclaimed()))
 	ch <- prometheus.MustNewConstMetric(c.itemsCount, prometheus.GaugeValue, float64(c.provider.ItemCount()))
 	ch <- prometheus.MustNewConstMetric(c.memoryBytes, prometheus.GaugeValue, float64(c.provider.MemoryBytes()))
 	ch <- prometheus.MustNewConstMetric(c.memoryMaxBytes, prometheus.GaugeValue, float64(c.provider.MaxMemoryBytes()))
+	ch <- prometheus.MustNewConstMetric(c.arenaBytes, prometheus.GaugeValue, float64(c.provider.ArenaBytes()))
+	ch <- prometheus.MustNewConstMetric(c.vertexCount, prometheus.GaugeValue, float64(c.provider.VertexCount()))
 
 	// Latency stats
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.GetLatencyP50(), "get", "0.5")
@@ -293,9 +381,19 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.CmdLatencyP50(), "cmd", "0.5")
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.CmdLatencyP99(), "cmd", "0.99")
 
-	// Adaptive K thresholds
-	for shard, k := range c.provider.AdaptiveKThresholds() {
-		ch <- prometheus.MustNewConstMetric(c.adaptiveKThreshold, prometheus.GaugeValue, float64(k), itoa(shard))
+	// Adaptive eviction internals (K plus the graduation-rate / learned-threshold
+	// state that drives it, per domain).
+	for _, s := range c.provider.AdaptiveStats() {
+		shard := itoa(s.ShardID)
+		ch <- prometheus.MustNewConstMetric(c.adaptiveKThreshold, prometheus.GaugeValue, float64(s.K), shard)
+		ch <- prometheus.MustNewConstMetric(c.graduationRate, prometheus.GaugeValue, s.GraduationRate, shard)
+		ch <- prometheus.MustNewConstMetric(c.rateLow, prometheus.GaugeValue, s.LearnedRateLow, shard)
+		ch <- prometheus.MustNewConstMetric(c.rateHigh, prometheus.GaugeValue, s.LearnedRateHigh, shard)
+		ch <- prometheus.MustNewConstMetric(c.evictedUnprotected, prometheus.GaugeValue, float64(s.EvictedUnprotected), shard)
+		ch <- prometheus.MustNewConstMetric(c.evictedProtected, prometheus.GaugeValue, float64(s.EvictedProtected), shard)
+		ch <- prometheus.MustNewConstMetric(c.reachedProtected, prometheus.GaugeValue, float64(s.ReachedProtected), shard)
+		ch <- prometheus.MustNewConstMetric(c.windowHitRate, prometheus.GaugeValue, s.WindowHitRate, shard)
+		ch <- prometheus.MustNewConstMetric(c.ghostCount, prometheus.GaugeValue, float64(s.GhostCount), shard)
 	}
 
 	// Network stats

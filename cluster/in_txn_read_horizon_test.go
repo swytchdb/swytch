@@ -30,7 +30,6 @@ import (
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
-	"github.com/swytchdb/swytch/keytrie"
 )
 
 // gatedPairedBus is a two-node in-process replication shim that wires two
@@ -202,6 +201,10 @@ func (g *gatedBroadcaster) Replicate(notify *pb.OffsetNotify, _ []byte) error {
 	return err
 }
 
+func (g *gatedBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return g.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (g *gatedBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
 	return g.bus.deliver(target, notify, notify.EffectData)
 }
@@ -223,7 +226,7 @@ func (g *gatedBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
 	if cache == nil {
 		return nil, fmt.Errorf("gatedBroadcaster: peer %v has no effect cache", g.peer)
 	}
-	eff, ok := cache.Get(effects.Tip{ref.NodeId, ref.Offset}, 0)
+	eff, ok := cache.Get(effects.Tip{ref.NodeId, ref.Offset})
 	if !ok {
 		return nil, fmt.Errorf("gatedBroadcaster: peer %v missing effect %+v", g.peer, ref)
 	}
@@ -358,14 +361,10 @@ func TestInTxnReadObservesInconsistentSnapshotAcrossHorizon(t *testing.T) {
 
 	// Both engines get a real broadcaster, which auto-inits horizon.
 	engA := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1001,
-		Index:       keytrie.New(),
-		DefaultMode: effects.UnsafeMode, // skip majority-partition gating
+		NodeID: 1001, DefaultMode: effects.UnsafeMode, // skip majority-partition gating
 	})
 	engB := effects.NewEngine(effects.EngineConfig{
-		NodeID:      1002,
-		Index:       keytrie.New(),
-		DefaultMode: effects.UnsafeMode,
+		NodeID: 1002, DefaultMode: effects.UnsafeMode,
 	})
 
 	// Hook SetBroadcaster so the engines learn about each other via the

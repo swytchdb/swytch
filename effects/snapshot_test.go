@@ -43,7 +43,7 @@ func sTs(nanos int64) *timestamppb.Timestamp {
 // --- snapshotLog: test helper for pre-populating the effect DAG ---
 
 type snapshotLog struct {
-	effectCache *clox.CloxCache[Tip, *pb.Effect]
+	effectCache *VertexPool
 	entries     map[Tip][]byte // raw proto bytes, for tests that inspect wire data
 	nextOff     uint64
 	nodeID      uint64
@@ -51,7 +51,7 @@ type snapshotLog struct {
 
 func newSnapshotLog() *snapshotLog {
 	return &snapshotLog{
-		effectCache: clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache: newVertexPool(),
 		entries:     make(map[Tip][]byte),
 		nextOff:     100,
 		nodeID:      1,
@@ -77,27 +77,32 @@ func (l *snapshotLog) putEffect(eff *pb.Effect) Tip {
 // --- helpers ---
 
 func newSnapshotEngine(log *snapshotLog) *Engine {
-	var ec *clox.CloxCache[Tip, *pb.Effect]
+	var ec *VertexPool
 	if log != nil {
 		ec = log.effectCache
 	} else {
-		ec = clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024))
+		ec = newVertexPool()
 	}
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		effectCache:       ec,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
+	// Seed the engine's offset counter far above snapshotLog's faked offset space
+	// (base 100, +100/effect). In production every effect — data, subscription,
+	// bind — is minted from this one counter, so Tips are globally unique; the test
+	// log fakes pre-existing effects with a separate counter, so without this the
+	// subscription effects ensureSubscribed emits during a read would climb into the
+	// log's range and alias a data effect's Tip (a collision that desyncs refcounts).
+	e.nextOff.Store(1 << 32)
 	return e
 }
 
@@ -985,7 +990,7 @@ func TestEmitWithoutSnapshotTips_ReadsIndex(t *testing.T) {
 		t.Fatalf("expected 1 tip after flush, got %v", tips)
 	}
 	newOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(newOff, 0)
+	cached, ok := e.effectCache.Get(newOff)
 	if !ok {
 		t.Fatal("emitted effect not in effectCache")
 	}
@@ -1002,6 +1007,10 @@ func TestEmitWithoutSnapshotTips_ReadsIndex(t *testing.T) {
 type bootstrapBroadcaster struct {
 	mockBroadcaster
 	remoteEngine *Engine // the "remote" engine that has data
+}
+
+func (b *bootstrapBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return b.ReplicateTo(notify, notify.EffectData, target)
 }
 
 func (b *bootstrapBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {
@@ -1023,7 +1032,7 @@ func (b *bootstrapBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
 	}
 	offset := r(ref)
 	// Read from remote engine's effect cache
-	cached, ok := b.remoteEngine.effectCache.Get(offset, 0)
+	cached, ok := b.remoteEngine.effectCache.Get(offset)
 	if !ok {
 		return nil, fmt.Errorf("effect %v not found in remote cache", offset)
 	}
@@ -1047,16 +1056,14 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 	remoteLog.nextOff = 10000
 	remoteEngine := &Engine{
 		effectCache:       remoteLog.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		nodeID:            2,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	remoteEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1090,17 +1097,15 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 
 	localEngine := &Engine{
 		effectCache:       localLog.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	localEngine.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1109,6 +1114,12 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 	nackForwarder := &nackForwardBroadcaster{target: localEngine}
 	remoteEngine.broadcaster = nackForwarder
 	bc.remoteEngine = remoteEngine
+
+	// Peer 2 holds "shared-key"; in a real cluster its SubscriptionEffect would
+	// have populated our filter. Without this, clusterMaybeHasKey is false and
+	// the subscribe takes the async-announce path (nothing to fetch) — but here
+	// there IS remote state to fetch, so the blocking bootstrap must run.
+	localEngine.peerFilterAdd(2, "shared-key")
 
 	// Now the local engine reads "shared-key" for the first time
 	r, _, _, err := localEngine.GetSnapshot("shared-key")
@@ -1155,9 +1166,12 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{10, 20}, allRegionPeersReachable: true}
 	e := newSnapshotEngine(log)
 	e.broadcaster = bc
-	bc.nackTarget = e // wire up so empty NACKs arrive
+	bc.nackTarget = e // wired, but the async path won't drive it
 
-	// Peers exist but have no data for this key — empty NACKs
+	// Peers exist but none holds this key (clusterMaybeHasKey is false): there
+	// is nothing to bootstrap, so the subscribe takes the async-announce path —
+	// no blocking ReplicateTo rounds, just a fire-and-forget broadcast — and
+	// the read returns a miss.
 	r, _, _, err := e.GetSnapshot("missing-key")
 	if err != nil {
 		t.Fatal(err)
@@ -1165,10 +1179,11 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	if r != nil {
 		t.Fatal("expected nil when all peers have no data")
 	}
-	// Should have sent ReplicateTo to both peers twice (two rounds)
-	if len(bc.replicateToPeers) != 4 {
-		t.Fatalf("expected 4 ReplicateTo calls (2 peers x 2 rounds), got %d", len(bc.replicateToPeers))
+	if len(bc.replicateToPeers) != 0 {
+		t.Fatalf("nowhere-key subscribe must not block on ReplicateTo rounds, got %d", len(bc.replicateToPeers))
 	}
+	// The announce is fire-and-forget (go), so observe it through the lock.
+	waitForBroadcast(t, bc)
 }
 
 func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
@@ -1176,17 +1191,15 @@ func TestHandleRemote_SubscriptionEffect_SendsNack(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1241,17 +1254,15 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1296,17 +1307,15 @@ func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
@@ -1360,17 +1369,15 @@ func TestHandleRemote_TxnBind_AuthorityViaNonCanonicalKey(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := &Engine{
 		effectCache:       log.effectCache,
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})

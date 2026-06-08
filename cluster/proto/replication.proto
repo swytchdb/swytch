@@ -370,6 +370,8 @@ message NackNotify {
   repeated NackTipDetail tip_details = 4;  // metadata per tip for smart conflict detection
   bool not_subscribed = 5;           // receiver is not subscribed to this key, so it discarded the write
   repeated EffectRef causal_chain = 6; // all effect refs from tips to LCA snapshot; lets receiver bulk-fetch
+  bytes node_key_filter = 7;         // responder's own per-node cuckoo filter of keys it holds (for free read-misses)
+  uint64 filter_version = 8;         // monotonic version of node_key_filter; cache replace-if-newer
 }
 
 // ForwardedTransaction carries an entire transaction to be executed on

@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	clox "github.com/swytchdb/swytch/cache"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
 )
@@ -81,12 +80,12 @@ func (h *EngineEffectHandler) HandleNack(nack *pb.NackNotify) error {
 // The receiver reconstructs the full log entry including the key,
 // which is stored separately from the effect data in the log.
 type EngineLogReader struct {
-	effectCache *clox.CloxCache[effects.Tip, *pb.Effect]
+	effectCache *effects.VertexPool
 }
 
-// NewEngineLogReader wraps an effect cache.
-func NewEngineLogReader(cache *clox.CloxCache[effects.Tip, *pb.Effect]) *EngineLogReader {
-	return &EngineLogReader{effectCache: cache}
+// NewEngineLogReader wraps an effect pool.
+func NewEngineLogReader(pool *effects.VertexPool) *EngineLogReader {
+	return &EngineLogReader{effectCache: pool}
 }
 
 // ReadEffect looks the effect up in the cache and returns it in wire
@@ -96,7 +95,7 @@ func (r *EngineLogReader) ReadEffect(ref *pb.EffectRef) ([]byte, error) {
 		return nil, fmt.Errorf("effect cache not initialized")
 	}
 	key := effects.Tip{ref.NodeId, ref.Offset}
-	eff, ok := r.effectCache.Get(key, 0)
+	eff, ok := r.effectCache.Get(key)
 	if !ok {
 		return nil, fmt.Errorf("effect not found at %v", ref)
 	}

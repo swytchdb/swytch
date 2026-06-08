@@ -25,9 +25,9 @@ import (
 )
 
 func TestGetAvailableMemory(t *testing.T) {
-	mem := getAvailableMemory()
+	mem := GetAvailableMemory()
 	if mem == 0 {
-		t.Fatal("getAvailableMemory returned 0")
+		t.Fatal("GetAvailableMemory returned 0")
 	}
 	t.Logf("available memory: %s", FormatMemory(mem))
 
@@ -61,7 +61,7 @@ func TestEnforceMemoryTarget_SetsGOMEMLIMIT(t *testing.T) {
 		t.Errorf("GOMEMLIMIT was not set, got %d", newLimit)
 	}
 
-	availMem := getAvailableMemory()
+	availMem := GetAvailableMemory()
 	expectedLimit := int64(float64(availMem) * 0.5)
 
 	// Should be within 10% of expected
@@ -165,7 +165,7 @@ func TestEnforceMemoryTarget_StoresMemoryLimit(t *testing.T) {
 		t.Errorf("expected positive memory limit, got %d", limit)
 	}
 
-	availMem := getAvailableMemory()
+	availMem := GetAvailableMemory()
 	expected := int64(float64(availMem) * 0.8)
 
 	// Should be within 10%

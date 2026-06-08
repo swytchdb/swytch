@@ -715,45 +715,6 @@ func TestMerge2_ExpiryFromWinner(t *testing.T) {
 
 // --- Subscriber merge tests ---
 
-func TestMerge2_SubscribersUnion(t *testing.T) {
-	a := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 5, 1, 1)
-	a.Subscribers = map[uint64]bool{10: true, 20: true}
-	b := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 3, 2, 2)
-	b.Subscribers = map[uint64]bool{20: true, 30: true}
-	r := Merge2(a, b)
-	if len(r.Subscribers) != 3 {
-		t.Fatalf("expected 3 subscribers, got %d", len(r.Subscribers))
-	}
-	for _, id := range []uint64{10, 20, 30} {
-		if _, ok := r.Subscribers[id]; !ok {
-			t.Fatalf("expected node %d subscribed", id)
-		}
-	}
-}
-
-func TestMerge2_SubscribersNilHandling(t *testing.T) {
-	a := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 5, 1, 1)
-	a.Subscribers = map[uint64]bool{10: true}
-	b := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 3, 2, 2)
-	// b has no subscribers
-	r := Merge2(a, b)
-	if len(r.Subscribers) != 1 {
-		t.Fatalf("expected 1 subscriber, got %d", len(r.Subscribers))
-	}
-	if _, ok := r.Subscribers[10]; !ok {
-		t.Fatal("expected node 10 subscribed")
-	}
-}
-
-func TestMerge2_BothNoSubscribers(t *testing.T) {
-	a := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 5, 1, 1)
-	b := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 3, 2, 2)
-	r := Merge2(a, b)
-	if r.Subscribers != nil {
-		t.Fatalf("expected nil subscribers, got %v", r.Subscribers)
-	}
-}
-
 // --- Serialization leader merge tests ---
 
 func TestMerge2_SerializationBothNil(t *testing.T) {
@@ -975,19 +936,6 @@ func TestMergeN_DeterministicKeyed(t *testing.T) {
 	}
 }
 
-func TestMergeN_SubscribersUnionAllBranches(t *testing.T) {
-	a := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 5, 1, 1)
-	a.Subscribers = map[uint64]bool{10: true}
-	b := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 3, 2, 2)
-	b.Subscribers = map[uint64]bool{20: true}
-	c := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 7, 3, 3)
-	c.Subscribers = map[uint64]bool{30: true}
-	r := MergeN([]*pb.ReducedEffect{a, b, c})
-	if len(r.Subscribers) != 3 {
-		t.Fatalf("expected 3 subscribers, got %d", len(r.Subscribers))
-	}
-}
-
 func TestMergeN_SerializationFromAllBranches(t *testing.T) {
 	// Leader from branch with lowest fork_choice_hash wins (FWW)
 	a := reducedScalarInt(pb.MergeRule_ADDITIVE_INT, true, 5, 3, 3)
@@ -1057,34 +1005,6 @@ func copyBranches(branches []*pb.ReducedEffect, order []int) []*pb.ReducedEffect
 
 // --- Snapshot safety: merge must not mutate inputs ---
 
-func TestMerge2_DoesNotMutateInputs_NonCommScalar(t *testing.T) {
-	// Both non-commutative scalars → hlcWinner path (previously returned input directly)
-	a := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("alice"), 5, 1)
-	b := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("bob"), 10, 2)
-
-	// Capture originals
-	aSubs := a.Subscribers
-	bSubs := b.Subscribers
-
-	a.Subscribers = map[uint64]bool{10: true}
-	b.Subscribers = map[uint64]bool{20: true}
-
-	merged := Merge2(a, b)
-
-	// merged must have union of subscribers
-	if len(merged.Subscribers) != 2 {
-		t.Fatalf("expected 2 subscribers in merged, got %d", len(merged.Subscribers))
-	}
-
-	// Inputs must be unmodified
-	if len(a.Subscribers) != 1 || !a.Subscribers[10] {
-		t.Fatalf("a.Subscribers was mutated: %v (was %v)", a.Subscribers, aSubs)
-	}
-	if len(b.Subscribers) != 1 || !b.Subscribers[20] {
-		t.Fatalf("b.Subscribers was mutated: %v (was %v)", b.Subscribers, bSubs)
-	}
-}
-
 func TestMerge2_DoesNotMutateInputs_CrossCollection(t *testing.T) {
 	a := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("string"), 1, 1)
 	b := reducedKeyed(pb.MergeRule_LAST_WRITE_WINS, false, 2, 2, map[string]*pb.ReducedElement{
@@ -1108,25 +1028,22 @@ func TestMerge2_DoesNotMutateInputs_CrossCollection(t *testing.T) {
 }
 
 func TestMergeN_DoesNotMutateInputs(t *testing.T) {
-	// Three non-commutative branches, no commutative — the LWW winner
-	// was previously mutated in-place by MergeN's subscriber union.
+	// Three non-commutative branches. MergeN must clone rather than mutate the
+	// branch it bases the result on when folding metadata in.
 	a := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("alice"), 5, 1)
-	a.Subscribers = map[uint64]bool{10: true}
 	b := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("bob"), 10, 2)
-	b.Subscribers = map[uint64]bool{20: true}
 	c := reducedScalarRaw(pb.MergeRule_LAST_WRITE_WINS, false, []byte("charlie"), 3, 3)
-	c.Subscribers = map[uint64]bool{30: true}
+	leader := uint64(7)
+	b.SerializationLeader = &leader // b is the LWW (hlc=10) winner
 
 	merged := MergeN([]*pb.ReducedEffect{a, b, c})
 
-	// merged should have all 3 subscribers
-	if len(merged.Subscribers) != 3 {
-		t.Fatalf("expected 3 subscribers in merged, got %d", len(merged.Subscribers))
+	if merged.SerializationLeader == nil || *merged.SerializationLeader != 7 {
+		t.Fatalf("expected leader=7 in merged, got %v", merged.SerializationLeader)
 	}
-
-	// b is the LWW winner — it must NOT have been mutated
-	if len(b.Subscribers) != 1 || !b.Subscribers[20] {
-		t.Fatalf("b.Subscribers was mutated to %v, expected {20:true}", b.Subscribers)
+	// The winning branch must NOT have been mutated in place.
+	if b.SerializationLeader == nil || *b.SerializationLeader != 7 {
+		t.Fatal("b.SerializationLeader was mutated")
 	}
 }
 

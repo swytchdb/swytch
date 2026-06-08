@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/swytch/cache"
 	"github.com/swytchdb/swytch/metrics"
 	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/swytchdb/swytch/telemetry"
@@ -311,18 +312,20 @@ Examples:
 					nodes = len(activeRuntime.PeerManager.PeerIDs()) + 1
 				}
 				ec := activeRuntime.Engine.EffectCache()
-				hits, misses, evictions := ec.Stats()
+				hits, misses, _ := ec.Stats()
+				// Capacity is the pool's byte budget (it is byte-bounded, not
+				// slot-bounded), in the same unit as MemoryUsage/MemoryAvail.
 				return telemetry.HeartbeatStats{
 					Nodes:         nodes,
 					UptimeSeconds: int(adapter.UptimeSeconds()),
-					MemoryAvail:   ec.MemoryLimit(),
+					MemoryAvail:   int64(cache.GetAvailableMemory()),
 					MemoryUsage:   ec.Bytes(),
 					HitCount:      hits,
 					MissCount:     misses,
-					Evictions:     evictions,
+					Evictions:     ec.ColdEvictions(),
 					EntryCount:    ec.EntryCount(),
-					Capacity:      ec.Capacity(),
-					AverageK:      ec.AverageK(),
+					Capacity:      int(activeRuntime.Engine.MemoryTarget()),
+					AverageK:      activeRuntime.Engine.AverageK(),
 				}
 			},
 		})

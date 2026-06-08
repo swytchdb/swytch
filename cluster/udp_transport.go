@@ -23,7 +23,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"google.golang.org/protobuf/proto"
@@ -50,19 +49,24 @@ const (
 // MarshalNotifyPacket builds a notify plaintext body:
 // [1:type][8:requestID LE][proto-marshaled OffsetNotify]
 func MarshalNotifyPacket(requestID uint64, notify *pb.OffsetNotify) ([]byte, error) {
-	notify.SendTime = uint64(time.Now().UnixNano())
-
 	protoBytes, err := proto.Marshal(notify)
 	if err != nil {
 		return nil, fmt.Errorf("marshal OffsetNotify: %w", err)
 	}
+	return AssembleNotifyPacket(requestID, protoBytes), nil
+}
 
-	buf := make([]byte, notifyHeaderSize+len(protoBytes))
+// AssembleNotifyPacket frames a pre-marshalled OffsetNotify body into a notify
+// packet with the per-request header. The proto body is identical for every
+// recipient of the same notify, so a fan-out (e.g. a bind to all subscribers)
+// marshals it once and assembles a packet per peer here — only the requestID
+// in the header varies.
+func AssembleNotifyPacket(requestID uint64, body []byte) []byte {
+	buf := make([]byte, notifyHeaderSize+len(body))
 	buf[0] = PacketTypeNotify
 	binary.LittleEndian.PutUint64(buf[1:9], requestID)
-	copy(buf[9:], protoBytes)
-
-	return buf, nil
+	copy(buf[9:], body)
+	return buf
 }
 
 // parseNotifyPacket parses the plaintext body of a Notify packet.
@@ -176,17 +180,4 @@ func MarshalNackPacket(nack *pb.NackNotify) ([]byte, error) {
 	buf[0] = PacketTypeNack
 	copy(buf[1:], protoBytes)
 	return buf, nil
-}
-
-// parseNackPacket parses the plaintext body of a NACK packet.
-func parseNackPacket(data []byte) (*pb.NackNotify, error) {
-	if len(data) < 2 { // type(1) + at least 1 byte of proto
-		return nil, fmt.Errorf("nack packet too short: %d", len(data))
-	}
-
-	nack := &pb.NackNotify{}
-	if err := proto.Unmarshal(data[1:], nack); err != nil {
-		return nil, fmt.Errorf("unmarshal NackNotify: %w", err)
-	}
-	return nack, nil
 }

@@ -231,28 +231,77 @@ func (h *Handler) GetDatabaseManager() *shared.DatabaseManager {
 	return h.dbManager
 }
 
-// GetAdaptiveStats returns per-shard adaptive cache statistics
+// GetAdaptiveStats returns adaptive cache statistics. The eviction policy lives
+// on the engine's critbit index as a single domain, so this reports one entry
+// (ShardID 0) carrying the full internal state of the adaptive-k loop.
 func (h *Handler) GetAdaptiveStats() []cache.AdaptiveStats {
-	// Return stats from database 0 as representative
-	if db := h.dbManager.GetDB(0); db != nil {
-		return db.AdaptiveStats()
+	if h.engine == nil {
+		return nil
 	}
-	return nil
+	s := h.engine.EvictStats()
+	return []cache.AdaptiveStats{{
+		ShardID:            0,
+		K:                  s.K,
+		GraduationRate:     s.GraduationRate,
+		EvictedUnprotected: s.EvictedUnprotected,
+		EvictedProtected:   s.EvictedProtected,
+		ReachedProtected:   s.ReachedProtected,
+		LearnedRateLow:     s.RateLow,
+		LearnedRateHigh:    s.RateHigh,
+		WindowHitRate:      s.WindowHitRate,
+		GhostCount:         s.GhostCount,
+	}}
 }
 
-// GetCacheBytes returns current bytes used by cached items
+// GetCacheBytes returns the bytes resident in the engine's vertex pool.
 func (h *Handler) GetCacheBytes() int64 {
-	return h.dbManager.GetCacheBytes()
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().Bytes()
 }
 
-// GetItemCount returns current number of items in cache
+// GetItemCount returns the number of effects resident in the vertex pool.
 func (h *Handler) GetItemCount() int {
-	return h.dbManager.TotalItemCount()
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().EntryCount()
 }
 
-// GetCacheEvictions returns total evictions from the cache
+// GetArenaBytes returns the critbit index's slot-array footprint (trie
+// skeleton), distinct from GetCacheBytes (vertex pool effect bytes).
+func (h *Handler) GetArenaBytes() int64 {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.ArenaBytes()
+}
+
+// GetVertexCount returns the number of effects resident in the vertex pool.
+func (h *Handler) GetVertexCount() int {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.VertexCount()
+}
+
+// GetCacheEvictions returns the number of keys evicted under memory pressure by
+// the index's bounded sweep (the real "evicted_keys"), not reclaim churn.
 func (h *Handler) GetCacheEvictions() uint64 {
-	return h.dbManager.TotalEvictions()
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().ColdEvictions()
+}
+
+// GetVerticesReclaimed returns the number of vertices freed by reclaimUnreferenced
+// (below-LCA history and orphans) — storage churn distinct from cache eviction.
+func (h *Handler) GetVerticesReclaimed() uint64 {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.EffectCache().Reclaimed()
 }
 
 // RequiresAuth returns true if authentication is required
@@ -286,6 +335,9 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	}
 	if conn.EffectsCtx != nil {
 		conn.EffectsCtx.SetTraceCtx(ctx)
+	}
+	if conn.ReadOnlyCtx != nil {
+		conn.ReadOnlyCtx.SetTraceCtx(ctx)
 	}
 
 	// Log command if debug mode is enabled
@@ -380,10 +432,18 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		return
 	}
 
-	// Populate effects engine fields if available (must happen before dispatch and queueing)
+	// Populate effects engine fields if available (must happen before dispatch and queueing).
+	// Read-only, non-transactional commands use the read-only context so a
+	// read-miss can be answered from the cluster key filters without
+	// subscribing. Everything else (writes, and any command inside MULTI,
+	// where SSI reads must subscribe) uses the full write context.
 	if h.engine != nil && conn.EffectsCtx != nil {
 		cmd.Runtime = h.engine
-		cmd.Context = conn.EffectsCtx
+		if entry != nil && entry.Flags&shared.FlagWrite == 0 && !conn.InTransaction && conn.ReadOnlyCtx != nil {
+			cmd.Context = conn.ReadOnlyCtx
+		} else {
+			cmd.Context = conn.EffectsCtx
+		}
 	}
 
 	// If in transaction mode, queue commands instead of executing
@@ -1086,6 +1146,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 	}
 	if h.engine != nil {
 		conn.EffectsCtx = h.engine.NewContext()
+		conn.ReadOnlyCtx = h.engine.NewReadOnlyContext()
 	}
 
 	// Apply the authorization context from the origin node

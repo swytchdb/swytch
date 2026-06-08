@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"sort"
@@ -58,6 +59,11 @@ type Context struct {
 	keys        map[string]*contextKey
 	watchedKeys map[string]*watchedKeyState // keys registered via Watch with WATCH-time state
 	txSnapshot  keytrie.KeyIndex            // frozen index snapshot for SSI reads (nil outside MULTI/EXEC)
+
+	// readOnly marks a context used only for read-only, non-transactional
+	// commands. Such a context may answer a read-miss from the cluster key
+	// filters without subscribing (free misses), and skips chain compaction.
+	readOnly bool
 }
 
 type contextKey struct {
@@ -75,6 +81,19 @@ type contextKey struct {
 	// Notification intent — tracks whether this key should wake blocked clients
 	shouldNotifyData   bool // an INSERT_OP was the last data-modifying op on this key
 	shouldNotifyDelete bool // a full-key REMOVE was the last data-modifying op
+
+	// Pending peer-subscriber mutations from SubscriptionEffects emitted on this
+	// key. Applied in Flush AFTER updateIndex creates the leaf — the subscriber
+	// set lives on the leaf (leafState.subscribers), so addPeerSubscriber is a
+	// no-op until the leaf exists. The first effect on a key is often the
+	// SubscriptionEffect itself, so applying at Emit time would drop it.
+	subOps []subOp
+}
+
+// subOp is a deferred peer-subscriber mutation; see contextKey.subOps.
+type subOp struct {
+	peer        pb.NodeID
+	unsubscribe bool
 }
 
 // ContextSavepoint is an opaque snapshot of a Context's pending
@@ -152,6 +171,18 @@ func (e *Engine) NewContext() *Context {
 	}
 }
 
+// NewReadOnlyContext creates a context for read-only, non-transactional
+// commands. It uses the per-node cluster key filters to answer a read-miss
+// without issuing a subscription — a key no peer holds returns nil for free.
+// It must not be used inside MULTI/EXEC (SSI reads must subscribe).
+func (e *Engine) NewReadOnlyContext() *Context {
+	return &Context{
+		engine:   e,
+		keys:     make(map[string]*contextKey),
+		readOnly: true,
+	}
+}
+
 // PendingKeys returns the names of all keys with pending effects in
 // this Context. Callers use this to acquire per-key locks before
 // calling Flush — Flush's fork-choice critical section races with
@@ -205,6 +236,24 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.txSnapshot != nil {
 			return c.getSnapshotFromTx(key)
 		}
+		// Read-only fast path: a key we don't already hold and that no peer
+		// has announced has no committed value cluster-wide (when we're in the
+		// majority partition), so the read is a miss. We must NOT skip the
+		// subscription — staying silent means future peer writes never route to
+		// us and the key splits brain. Instead ensureSubscribed takes its
+		// async-announce path (no peer holds the key, so nothing to bootstrap;
+		// it installs locally and fire-and-forgets the SubscriptionEffect) and
+		// we return the miss without blocking. A filter false-positive, or a
+		// key we hold locally, falls through to the normal subscribe + read.
+		if c.readOnly &&
+			c.engine.index.Contains(key) == nil &&
+			c.engine.inMajorityPartition() &&
+			!c.engine.clusterMaybeHasKey(key) {
+			if err := c.engine.ensureSubscribed(key); err != nil {
+				return nil, nil, err
+			}
+			return nil, nil, nil
+		}
 		// No unflushed effects for this key — delegate to committed state
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
@@ -218,11 +267,17 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.engine.broadcaster == nil {
 			compactThreshold = 5
 		}
-		if result != nil && chainLen >= compactThreshold {
+		if !c.readOnly && result != nil && chainLen >= compactThreshold {
 			slog.Debug("compaction: emitting snapshot",
 				"key", key,
 				"chainLen", chainLen,
 				"tips", tips)
+			// Stamp the authoritative subscriber set onto the snapshot's state.
+			// Reads no longer carry Subscribers (it left the reduce pipeline),
+			// so the compaction snapshot is where the set is persisted for a
+			// future bootstrapping peer to recover after the raw
+			// SubscriptionEffects have been compacted away.
+			result.Subscribers = c.engine.snapshotSubscribers(key)
 			snapEff := &pb.SnapshotEffect{
 				Collection: result.Collection,
 				State:      result,
@@ -532,6 +587,18 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
+	// A read-only context may have answered a read-miss without subscribing.
+	// If a command then emits anyway (e.g. HGETEX setting a field TTL), it
+	// must subscribe first — exactly as flushTx does — so the effect
+	// dep-references our own SubscriptionEffect instead of being orphaned in
+	// the DAG. Idempotent and fast in the common case: the key existed, so
+	// GetSnapshot already subscribed and this is a no-op.
+	if c.readOnly {
+		if err := c.engine.ensureSubscribed(key); err != nil {
+			return err
+		}
+	}
+
 	if tracing.Enabled() {
 		_, emitSpan := tracing.Tracer().Start(c.TraceCtx(), "effects.emit",
 			trace.WithAttributes(attribute.String("effect.key", key)))
@@ -624,7 +691,29 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	ck.lastOffset = offset
 	ck.notifies = append(ck.notifies, notify)
 
+	// Defer peer-subscriber tracking to Flush: the subscriber set lives on the
+	// key's leaf, which updateIndex only creates at Flush time. Self-subscribes
+	// are filtered inside addPeerSubscriber when applied.
+	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
+		ck.subOps = append(ck.subOps, subOp{
+			peer:        pb.NodeID(sub.SubscriberNodeId),
+			unsubscribe: sub.Unsubscribe,
+		})
+	}
+
 	return nil
+}
+
+// applySubOps applies a key's deferred peer-subscriber mutations after its leaf
+// has been created by updateIndex.
+func (c *Context) applySubOps(key string, ck *contextKey) {
+	for _, op := range ck.subOps {
+		if op.unsubscribe {
+			c.engine.removePeerSubscriber(key, op.peer)
+		} else {
+			c.engine.addPeerSubscriber(key, op.peer)
+		}
+	}
 }
 
 // rawEmit is the core write path: serialize, write to log, cache, and
@@ -639,27 +728,22 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	slog.Debug("Emit: wrote effect",
 		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
 
-	if c.engine.effectCache != nil {
-		c.engine.effectCache.Put(offset, eff)
-	}
-
-	// Track foreign peer subscriptions so flushTx's collectSubscribers
-	// sees them. Self-subscribes are filtered inside addPeerSubscriber.
-	if sub := eff.GetSubscription(); sub != nil && !sub.Ephemeral {
-		if sub.Unsubscribe {
-			c.engine.removePeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
-		} else {
-			c.engine.addPeerSubscriber(key, pb.NodeID(sub.SubscriberNodeId))
-		}
-	}
-
+	// Marshal once and reuse the length for the pool's byte accounting (avoids
+	// a redundant proto.Size walk) and the bytes for the notify. The standalone
+	// (no-broadcaster) path has nothing to marshal, so it falls back to Put.
 	if c.engine.broadcaster == nil {
+		if c.engine.effectCache != nil {
+			c.engine.effectCache.Put(offset, eff)
+		}
 		return offset, nil, nil
 	}
 
 	data, err := MarshalEffect(eff)
 	if err != nil {
 		return Tip{}, nil, err
+	}
+	if c.engine.effectCache != nil {
+		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
@@ -675,10 +759,19 @@ func (c *Context) Flush() error {
 		defer flushSpan.End()
 	}
 
+	// Back-pressure once per command, not once per effect: the effects were
+	// already pooled during Emit, so a command that wrote N effects (e.g. value +
+	// type-tag, or a read that also compacted) pays a single bounded eviction
+	// slice here instead of N. The drain itself is cheap — it drops victim tips and
+	// defers their ref-release walk to the governor (see Engine.releaseQueue).
+	var err error
 	if !c.inTx {
-		return c.flushNonTx()
+		err = c.flushNonTx()
+	} else {
+		err = c.flushTx()
 	}
-	return c.flushTx()
+	c.engine.backpressure()
+	return err
 }
 
 // flushNonTx is the original Flush body for non-transactional writes.
@@ -713,7 +806,7 @@ func (c *Context) flushNonTx() error {
 		}
 		slog.Debug("Flush: updating index", "key", key, "offset", ck.lastOffset)
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
-
+		c.applySubOps(key, ck)
 
 		if c.engine.broadcaster != nil {
 			var bcastTrace []byte
@@ -729,6 +822,20 @@ func (c *Context) flushNonTx() error {
 			}
 			for _, n := range ck.notifies {
 				n.TraceContext = bcastTrace
+			}
+			// SafeMode downgrade: if no other node in the cluster holds this
+			// key — and we're in the majority partition, so the filter view is
+			// authoritative — the first-ACK wait has no target. Every peer
+			// would NACK NotSubscribed and discard the write, so the wait is
+			// pure latency ending in a swallowed error. Broadcast async
+			// instead. This is the write-side mirror of the read-only
+			// fast-miss: a key that exists nowhere needs no synchronous
+			// handshake. Once any peer subscribes to the key,
+			// clusterMaybeHasKey turns true and SafeMode resumes waiting.
+			if mode == SafeMode &&
+				c.engine.inMajorityPartition() &&
+				!c.engine.clusterMaybeHasKey(key) {
+				mode = UnsafeMode
 			}
 			if mode == SafeMode {
 				// Pre-check already verified all peers are reachable.
@@ -756,8 +863,11 @@ func (c *Context) flushNonTx() error {
 		}
 
 		// Fire notification callbacks after effect is durable
-		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-			c.engine.OnKeyDataAdded(key)
+		if ck.shouldNotifyData {
+			c.engine.ownFilterAdd(key)
+			if c.engine.OnKeyDataAdded != nil {
+				c.engine.OnKeyDataAdded(key)
+			}
 		}
 		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
 			c.engine.OnKeyDeleted(key)
@@ -796,9 +906,12 @@ func (c *Context) flushTx() error {
 	// Step 0.5: Ensure subscription for every key in the transaction.
 	// Per whitepaper §3.3, a node must subscribe before any read or write.
 	// If we're in a minority partition, ensureSubscribed returns an error
-	// and the transaction must abort.
+	// and the transaction must abort. Force the blocking bootstrap: the
+	// commit protocol's fork-choice base-sharing requires the round-2 tip
+	// collection to finish before the bind is emitted, so the txn path must
+	// not take the async-announce shortcut even for a key held nowhere.
 	for key := range c.keys {
-		if err := c.engine.ensureSubscribed(key); err != nil {
+		if err := c.engine.ensureSubscribedBlocking(key); err != nil {
 			c.reset()
 			return ErrRegionPartitioned
 		}
@@ -868,7 +981,7 @@ func (c *Context) flushTx() error {
 			// during flushTx, AFTER initialTips was captured at Emit
 			// time, so the originator's own subscription would otherwise
 			// look like a competitor and trigger a spurious abort.
-			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+			if eff, ok := c.engine.effectCache.Get(t); ok && eff.GetSubscription() != nil {
 				continue
 			}
 			slog.Debug("flushTx: concurrent remote bind landed, aborting before emission",
@@ -884,6 +997,7 @@ func (c *Context) flushTx() error {
 	// Step 1: Update index + broadcast individual effects per key
 	for key, ck := range c.keys {
 		c.engine.updateIndex(key, ck.initialTips, ck.lastOffset)
+		c.applySubOps(key, ck)
 
 		// Register as pending tx tip
 		var preTxDeps []Tip
@@ -933,7 +1047,7 @@ func (c *Context) flushTx() error {
 			// BeginTx, so without this skip the originator's own
 			// subscription tip would look like a concurrent external
 			// write and trigger a spurious abort.
-			if eff, ok := c.engine.effectCache.Get(t, 0); ok && eff.GetSubscription() != nil {
+			if eff, ok := c.engine.effectCache.Get(t); ok && eff.GetSubscription() != nil {
 				continue
 			}
 			// Concurrent effect on watched key → SSI conflict
@@ -983,7 +1097,14 @@ func (c *Context) flushTx() error {
 	for key, ck := range c.keys {
 		var consumedTips []*pb.EffectRef
 		if ck.initialTips != nil {
-			consumedTips = toPbRefs(ck.initialTips.Tips())
+			// ConsumedTips is a cluster-visible causal reference, subject to
+			// the same SSI rule as eff.Deps: it must name committed state,
+			// never a foreign in-flight tx tip. resolveTipDeps substitutes any
+			// such tip for its pre-tx committed base — the same call that
+			// produced this key's data-effect Deps at Emit time. Without it the
+			// bind records an uncommitted (and possibly aborting) peer write as
+			// part of its committed base.
+			consumedTips = toPbRefs(c.engine.resolveTipDeps(ck.initialTips.Tips()))
 		}
 		kb := &pb.TransactionalBindEffect_KeyBind{
 			Key:          []byte(key),
@@ -1029,11 +1150,14 @@ func (c *Context) flushTx() error {
 		return ErrTxnAborted
 	}
 
+	// One hash, reused for the bind effect, the void check, and the pending
+	// txn record — all keyed on (nodeID, hlcTs), so recomputing would be waste.
+	bindHash := ComputeForkChoiceHash(c.engine.nodeID, hlcTs)
 	bindEff := &pb.Effect{
 		Key:            bind.Keys[0].Key, // use first key as canonical
 		Hlc:            hlcTs,
 		NodeId:         uint64(c.engine.nodeID),
-		ForkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		ForkChoiceHash: bindHash,
 		TxnId:          c.txnID,
 		Deps:           bindDeps,
 		Kind:           &pb.Effect_TxnBind{TxnBind: bind},
@@ -1073,14 +1197,16 @@ func (c *Context) flushTx() error {
 		txnID:          c.txnID,
 		txnHLC:         txnHLC,
 		originNode:     c.engine.nodeID,
-		forkChoiceHash: ComputeForkChoiceHash(c.engine.nodeID, hlcTs),
+		forkChoiceHash: bindHash,
 		bindOffset:     bindOffset,
 		done:           make(chan struct{}),
 	}
 	for key, ck := range c.keys {
 		var consumedTips []Tip
 		if ck.initialTips != nil {
-			consumedTips = ck.initialTips.Tips()
+			// Same substitution as the cluster-visible bind above, so the
+			// local NACK-conflict view matches what peers see.
+			consumedTips = c.engine.resolveTipDeps(ck.initialTips.Tips())
 		}
 		ptxn.keys = append(ptxn.keys, pendingTxnKey{
 			key:          key,
@@ -1134,6 +1260,15 @@ func (c *Context) flushTx() error {
 				err   error
 			}
 
+			// Marshal the bind notify once: the proto body is identical for
+			// every subscriber (only the per-peer request header differs), so
+			// re-marshalling per goroutine is wasted work — and would race on
+			// the shared bindNotify. The fan-out reuses this single body.
+			bindBody, marshalErr := proto.Marshal(bindNotify)
+			if marshalErr != nil {
+				return fmt.Errorf("flushTx: marshal bind notify: %w", marshalErr)
+			}
+
 			results := make([]replicaResult, len(subscribers))
 			var wg sync.WaitGroup
 			wg.Add(len(subscribers))
@@ -1143,7 +1278,7 @@ func (c *Context) flushTx() error {
 					slog.Debug("flushTx: ReplicateTo",
 						"bind_offset", bindOffset,
 						"target", target)
-					nacks, err := c.engine.broadcaster.ReplicateTo(bindNotify, bindNotify.EffectData, target)
+					nacks, err := c.engine.broadcaster.ReplicateMarshalled(bindNotify, bindBody, target)
 					results[idx] = replicaResult{subID: target, nacks: nacks, err: err}
 				}(i, subID)
 			}
@@ -1329,8 +1464,11 @@ func (c *Context) flushTx() error {
 
 	// Fire notification callbacks after successful commit
 	for key, ck := range c.keys {
-		if ck.shouldNotifyData && c.engine.OnKeyDataAdded != nil {
-			c.engine.OnKeyDataAdded(key)
+		if ck.shouldNotifyData {
+			c.engine.ownFilterAdd(key)
+			if c.engine.OnKeyDataAdded != nil {
+				c.engine.OnKeyDataAdded(key)
+			}
 		}
 		if ck.shouldNotifyDelete && c.engine.OnKeyDeleted != nil {
 			c.engine.OnKeyDeleted(key)
@@ -1341,26 +1479,48 @@ func (c *Context) flushTx() error {
 	return nil
 }
 
-// collectSubscribers gathers unique subscriber node IDs across all touched keys.
-// Reads from the engine's peerSubscribers map — maintained incrementally by
-// ensureSubscribed (peers that NACK back are subscribed) and HandleRemote
-// (foreign SubscriptionEffect arrival/unsubscribe). Reading the DAG via
-// reconstruct here was the prior implementation; it produced subscribers:0
-// whenever reconstruct legitimately returned a Subscribers-less result
-// (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
+// collectSubscribers gathers unique subscriber node IDs across all touched
+// keys, filtered to peers that are still current cluster members. Subscriber
+// sets live on each key's leaf (leafState.subscribers), maintained
+// incrementally by ensureSubscribed (peers that NACK back are subscribed) and
+// HandleRemote (foreign SubscriptionEffect arrival/unsubscribe). Reading the
+// DAG via reconstruct here was the prior implementation; it produced
+// subscribers:0 whenever reconstruct legitimately returned a Subscribers-less
+// result (verdict-only snapshot at LCA, all-lost bind set, NoopEffect chain),
 // which silently dropped the bind broadcast and produced missing verdict
 // snapshots downstream.
+//
+// The membership filter is what lets a departed peer's stale id fall out
+// lazily instead of needing an eager scrub on peer removal: PeerIDs() shrinks
+// only on genuine topology removal, so a member that is merely unreachable
+// stays in the required set (flushTx then aborts when it can't respond,
+// preserving AtMostOneCommit), while a truly departed peer is dropped so the
+// key can still make progress.
 func (c *Context) collectSubscribers() []pb.NodeID {
+	var members map[pb.NodeID]struct{}
+	if c.engine.broadcaster != nil {
+		ids := c.engine.broadcaster.PeerIDs()
+		members = make(map[pb.NodeID]struct{}, len(ids))
+		for _, id := range ids {
+			members[id] = struct{}{}
+		}
+	}
 	seen := make(map[pb.NodeID]struct{})
 	for key := range c.keys {
-		inner, ok := c.engine.peerSubscribers.Load(key)
-		if !ok {
+		ls, _ := c.engine.index.LoadOrStoreData(key, &leafState{})
+		if ls == nil {
 			continue
 		}
-		inner.Range(func(id pb.NodeID, _ struct{}) bool {
+		ls.subMu.Lock()
+		for id := range ls.subscribers {
+			if members != nil {
+				if _, ok := members[id]; !ok {
+					continue
+				}
+			}
 			seen[id] = struct{}{}
-			return true
-		})
+		}
+		ls.subMu.Unlock()
 	}
 	result := make([]pb.NodeID, 0, len(seen))
 	for id := range seen {
@@ -1428,6 +1588,9 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 		offsets = append(offsets, lastOffset)
 		newTips := keytrie.NewTipSet(offsets...)
 		if _, ok := e.index.Insert(key, current, newTips); ok {
+			// Insert fires the trie's refDelta hook (applyRefDelta), which
+			// increfs the added tips and decrefs the consumed ones — no manual
+			// refcount call here.
 			return
 		}
 	}

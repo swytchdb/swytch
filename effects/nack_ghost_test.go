@@ -40,6 +40,10 @@ type selectiveBroadcaster struct {
 	fetchable map[Tip][]byte // offset → wire bytes; absence = NACK only, not fetchable
 }
 
+func (b *selectiveBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return b.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
 	b.mockBroadcaster.replicateToPeers = append(b.mockBroadcaster.replicateToPeers, target)
 	return []*pb.NackNotify{{
@@ -198,7 +202,9 @@ func TestEnsureSubscribed_InstallsOnlyWalkableTips(t *testing.T) {
 	e := newTestEngine(bc)
 
 	// GetSnapshot drives ensureSubscribed; we just need bootstrap to run.
-	if err := e.ensureSubscribed(key); err != nil {
+	// Use the blocking variant: this test exercises the synchronous tip-walk
+	// install path, which the async-announce shortcut would skip.
+	if err := e.ensureSubscribedBlocking(key); err != nil {
 		t.Fatalf("ensureSubscribed returned error on partial reachability: %v", err)
 	}
 
@@ -262,7 +268,8 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 	e := newTestEngine(bc)
 	defer e.closed.Store(true) // stop retryBootstrap on test exit
 
-	err := e.ensureSubscribed(key)
+	// Blocking variant: exercises the "all tips unreachable → retry" path.
+	err := e.ensureSubscribedBlocking(key)
 	if !errors.Is(err, ErrBootstrapIncomplete) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
 	}
@@ -280,7 +287,7 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 		if tp == ghostA || tp == ghostB {
 			t.Fatalf("ghost tip %v installed despite unreachable bootstrap", tp)
 		}
-		eff, ok := e.effectCache.Get(tp, 0)
+		eff, ok := e.effectCache.Get(tp)
 		if !ok {
 			t.Fatalf("tip %v not in effectCache", tp)
 		}
@@ -355,7 +362,7 @@ func TestRetryBootstrap_ShutdownUnblocksWaiters(t *testing.T) {
 
 	e := newTestEngine(bc)
 
-	if err := e.ensureSubscribed(key); !errors.Is(err, ErrBootstrapIncomplete) {
+	if err := e.ensureSubscribedBlocking(key); !errors.Is(err, ErrBootstrapIncomplete) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)
 	}
 

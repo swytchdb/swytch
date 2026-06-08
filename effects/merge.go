@@ -73,7 +73,6 @@ func isMetadataOnly(r *pb.ReducedEffect) bool {
 // mergeMetadataOnto unions the metadata from meta onto data, returning a new ReducedEffect.
 func mergeMetadataOnto(data, meta *pb.ReducedEffect) *pb.ReducedEffect {
 	r := cloneReduced(data)
-	r.Subscribers = unionSubscribers(data.Subscribers, meta.Subscribers)
 	r.SerializationLeader = mergeSerializationLeader(data, meta)
 	return r
 }
@@ -179,7 +178,6 @@ func MergeN(branches []*pb.ReducedEffect) *pb.ReducedEffect {
 		OrderedElements:     result.OrderedElements,
 		TypeTag:             result.TypeTag,
 		ExpiresAt:           result.ExpiresAt,
-		Subscribers:         unionSubscribersN(filtered),
 		SerializationLeader: mergeSerializationLeaderN(filtered),
 		ForkChoiceHash:      result.ForkChoiceHash,
 	}
@@ -205,7 +203,6 @@ func mergeBothCommutative(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 		return mergeIncompatible(a, b)
 	}
 
-	r.Subscribers = unionSubscribers(a.Subscribers, b.Subscribers)
 	r.SerializationLeader = mergeSerializationLeader(a, b)
 	return r
 }
@@ -230,7 +227,6 @@ func mergeBothNonCommutative(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 		return mergeIncompatible(a, b)
 	}
 
-	r.Subscribers = unionSubscribers(a.Subscribers, b.Subscribers)
 	r.SerializationLeader = mergeSerializationLeader(a, b)
 	return r
 }
@@ -265,7 +261,6 @@ func mergeMixed(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 		return mergeIncompatible(a, b)
 	}
 
-	r.Subscribers = unionSubscribers(a.Subscribers, b.Subscribers)
 	r.SerializationLeader = mergeSerializationLeader(a, b)
 	return r
 }
@@ -573,7 +568,6 @@ func mergeIncompatible(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 	winner, _ := branchWinner(a, b)
 	maxHLC, maxNodeID := maxTip(a, b)
 	r := mergeIncompatibleCore(a, b, winner, maxHLC, maxNodeID)
-	r.Subscribers = unionSubscribers(a.Subscribers, b.Subscribers)
 	r.SerializationLeader = mergeSerializationLeader(a, b)
 	return r
 }
@@ -664,34 +658,3 @@ func mergeSerializationLeaderN(branches []*pb.ReducedEffect) *uint64 {
 	return leader
 }
 
-func unionSubscribers(a, b map[uint64]bool) map[uint64]bool {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	result := make(map[uint64]bool, max(len(a), len(b)))
-	for k := range a {
-		result[k] = true
-	}
-	for k := range b {
-		result[k] = true
-	}
-	return result
-}
-
-// unionSubscribersN unions subscribers from N branches.
-func unionSubscribersN(branches []*pb.ReducedEffect) map[uint64]bool {
-	total := 0
-	for _, b := range branches {
-		total += len(b.Subscribers)
-	}
-	if total == 0 {
-		return nil
-	}
-	result := make(map[uint64]bool, total)
-	for _, b := range branches {
-		for k := range b.Subscribers {
-			result[k] = true
-		}
-	}
-	return result
-}

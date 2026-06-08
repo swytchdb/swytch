@@ -72,6 +72,10 @@ func (m *mockBroadcaster) Replicate(notify *pb.OffsetNotify, wireData []byte) er
 	m.replicates = append(m.replicates, notify)
 	return m.replicateErr
 }
+func (m *mockBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return m.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (m *mockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -108,11 +112,34 @@ func (m *mockBroadcaster) ForwardTransaction(_ context.Context, _ pb.NodeID, _ *
 	return nil, fmt.Errorf("not implemented")
 }
 
+// broadcastCount returns the number of BroadcastWithData/Broadcast calls,
+// safe to read while the async subscription announce goroutine is in flight.
+func (m *mockBroadcaster) broadcastCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.broadcasts)
+}
+
+// waitForBroadcast blocks until at least one async broadcast lands or the
+// deadline passes. The subscription announce is fire-and-forget (go), so its
+// effect is observable only after the goroutine runs.
+func waitForBroadcast(t *testing.T, bc *mockBroadcaster) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bc.broadcastCount() > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for async subscription broadcast")
+}
+
 // --- helpers ---
 
 func newTestEngine(bc Broadcaster) *Engine {
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            42,
 		clock:             crdt.NewHLC(),
@@ -121,10 +148,8 @@ func newTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	return e
@@ -201,7 +226,7 @@ func TestEmitTwoSameKey(t *testing.T) {
 
 	// Verify dep chaining: the tip (meta effect) should depend on the first effect
 	tipOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(tipOff, 0)
+	cached, ok := e.effectCache.Get(tipOff)
 	if !ok {
 		t.Fatal("expected effect in cache")
 	}
@@ -233,7 +258,7 @@ func TestEmitForkResolution(t *testing.T) {
 
 	// Deps should include both original tips (fork resolution)
 	tipOff := tips.Tips()[0]
-	cached, ok := e.effectCache.Get(tipOff, 0)
+	cached, ok := e.effectCache.Get(tipOff)
 	if !ok {
 		t.Fatal("expected effect in cache")
 	}
@@ -246,6 +271,9 @@ func TestFlushSafeMode(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	// A peer holds "k", so SafeMode has a durable-replication target and must
+	// take the synchronous first-ACK path (rather than the no-target downgrade).
+	e.peerFilterAdd(pb.NodeID(2), "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -264,12 +292,40 @@ func TestFlushSafeMode(t *testing.T) {
 	}
 }
 
+// TestFlushSafeMode_DowngradesWhenKeyHeldNowhere: a SafeMode write to a key no
+// peer holds has no durable-replication target — every peer would NACK
+// NotSubscribed — so the first-ACK wait is pure latency. While in the majority
+// partition the engine downgrades to the async broadcast path, mirroring the
+// read-only fast-miss.
+func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
+	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2}, allRegionPeersReachable: true}
+	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	// No peerFilterAdd: clusterMaybeHasKey("k") is false.
+
+	ctx := e.NewContext()
+	if err := ctx.Emit(dataEffect("k")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(bc.replicates) != 0 {
+		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", len(bc.replicates))
+	}
+	if len(bc.broadcasts) == 0 {
+		t.Fatal("key held nowhere: SafeMode should downgrade to async BroadcastWithData")
+	}
+}
+
 func TestFlushSafeModeError_ReplicateFailAfterPrecheck(t *testing.T) {
 	// When pre-check passes but Replicate fails, the write is already committed
 	// (index updated). Flush should succeed — the pre-check is the safety gate.
 	bc := &mockBroadcaster{replicateErr: errors.New("quorum unreachable"), allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": exercises the Replicate-fails path
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -285,6 +341,7 @@ func TestFlushSafeMode_AllowsWhenAllPeersReachable(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
+	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": real replication target
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -391,7 +448,7 @@ func TestBeginTxSetsFlag(t *testing.T) {
 	// In a tx, the tip is the BIND; walk tips to find a data effect with TxnId
 	found := false
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -622,6 +679,10 @@ type txnMockBroadcaster struct {
 	replicateToCalls   []pb.NodeID // node IDs called
 }
 
+func (m *txnMockBroadcaster) ReplicateMarshalled(notify *pb.OffsetNotify, _ []byte, target pb.NodeID) ([]*pb.NackNotify, error) {
+	return m.ReplicateTo(notify, notify.EffectData, target)
+}
+
 func (m *txnMockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error) {
 	m.replicateToCalls = append(m.replicateToCalls, targetNodeID)
 	if m.replicateToErr != nil {
@@ -639,8 +700,17 @@ func (m *txnMockBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []byt
 // --- txn integration tests ---
 
 func newTxnTestEngine(bc Broadcaster) *Engine {
+	// Subscriber tests address peer 99 (peerNodeID). collectSubscribers filters
+	// subscribers against current membership (broadcaster.PeerIDs()), so the
+	// peer must be a registered member or it would be dropped as departed.
+	// Register it (and a healthy partition, since registering a member
+	// activates the partition guard) when the test didn't set membership.
+	if m, ok := bc.(*txnMockBroadcaster); ok && m.peerIDs == nil {
+		m.peerIDs = []pb.NodeID{99}
+		m.allRegionPeersReachable = true
+	}
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       bc,
 		nodeID:            42,
 		clock:             crdt.NewHLC(),
@@ -649,17 +719,19 @@ func newTxnTestEngine(bc Broadcaster) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
+		effectCache:       newVertexPool(),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	return e
 }
 
 func TestFlushTx_NoSubscribers_CommitsImmediately(t *testing.T) {
+	// Genuinely empty cluster: no peers at all, so ensureSubscribed makes no
+	// bootstrap probes and the bind is never replicated. Explicit empty
+	// membership opts out of newTxnTestEngine's default peer seeding.
 	bc := &txnMockBroadcaster{}
+	bc.peerIDs = []pb.NodeID{}
 	e := newTxnTestEngine(bc)
 
 	ctx := e.NewContext()
@@ -926,7 +998,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 
 	foundLoserOnlyVerdict := false
 	for _, tip := range loserOnlyTips.Tips() {
-		eff, ok := e.effectCache.Get(tip, 0)
+		eff, ok := e.effectCache.Get(tip)
 		if !ok {
 			continue
 		}
@@ -958,7 +1030,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 	}
 	foundSharedVerdict := false
 	for _, tip := range sharedTips.Tips() {
-		eff, ok := e.effectCache.Get(tip, 0)
+		eff, ok := e.effectCache.Get(tip)
 		if !ok {
 			continue
 		}
@@ -1001,7 +1073,7 @@ func TestEmit_ExcludesInProgressTxTips(t *testing.T) {
 		t.Fatal("expected index entry for key k")
 	}
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1136,7 +1208,7 @@ func TestFlushTx_SerializationEscalation_AfterNAborts(t *testing.T) {
 	}
 	found := false
 	for _, off := range tips.Tips() {
-		cached, ok := e.effectCache.Get(off, 0)
+		cached, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1349,7 +1421,7 @@ func TestGetSnapshot_ExcludesPendingTxTips(t *testing.T) {
 		if off == committedOff {
 			continue
 		}
-		eff, ok := e.effectCache.Get(off, 0)
+		eff, ok := e.effectCache.Get(off)
 		if !ok {
 			continue
 		}
@@ -1731,7 +1803,7 @@ func TestFlushTx_ConsumesTips_LinearChain(t *testing.T) {
 
 		// Verify the tip is a BIND effect via effectCache
 		bindOffset := postTips.Tips()[0]
-		cached, ok := e.effectCache.Get(bindOffset, 0)
+		cached, ok := e.effectCache.Get(bindOffset)
 		if !ok {
 			t.Fatalf("iteration %d: could not find BIND at offset %d in effectCache", i, bindOffset)
 		}

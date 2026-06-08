@@ -344,8 +344,8 @@ func TestReplayRun26373595271InBindReadDiverges(t *testing.T) {
 func newInBindReadReplayEngine(t *testing.T) *Engine {
 	t.Helper()
 	e := &Engine{
-		effectCache:       clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024)),
-		index:             keytrie.New(),
+		effectCache:       newVertexPool(),
+		index:             keytrie.NewCritbit[leafState](),
 		broadcaster:       &mockBroadcaster{},
 		nodeID:            replay26373595271NodeN103,
 		clock:             crdt.NewHLC(),
@@ -354,8 +354,6 @@ func newInBindReadReplayEngine(t *testing.T) *Engine {
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 		txSnapshots:       xsync.NewMap[string, keytrie.KeyIndex](),
 	}

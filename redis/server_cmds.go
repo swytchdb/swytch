@@ -98,6 +98,20 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 		fmt.Fprintf(&info, "used_memory_peak:%d\r\n", m.TotalAlloc)
 		fmt.Fprintf(&info, "used_memory_peak_human:%s\r\n", formatBytes(m.TotalAlloc))
 		fmt.Fprintf(&info, "total_system_memory:%d\r\n", m.Sys)
+		// maxmemory is the vertex pool's byte budget (0 = unbounded); the
+		// policy is the engine's per-key frequency+LRU eviction, which maps to
+		// allkeys-lfu, or noeviction when no budget is set.
+		var maxMemory int64
+		if h.engine != nil {
+			maxMemory = h.engine.MemoryTarget()
+		}
+		policy := "noeviction"
+		if maxMemory > 0 {
+			policy = "allkeys-lfu"
+		}
+		fmt.Fprintf(&info, "maxmemory:%d\r\n", maxMemory)
+		fmt.Fprintf(&info, "maxmemory_human:%s\r\n", formatBytes(uint64(maxMemory)))
+		fmt.Fprintf(&info, "maxmemory_policy:%s\r\n", policy)
 		info.WriteString("\r\n")
 	}
 

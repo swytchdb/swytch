@@ -514,6 +514,7 @@ func (s *Server) getConnState(conn net.Conn, ctx context.Context) *connState {
 	// Create per-connection effects context if engine is available
 	if h, ok := s.handler.(*Handler); ok && h.engine != nil {
 		cs.conn.EffectsCtx = h.engine.NewContext()
+		cs.conn.ReadOnlyCtx = h.engine.NewReadOnlyContext()
 	}
 
 	return cs

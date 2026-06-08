@@ -251,24 +251,22 @@ func bindA_pbBind(key string, consumed []Tip, newTip Tip) *pb.TransactionalBindE
 // HorizonSet (using fake timers so visibility decisions are explicit, not
 // timer-driven).
 func newSnapshotEngineWithHorizon(log *snapshotLog) *Engine {
-	var ec *clox.CloxCache[Tip, *pb.Effect]
+	var ec *VertexPool
 	if log != nil {
 		ec = log.effectCache
 	} else {
-		ec = clox.NewCloxCache[Tip, *pb.Effect](clox.ConfigFromMemorySize(1024 * 1024))
+		ec = newVertexPool()
 	}
 	e := &Engine{
-		index:             keytrie.New(),
+		index:             keytrie.NewCritbit[leafState](),
 		effectCache:       ec,
 		nodeID:            1,
 		clock:             crdt.NewHLC(),
 		subscriptions:     xsync.NewMap[string, *subscriptionState](),
-		peerSubscribers:   xsync.NewMap[string, *xsync.Map[pb.NodeID, struct{}]](),
 		pendingTxns:       xsync.NewMap[Tip, *pendingTxn](),
 		pendingTxTips:     xsync.NewMap[Tip, []Tip](),
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
-		unsubInFlight:     xsync.NewMap[string, struct{}](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
