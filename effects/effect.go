@@ -51,6 +51,36 @@ func isSystemKey(key []byte) bool {
 	return bytes.HasPrefix(key, systemKeyPrefix)
 }
 
+// isServed reports whether this node is authoritative for key — subscribed to it
+// or a system key. Effects on served keys are pooled "owned" (PutSized seeds a
+// creation ref so a never-read key's chain survives reclaim until eviction);
+// effects on un-served keys are pooled as reclaimable cache (PutSizedCache, no
+// creation ref) because we fetch them only to read through (cross-key bind
+// adjudication) and can refetch from a peer. Routing ingest/fetch through this
+// keeps the invariant "an owned, creation-ref'd vertex is reachable from a tip we
+// serve", so reclaim never strands an un-served fetch as a permanent leak.
+func (e *Engine) isServed(key []byte) bool {
+	if isSystemKey(key) {
+		return true
+	}
+	_, sub := e.subscriptions.Load(string(key))
+	return sub
+}
+
+// putIngested pools a fetched/ingested effect, choosing owned vs cache residency
+// by whether we serve its key. The single routing point for every ingest path
+// (HandleRemote, backfill, NACK causal-chain prefetch, getEffect's storeWireData).
+func (e *Engine) putIngested(tip Tip, eff *pb.Effect, protoLen int) {
+	if e.effectCache == nil {
+		return
+	}
+	if e.isServed(eff.Key) {
+		e.effectCache.PutSized(tip, eff, protoLen)
+	} else {
+		e.effectCache.PutSizedCache(tip, eff, protoLen)
+	}
+}
+
 // bootstrapCollector collects NACKs during subscription bootstrapping.
 // ensureSubscribed registers one per key and waits for NACKs from peers.
 type bootstrapCollector struct {
@@ -127,6 +157,20 @@ type Engine struct {
 	// add faster than you make room. The governor drains any leftover for the
 	// idle/low-write case. Zero means at/under target: writes evict nothing.
 	evictBudget atomic.Int64
+
+	// releaseQueue defers cold-evicted keys' creation-ref chain walk
+	// (releaseChainRefs) off the eviction hot path. EvictBatch drops the victim's
+	// tip synchronously (the act that bounds memory) and enqueues the key here;
+	// the expensive resident-chain walk that releases its refs is bookkeeping the
+	// governor drains at the top of each reclaimUnreferenced, then frees the
+	// now-refs-0 vertices in the same pass — so memory frees on the same tick it
+	// would have, with the walk off the write/read latency path. Unbounded MPSC:
+	// many write-path drains enqueue, the single governor consumes. releasePending
+	// counts enqueued-but-undrained entries so the consumer dequeues exactly the
+	// available set (UMPSCQueue.Dequeue blocks on empty, has no Len). Allocated
+	// lazily (releaseQ) on first eviction so every construction site gets it.
+	releaseQueue   atomic.Pointer[xsync.UMPSCQueue[evictedKey]]
+	releasePending atomic.Int64
 
 	closed atomic.Bool
 
@@ -259,6 +303,12 @@ func (e *Engine) FlushIndex() {
 	keys := e.index.Keys()
 	for _, key := range keys {
 		tips := e.index.Contains(key)
+		if tips != nil {
+			// DeleteAndSnapshot bypasses the eviction notify, so this is the only
+			// refcount-release signal for flush (see releaseChainRefs).
+			ls, _ := e.index.LoadOrStoreData(key, &leafState{})
+			e.releaseChainRefs(key, tips.Tips(), ls)
+		}
 		e.index.Delete(key, tips)
 	}
 }
@@ -307,10 +357,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
 
-	// The trie owns vertex refcount maintenance: it fires applyRefDelta on
-	// every leaf tip-set transition (insert/remove/delete/eviction), so the
-	// refcount can never be silently skipped on a removal path.
-	e.index.SetRefDelta(e.applyRefDelta)
+	// Creation refs are seeded at PutSized (one per tipset a vertex occupies) and
+	// released by the key-removal walk (releaseChainRefs) on eviction/flush; read
+	// adoption refs are maintained in publishSubdag. No per-transition trie hook
+	// is needed — a superseded tip stays reachable and must keep its ref, so the
+	// only refcount signals are creation, adoption, and whole-key removal.
 
 	// Memory governor: keep process RSS near the target. Under pressure it
 	// first reclaims refs-0 vertices (below-LCA / orphans), then evicts cold
@@ -907,10 +958,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, fmt.Errorf("fork_choice_hash missing or mismatch for offset %v", notify.Origin)
 	}
 
-	// Cache deserialized effect
-	if e.effectCache != nil {
-		e.effectCache.PutSized(r(notify.Origin), eff, len(protoData))
-	}
+	// Cache deserialized effect — owned if we serve its key, reclaimable cache
+	// (no creation ref) if we only need it to read through (e.g. cross-key).
+	e.putIngested(r(notify.Origin), eff, len(protoData))
 
 	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
 	e.applySnapshotVerdicts(eff)
@@ -961,10 +1011,13 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		}
 	}
 	if canonicalIndexable {
-		// Consume deps and add the new tip in a single index transition so the
-		// trie's refDelta hook (applyRefDelta) decrefs the consumed deps and
-		// increfs the arrival together.
+		// Consume deps and add the new tip in a single index transition.
 		e.updateIndex(key, keytrie.NewTipSet(fromPbRefs(deps)...), r(notify.Origin))
+		// Remote inserts pay their own eviction debt: a subscribed node that runs
+		// no local commands never reaches Flush's back-pressure, so without this its
+		// pool would grow unbounded on replication traffic and dump the whole debt
+		// on the next read. Owned ingest (we serve this key) makes room as it lands.
+		e.backpressure()
 	}
 
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -1192,8 +1245,8 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		return fmt.Errorf("fork_choice_hash missing or mismatch for offset %v", notify.Origin)
 	}
 
-	if e.effectCache != nil && !fromCache {
-		e.effectCache.PutSized(r(notify.Origin), eff, len(protoData))
+	if !fromCache {
+		e.putIngested(r(notify.Origin), eff, len(protoData))
 	}
 
 	// Verdict-snapshot arrival ends horizon wait for every txn it adjudicates.
@@ -1814,21 +1867,54 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 		if err := UnmarshalEffect(protoData, eff); err != nil {
 			continue
 		}
-		e.effectCache.PutSized(res.ref, eff, len(protoData))
+		e.putIngested(res.ref, eff, len(protoData))
 	}
 }
 
 // onLeafEvicted is the eviction-notify callback the index invokes after its
-// bounded sweep soft-deletes a victim key's leaf (the cold-key teardown). The
-// refcount release (index tips + cached subdag) is handled by the trie's
-// refDelta hook (applyRefDelta), which fires for the same eviction — so this
-// callback is only the teardown side effect: unsubscribe cluster-wide so peers
-// reduce us out of the subscriber set. Future reads re-subscribe and bootstrap
-// fresh. The leaf is already soft-deleted by the sweep.
-func (e *Engine) onLeafEvicted(key string, tips []Tip, _ *leafState) {
+// bounded sweep soft-deletes a victim key's leaf (the cold-key teardown). This is
+// the sole refcount-release site for cold eviction: the trie hook was retired
+// (creation refs live at PutSized, adoption refs at publishSubdag), and unlike
+// that hook this callback always carries the key and tips even when the leaf was
+// never read (nil leafState) — the case the diff-based hook could not tell from a
+// supersede. It releases the key's references, then unsubscribes cluster-wide so
+// peers reduce us out of the subscriber set. Future reads re-subscribe and
+// bootstrap fresh. The leaf is already soft-deleted by the sweep.
+// evictedKey is a cold-evicted key queued for deferred creation-ref release; see
+// Engine.releaseQueue.
+type evictedKey struct {
+	key  string
+	tips []Tip
+	ls   *leafState
+}
+
+// releaseQ returns the deferred-release queue, allocating it on first use. The CAS
+// lets concurrent first-evictors converge on a single queue; the loser's queue is
+// dropped (GC'd) and it reloads the winner's. Lazy so no construction site needs
+// to wire it.
+func (e *Engine) releaseQ() *xsync.UMPSCQueue[evictedKey] {
+	if q := e.releaseQueue.Load(); q != nil {
+		return q
+	}
+	q := xsync.NewUMPSCQueue[evictedKey]()
+	if e.releaseQueue.CompareAndSwap(nil, q) {
+		return q
+	}
+	return e.releaseQueue.Load()
+}
+
+func (e *Engine) onLeafEvicted(key string, tips []Tip, ls *leafState) {
 	if e.closed.Load() {
 		return
 	}
+
+	// Defer the creation-ref chain walk to the governor: EvictBatch already
+	// dropped the tip (the act that frees space), and the walk is bookkeeping that
+	// must not sit on the write/read latency path that triggered this eviction.
+	// The governor drains releaseQueue at the top of reclaimUnreferenced, so the
+	// vertices still free on the same tick.
+	e.releaseQ().Enqueue(evictedKey{key: key, tips: tips, ls: ls})
+	e.releasePending.Add(1)
 
 	// Count the real cold-key eviction here (once per victim) — the bounded
 	// sweep chose this key under memory pressure. Distinct from the vertex
@@ -1838,6 +1924,57 @@ func (e *Engine) onLeafEvicted(key string, tips []Tip, _ *leafState) {
 	// Async: the unsubscribe broadcast is network I/O and must not run under
 	// the sweep lock. Future reads re-subscribe and bootstrap fresh.
 	go e.broadcastUnsubscribe(key, tips)
+}
+
+// releaseChainRefs releases every refcount a key held once its tips are removed
+// for good — cold eviction or flush. The cached subdag's nodes each hold one
+// read-adoption ref (publishSubdag), released first. Then the key's full
+// reachable resident chain is walked from tips, scoped to this key (at a bind
+// follow only the bind's NewTip for this key, else follow deps), decref'ing each
+// visited vertex's creation ref exactly once via a visited set — so a shared bind
+// or diamond dep is released once per key, never per parent. Unlike a read's bfs
+// this walk does NOT stop at a snapshot LCA: it follows a snapshot's own deps so
+// below-snapshot history is released too. The whole key is gone, so releasing
+// below-LCA nodes is unconditionally safe here — no unconverged fork can still
+// need them. decrefChainNode no-ops on absent tips, so a partially-resident
+// chain is safe.
+func (e *Engine) releaseChainRefs(key string, tips []Tip, ls *leafState) {
+	if e.effectCache == nil {
+		return
+	}
+	if ls != nil {
+		if cs := ls.subdag.Load(); cs != nil {
+			for tip := range cs.nodes {
+				e.effectCache.decref(tip)
+			}
+		}
+	}
+	visited := make(map[Tip]struct{}, len(tips)*8)
+	stack := append([]Tip(nil), tips...)
+	for len(stack) > 0 {
+		t := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, seen := visited[t]; seen {
+			continue
+		}
+		visited[t] = struct{}{}
+		eff, ok := e.effectCache.decrefChainNode(t)
+		if !ok {
+			continue // not resident — nothing below to release
+		}
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					stack = append(stack, r(kb.NewTip))
+					break
+				}
+			}
+			continue
+		}
+		for _, dep := range eff.GetDeps() {
+			stack = append(stack, r(dep))
+		}
+	}
 }
 
 // broadcastUnsubscribe announces that this node has given up authority on key
@@ -2173,9 +2310,7 @@ func (e *Engine) storeWireData(offset Tip, wireData []byte) error {
 	if err := UnmarshalEffect(protoData, eff); err != nil {
 		return err
 	}
-	if e.effectCache != nil {
-		e.effectCache.PutSized(offset, eff, len(protoData))
-	}
+	e.putIngested(offset, eff, len(protoData))
 	return nil
 }
 

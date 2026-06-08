@@ -139,12 +139,16 @@ func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
 	return nil
 }
 
-// publishSubdag installs d's prepared structure as the leaf's cached subdag.
-// The subdag is a pure read cache: it does NOT refcount its nodes. The active
-// chain it caches is already kept resident by dep-refcounting (each effect
-// increfs the deps it builds on; see VertexPool.PutSized), so reconstruct's
-// inputs survive regardless of whether a subdag exists. A losing CAS builder
-// simply discards its copy.
+// publishSubdag installs d's prepared structure as the leaf's cached subdag and
+// maintains the DAG-adoption refcount: every node a read materializes into the
+// cached subdag holds one reference, so reconstruct's inputs stay resident for as
+// long as the subdag caches them. On a CAS-win the node-set delta is applied —
+// incref each node the new subdag adds (new \ old), decref each the old subdag
+// drops (old \ new), nodes in both unchanged. A first publish (no prior subdag)
+// increfs every node; a node that falls below a freshly-converged snapshot LCA
+// is dropped from the window and decref'd here, releasing its read claim while
+// its creation ref (held to eviction) keeps it resident for unconverged forks. A
+// losing CAS builder applied no refs, so it simply discards its copy.
 func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
 	cs := &cachedDag{
 		tips:      append([]Tip(nil), tips...),
@@ -152,7 +156,27 @@ func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
 		topoOrder: d.topoOrder,
 		lcaTip:    d.lcaTip,
 	}
-	ls.subdag.CompareAndSwap(ls.subdag.Load(), cs)
+	old := ls.subdag.Load()
+	if !ls.subdag.CompareAndSwap(old, cs) {
+		return // lost the race; another builder owns the refs for these nodes
+	}
+	if e.effectCache == nil {
+		return
+	}
+	var oldNodes map[Tip]*pb.Effect
+	if old != nil {
+		oldNodes = old.nodes
+	}
+	for tip := range cs.nodes {
+		if _, kept := oldNodes[tip]; !kept {
+			e.effectCache.incref(tip) // adopted into the cached subdag
+		}
+	}
+	for tip := range oldNodes {
+		if _, kept := cs.nodes[tip]; !kept {
+			e.effectCache.decref(tip) // dropped from the cached subdag
+		}
+	}
 }
 
 // verdictEntry holds a snapshot's verdict for a txnID; snapshotTip is the

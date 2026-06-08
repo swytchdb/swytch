@@ -49,9 +49,12 @@ const vertexOverhead = 96
 // vertex wraps an immutable effect resident in the VertexPool. size is a
 // per-vertex byte estimate (protoLen + vertexOverhead) kept only for reclaim
 // telemetry — it is no longer summed into a pool footprint (Bytes() reads the
-// runtime's live heap instead). refs counts how many index tips and cached
-// subdags include this vertex (key membership); reclaimUnreferenced frees a
-// vertex only once refs hits zero.
+// runtime's live heap instead). refs counts how many DAGs reference this vertex:
+// the tipsets that reach it (one per occupying key, set at PutSized) plus the
+// cached read-subdags that adopted it (publishSubdag). Each tipset ref is
+// released by its key's eviction walk; each subdag ref by the subdag's
+// drop/replace or its leaf's eviction. reclaimUnreferenced frees a vertex only
+// once refs hits zero.
 type vertex struct {
 	eff  *pb.Effect
 	size int64
@@ -70,9 +73,9 @@ type vertex struct {
 // (subdags, reduced memos, subscriptions) that grows alongside it. Bytes()
 // reports the runtime's exact live heap instead — see Bytes.
 //
-// Per-key refcounting (incref/decref) lets eviction drop whole keys and
-// reclaim only the vertices no other key still needs; a vertex is referenced
-// by every index tip and cached subdag that includes it.
+// DAG-reference counting lets eviction drop whole keys and reclaim only the
+// vertices no other key or read still needs; a vertex is referenced by every
+// tipset that reaches it and every cached subdag that adopted it.
 type VertexPool struct {
 	m *xsync.Map[Tip, *vertex]
 
@@ -126,41 +129,87 @@ func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
 // length of MarshalEffect's output, or the wire protoData); vertexOverhead is
 // added on top. Re-Put semantics match Put: an already-resident tip is kept.
 //
-// On first store, the effect increfs each of its deps: emitting (or ingesting) an
-// effect that builds on prior state is a new reference to that state, so the whole
-// chain from a live tip down stays resident even for keys that were never read
-// (no subdag exists to pin them). Snapshot effects are the cutoff — they capture
-// their deps' state into a reduced form, so they deliberately do NOT pin their
-// deps, which is what lets reclaimUnreferenced free below-snapshot history. The
-// matching decref is in delete().
+// A new vertex is born with its creation refcount equal to the number of tipsets
+// it occupies — its "walkable from a tipset" references, one per reaching tip.
+// An ordinary effect is the tip of its single key, so it starts at 1; a bind
+// commits a whole keyset and is the tip of each key, so it starts at len(Keys).
+// This pins the vertex (interior chain nodes included, local or backfilled from a
+// peer) until each occupying key is evicted, where the eviction reachable-walk
+// decrefs it once per key (releaseChainRefs). The count is stored before the
+// vertex is published via LoadOrStore, so reclaimUnreferenced never observes a
+// fresh vertex at 0 (a birth-race free). Read adoption layers further refs on top
+// in publishSubdag.
 func (p *VertexPool) PutSized(tip Tip, eff *pb.Effect, protoLen int) {
 	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
+	nv.refs.Store(tipCount(eff))
 	if _, loaded := p.m.LoadOrStore(tip, nv); loaded {
-		return // already resident; its deps were incref'd on the first store
-	}
-	if eff.GetSnapshot() == nil {
-		for _, dep := range eff.Deps {
-			p.incref(r(dep))
-		}
+		return // already resident; keep its accumulated refcount
 	}
 }
 
-// delete removes tip from the pool, releases the chain references the effect held
-// (its dep increfs from PutSized — cascading reclaim down the chain once its top
-// is freed), and counts a reclaim. Returns the per-vertex size estimate freed
-// (telemetry only), or 0 if tip was absent. Its only caller is reclaimUnreferenced.
+// tipCount is the number of index tipsets a freshly-emitted effect occupies: one
+// per key it is the tip of. A bind commits every key in its keyset, so it is the
+// tip of each; any other effect is the tip of its single key.
+func tipCount(eff *pb.Effect) int32 {
+	if bind := eff.GetTxnBind(); bind != nil {
+		if n := len(bind.Keys); n > 0 {
+			return int32(n)
+		}
+	}
+	return 1
+}
+
+// PutSizedCache stores a fetched effect on a key we do NOT serve as a reclaimable
+// cache entry: refs start at 0, so it carries no creation ref and reclaimUnref-
+// erenced frees it the moment no subdag adopts it. These are cross-key bind
+// adjudication fetches (and remote effects on unsubscribed keys): a read that
+// walks them holds them via the reconstruct dag for its duration, and they are
+// refetchable from a peer, so they must not pin memory the way an owned effect's
+// creation ref does. An already-resident owned tip is kept (LoadOrStore), never
+// downgraded. protoLen semantics match PutSized.
+func (p *VertexPool) PutSizedCache(tip Tip, eff *pb.Effect, protoLen int) {
+	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
+	p.m.LoadOrStore(tip, nv) // refs default to 0; keep an existing (owned) vertex
+}
+
+// delete removes tip from the pool and counts a reclaim. It does NOT touch the
+// effect's deps: a vertex is kept alive by the tipsets and DAGs that reach it
+// (its own creation/adoption refs), not by its parents, so freeing a vertex
+// never cascades to its deps — a shared dep stays as long as another reacher
+// still references it. Returns the per-vertex size estimate freed (telemetry
+// only), or 0 if tip was absent. Its only caller is reclaimUnreferenced.
 func (p *VertexPool) delete(tip Tip) int64 {
 	prev, loaded := p.m.LoadAndDelete(tip)
 	if !loaded {
 		return 0
 	}
-	if prev.eff != nil && prev.eff.GetSnapshot() == nil {
-		for _, dep := range prev.eff.Deps {
-			p.decref(r(dep))
-		}
-	}
 	p.reclaimed.Add(1)
 	return prev.size
+}
+
+// decrefChainNode releases one creation reference on tip and returns its effect
+// so the eviction reachable-walk (releaseChainRefs) can follow its deps. ok is
+// false when tip is not resident — already reclaimed or never fetched — so there
+// is nothing below it to release. It decrefs only when refs>0: a served key's
+// chain can include cache nodes (refs==0, no creation ref) fetched for cross-key
+// adjudication, and those carry no creation ref to release — the subdag-adoption
+// decref already handled any DAG ref they held. A single map load serves both the
+// decref and the dep follow.
+func (p *VertexPool) decrefChainNode(tip Tip) (*pb.Effect, bool) {
+	v, ok := p.m.Load(tip)
+	if !ok {
+		return nil, false
+	}
+	for {
+		n := v.refs.Load()
+		if n <= 0 {
+			break // cache node (no creation ref) or already released — nothing to do
+		}
+		if v.refs.CompareAndSwap(n, n-1) {
+			break
+		}
+	}
+	return v.eff, true
 }
 
 // recordColdEviction counts one key evicted by the index's bounded sweep under
@@ -302,16 +351,19 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 		case <-e.memGovStop:
 			return
 		case <-ticker.C:
-			// 1. Reclaim refs-0 vertices unconditionally. They are below-LCA history
-			//    and orphans the GC still marks as live (the pool map references
-			//    them), so letting them pile up between ticks inflates the live-heap
-			//    reading with reclaimable garbage — the governor would then size a
-			//    deficit against memory that's about to free itself. Proactive
-			//    reclaim keeps Bytes() tracking the true working set.
-			e.reclaimUnreferenced()
-			// 2. Drain any budget the write path didn't (idle / low write rate), so
-			//    a quiet node still converges to target.
+			// 1. Drain any budget the write path didn't (idle / low write rate), so
+			//    a quiet node still converges to target. Each eviction only drops the
+			//    victim's tip and queues its ref-release walk (releaseQueue) — the
+			//    walk runs in step 2, off the latency path.
 			e.drainEvictBudget(maxDrainPerTick)
+			// 2. Reclaim: first run the deferred ref-release walks for every key
+			//    evicted since the last tick (inline back-pressure evictions plus the
+			//    drain above), then free the now-refs-0 vertices. Below-LCA history
+			//    and orphans the GC still marks as live (the pool map references them)
+			//    would otherwise inflate the live-heap reading with reclaimable
+			//    garbage; reclaiming before measuring keeps Bytes() on the true
+			//    working set rather than memory that's about to free itself.
+			e.reclaimUnreferenced()
 			// 3. Re-measure and set the deficit for the write path to drain over the
 			//    next second as back-pressure. Sized as overage / true per-key
 			//    footprint (live heap / live keys), straight from the runtime.
@@ -387,21 +439,40 @@ func (e *Engine) drainEvictBudget(maxKeys int) {
 	// write-path drain.
 }
 
+// drainPendingReleases runs the deferred creation-ref chain walks
+// (releaseChainRefs) for keys cold-evicted since the last call. Single-consumer:
+// only reclaimUnreferenced (on the governor goroutine) calls it. It dequeues
+// exactly releasePending entries — the count enqueued so far — so the blocking
+// UMPSCQueue.Dequeue never waits on an empty queue; entries enqueued concurrently
+// after the Swap are counted into the next drain.
+func (e *Engine) drainPendingReleases() {
+	n := e.releasePending.Swap(0)
+	if n == 0 {
+		return
+	}
+	q := e.releaseQueue.Load() // non-nil: pending>0 means onLeafEvicted ran releaseQ
+	for ; n > 0; n-- {
+		ek := q.Dequeue()
+		e.releaseChainRefs(ek.key, ek.tips, ek.ls)
+	}
+}
+
 // reclaimUnreferenced drops every pool vertex whose refcount is zero: it is held
-// by no current index tip and no effect that deps on it, so nothing reconstruct
-// walks from a live tip can reach it — it is below a snapshot or a true orphan,
-// and safe to free (getEffect re-fetches on the rare miss). The maintained
-// refcount is the membership oracle, so reclamation needs no per-key DAG walk.
+// by no tipset that reaches it and no cached subdag that adopted it, so nothing
+// reconstruct walks from a live tip can reach it — it is a released chain node, a
+// reclaimable cache fetch, or a true orphan, and safe to free (getEffect
+// re-fetches on the rare miss). The maintained refcount is the membership oracle,
+// so reclamation needs no per-key DAG walk.
 //
-// It loops to a fixpoint: deleting a vertex decrefs the deps it built on (see
-// delete), which can drop a parent further down the chain to refs==0, so freeing
-// the top of a now-dead chain (e.g. an evicted key's tip) cascades the reclaim
-// all the way down to its snapshot over successive passes. Bounded by chain depth
-// (compaction keeps that small). System-key effects are pinned defensively.
+// It first drains releaseQueue — the deferred creation-ref chain walks for keys
+// cold-evicted since the last call — so an evicted key's chain drops to refs==0
+// in this same pass and frees here, the work having moved off the eviction
+// latency path. System-key effects are pinned defensively.
 func (e *Engine) reclaimUnreferenced() int64 {
 	if e.effectCache == nil {
 		return 0
 	}
+	e.drainPendingReleases()
 	var total int64
 	for {
 		var reclaimed int64

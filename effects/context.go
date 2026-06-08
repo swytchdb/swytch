@@ -735,7 +735,6 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		if c.engine.effectCache != nil {
 			c.engine.effectCache.Put(offset, eff)
 		}
-		c.engine.backpressure()
 		return offset, nil, nil
 	}
 
@@ -746,7 +745,6 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	if c.engine.effectCache != nil {
 		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
-	c.engine.backpressure()
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
@@ -761,10 +759,19 @@ func (c *Context) Flush() error {
 		defer flushSpan.End()
 	}
 
+	// Back-pressure once per command, not once per effect: the effects were
+	// already pooled during Emit, so a command that wrote N effects (e.g. value +
+	// type-tag, or a read that also compacted) pays a single bounded eviction
+	// slice here instead of N. The drain itself is cheap — it drops victim tips and
+	// defers their ref-release walk to the governor (see Engine.releaseQueue).
+	var err error
 	if !c.inTx {
-		return c.flushNonTx()
+		err = c.flushNonTx()
+	} else {
+		err = c.flushTx()
 	}
-	return c.flushTx()
+	c.engine.backpressure()
+	return err
 }
 
 // flushNonTx is the original Flush body for non-transactional writes.
@@ -1586,27 +1593,6 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 			// refcount call here.
 			return
 		}
-	}
-}
-
-// applyRefDelta is the trie's refDelta hook for index-tip refcounting. The trie
-// calls it on every leaf tip-set transition — insert, RemoveTips, delete,
-// eviction — so no removal path can silently skip the decref. It increfs the
-// added index tips and decrefs the removed ones; that pins the chain *head*.
-// Everything below the head is pinned by dep-refcounting (each effect increfs the
-// deps it builds on; see VertexPool.PutSized), so when an evicted leaf's tip is
-// decref'd here and reclaimed, the dep-decref in delete() cascades the reclaim
-// down the rest of that key's chain. The cached subdag and reduced memo hold no
-// refs (pure caches), so a dropped leaf needs no extra release here.
-func (e *Engine) applyRefDelta(added, removed []Tip, _ *leafState) {
-	if e.effectCache == nil {
-		return
-	}
-	for _, t := range added {
-		e.effectCache.incref(t)
-	}
-	for _, t := range removed {
-		e.effectCache.decref(t)
 	}
 }
 

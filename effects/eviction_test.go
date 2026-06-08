@@ -29,17 +29,16 @@ import (
 	"github.com/swytchdb/swytch/keytrie"
 )
 
-// TestReclaim_KeepsUnreadKeyValue is the regression test for the dep-refcount
-// fix: a key that is written but never read has no subdag, so before the fix its
-// value-carrying data effect (which sits below the type-tag tip) was refs==0 and
-// reclaimUnreferenced deleted it — losing the value. With dep-refcounting the
-// type-tag tip increfs the data effect it builds on, so reclaim leaves it alone
-// and the later read still returns the value.
+// TestReclaim_KeepsUnreadKeyValue is the regression test for the data-loss bug: a
+// key that is written but never read has no subdag, so a model that only pins the
+// index-tip would leave the value-carrying data effect (which sits below the
+// type-tag tip) at refs==0 and reclaimUnreferenced would delete it — losing the
+// value. With creation refs every ingested vertex (the data effect included) is
+// born at refs==1, so reclaim leaves it alone and the later read still returns the
+// value. The ref is released only when the key is evicted.
 func TestReclaim_KeepsUnreadKeyValue(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
-	e.index.SetRefDelta(e.applyRefDelta)
-
 	dataOff := log.putEffect(&pb.Effect{
 		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
 		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("hello"))},
@@ -72,7 +71,6 @@ func TestReclaim_KeepsUnreadKeyValue(t *testing.T) {
 func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
-	e.index.SetRefDelta(e.applyRefDelta)
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
@@ -150,7 +148,6 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
-	e.index.SetRefDelta(e.applyRefDelta)
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
@@ -208,7 +205,6 @@ func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
 func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
-	e.index.SetRefDelta(e.applyRefDelta)
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
@@ -270,7 +266,6 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
-	e.index.SetRefDelta(e.applyRefDelta)
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
@@ -340,23 +335,21 @@ func TestEvictBounded_PinsSystemKey(t *testing.T) {
 	}
 }
 
-// TestFlushIndex_ReleasesTipRefs verifies the trie-owned refcount: FlushIndex
-// deletes keys via the trie's Delete, which fires refDelta so the index-tip
-// reference is released and reclaimUnreferenced can free the vertex. Before the
-// trie-owned-refcount refactor, Delete bypassed the manual refcount protocol
-// and the vertex leaked permanently.
+// TestFlushIndex_ReleasesTipRefs verifies FlushIndex releases creation refs:
+// Delete bypasses the eviction notify, so FlushIndex itself walks each key's
+// chain (releaseChainRefs) to decref the creation ref, after which
+// reclaimUnreferenced frees the vertex. Without that release the vertex would
+// leak permanently — Delete touches only the index, never the pool.
 func TestFlushIndex_ReleasesTipRefs(t *testing.T) {
 	e := newTestEngine(&mockBroadcaster{})
-	e.index.SetRefDelta(e.applyRefDelta)
-
 	const key = "user:k"
 	tip := Tip{1, 5}
-	// Resident + indexed: PutSized makes the vertex present (incref/decref no-op
-	// on absent tips), Insert fires refDelta to incref the tip (refs=1).
+	// Resident + indexed: PutSized seeds the creation ref (refs=1) for the one
+	// tipset this effect occupies; Insert only updates the index, not refs.
 	e.effectCache.PutSized(tip, &pb.Effect{Key: []byte(key)}, 10)
 	e.index.Insert(key, nil, keytrie.NewTipSet(tip))
 
-	// While it is a live index tip, reclaim must not free it.
+	// While it is a live, reachable tip, reclaim must not free it.
 	e.reclaimUnreferenced()
 	if _, ok := e.effectCache.Get(tip); !ok {
 		t.Fatal("referenced index tip was reclaimed")
@@ -365,33 +358,44 @@ func TestFlushIndex_ReleasesTipRefs(t *testing.T) {
 	e.FlushIndex()
 	e.reclaimUnreferenced()
 	if _, ok := e.effectCache.Get(tip); ok {
-		t.Fatal("FlushIndex did not release the tip refcount; vertex leaked")
+		t.Fatal("FlushIndex did not release the creation refcount; vertex leaked")
 	}
 }
 
-// TestRemoveTips_ReleasesPrunedRef verifies reconstruct's stale-tip pruning path
-// now releases refs: RemoveTips fires refDelta for the dropped tips while the
-// kept tips stay referenced. Before the refactor RemoveTips skipped the decref
-// and the pruned vertex leaked.
-func TestRemoveTips_ReleasesPrunedRef(t *testing.T) {
+// TestRemoveTips_KeepsReachableAncestor verifies the new-model semantics of
+// stale-tip pruning. RemoveTips drops a redundant ancestor tip from the frontier
+// but does NOT release its creation ref: the ancestor is still reachable from the
+// kept descendant tip, and reconstruct still walks through it, so it must stay
+// resident. The ref is released only when the key is removed for good (here via
+// FlushIndex), whose chain walk frees the whole lineage.
+func TestRemoveTips_KeepsReachableAncestor(t *testing.T) {
 	e := newTestEngine(&mockBroadcaster{})
-	e.index.SetRefDelta(e.applyRefDelta)
-
 	const key = "user:k"
-	keep := Tip{1, 5}
-	stale := Tip{1, 6}
-	e.effectCache.PutSized(keep, &pb.Effect{Key: []byte(key)}, 10)
-	e.effectCache.PutSized(stale, &pb.Effect{Key: []byte(key)}, 10)
-	e.index.Insert(key, nil, keytrie.NewTipSet(keep, stale))
+	ancestor := Tip{1, 5}
+	head := Tip{1, 6}
+	e.effectCache.PutSized(ancestor, &pb.Effect{Key: []byte(key)}, 10)
+	e.effectCache.PutSized(head, &pb.Effect{Key: []byte(key), Deps: []*pb.EffectRef{toPbRef(ancestor)}}, 10)
+	e.index.Insert(key, nil, keytrie.NewTipSet(ancestor, head))
 
-	e.index.RemoveTips(key, []Tip{stale})
+	// Prune the redundant ancestor from the frontier — it stays reachable via head.
+	e.index.RemoveTips(key, []Tip{ancestor})
 	e.reclaimUnreferenced()
 
-	if _, ok := e.effectCache.Get(keep); !ok {
-		t.Fatal("kept index tip was wrongly reclaimed")
+	if _, ok := e.effectCache.Get(head); !ok {
+		t.Fatal("head tip was wrongly reclaimed")
 	}
-	if _, ok := e.effectCache.Get(stale); ok {
-		t.Fatal("RemoveTips did not release the pruned tip; vertex leaked")
+	if _, ok := e.effectCache.Get(ancestor); !ok {
+		t.Fatal("pruned ancestor was reclaimed while still reachable from the head tip")
+	}
+
+	// Removing the key for good releases the whole chain.
+	e.FlushIndex()
+	e.reclaimUnreferenced()
+	if _, ok := e.effectCache.Get(head); ok {
+		t.Fatal("FlushIndex did not release the head tip")
+	}
+	if _, ok := e.effectCache.Get(ancestor); ok {
+		t.Fatal("FlushIndex did not release the pruned ancestor; chain walk missed it")
 	}
 }
 
@@ -498,7 +502,10 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 		}},
 	}
 	systemTip := Tip{1, 1}
-	e.effectCache.Put(systemTip, systemEff)
+	// Cache residency (no creation ref): these are unindexed, never reached from a
+	// served tip — exactly how a cross-key fetch or an un-served orphan is pooled.
+	// The system key must survive on the isSystemKey pin alone, not a refcount.
+	e.effectCache.PutSizedCache(systemTip, systemEff, 64)
 
 	// User-key effects with no index entry — below-LCA / orphan from the
 	// sweep's perspective, so all should be evicted.
@@ -515,11 +522,11 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 				Value:      &pb.DataEffect_Raw{Raw: make([]byte, 256)},
 			}},
 		}
-		e.effectCache.Put(Tip{1, 1000 + i}, userEff)
+		e.effectCache.PutSizedCache(Tip{1, 1000 + i}, userEff, 256)
 	}
 
 	// Run reclamation directly (the governor fires it on its tick under
-	// memory pressure; here we drive it deterministically). These effects
+	// memory pressure; here we drive it deterministically). These cache effects
 	// have no index tip and no subdag, so their refcount is zero.
 	e.reclaimUnreferenced()
 

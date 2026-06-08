@@ -96,6 +96,13 @@ func newSnapshotEngine(log *snapshotLog) *Engine {
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
+	// Seed the engine's offset counter far above snapshotLog's faked offset space
+	// (base 100, +100/effect). In production every effect — data, subscription,
+	// bind — is minted from this one counter, so Tips are globally unique; the test
+	// log fakes pre-existing effects with a separate counter, so without this the
+	// subscription effects ensureSubscribed emits during a read would climb into the
+	// log's range and alias a data effect's Tip (a collision that desyncs refcounts).
+	e.nextOff.Store(1 << 32)
 	return e
 }
 
