@@ -362,6 +362,32 @@ func TestFlushIndex_ReleasesTipRefs(t *testing.T) {
 	}
 }
 
+// TestPutSized_PromotesCacheEntryToOwned covers the cache→owned upgrade: an effect
+// first pooled as a cross-key cache fetch (PutSizedCache, refs==0) and then
+// re-ingested as owned (PutSized, because we now serve its key) must gain the
+// creation ref it lacked. Without the promotion it stays refs==0 and reclaim drops
+// a vertex we now own. A plain cache entry (no owned put) must still be reclaimed.
+func TestPutSized_PromotesCacheEntryToOwned(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	eff := &pb.Effect{Key: []byte("user:k")}
+
+	owned := Tip{1, 7}
+	e.effectCache.PutSizedCache(owned, eff, 10) // first seen as cross-key cache
+	e.effectCache.PutSized(owned, eff, 10)      // now served → promote to owned
+
+	cacheOnly := Tip{1, 8}
+	e.effectCache.PutSizedCache(cacheOnly, eff, 10) // stays a cache entry
+
+	e.reclaimUnreferenced()
+
+	if _, ok := e.effectCache.Get(owned); !ok {
+		t.Fatal("owned re-put of a cache entry was reclaimed; PutSized did not promote refs 0→creation")
+	}
+	if _, ok := e.effectCache.Get(cacheOnly); ok {
+		t.Fatal("plain cache entry survived reclaim; it carries no creation ref and must be freed")
+	}
+}
+
 // TestRemoveTips_KeepsReachableAncestor verifies the new-model semantics of
 // stale-tip pruning. RemoveTips drops a redundant ancestor tip from the frontier
 // but does NOT release its creation ref: the ancestor is still reachable from the

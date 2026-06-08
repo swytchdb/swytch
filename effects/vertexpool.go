@@ -139,11 +139,21 @@ func (p *VertexPool) Put(tip Tip, eff *pb.Effect) {
 // vertex is published via LoadOrStore, so reclaimUnreferenced never observes a
 // fresh vertex at 0 (a birth-race free). Read adoption layers further refs on top
 // in publishSubdag.
+//
+// If the tip is already resident as a cache entry (PutSizedCache left it at
+// refs==0 because we did not yet serve its key), this owned Put promotes it by
+// adding the creation ref it lacked, so reclaim won't drop a vertex we now own.
+// The CAS makes that race-safe: it loses to reclaim's 0→tombstone claim (the
+// vertex is being freed; we refetch on the next miss) and to a concurrent read's
+// publishSubdag incref (refs>0; left un-promoted, resolved by a later refetch),
+// and it never double-counts an already-owned re-put (refs>0 → CAS fails → keep
+// the accumulated count).
 func (p *VertexPool) PutSized(tip Tip, eff *pb.Effect, protoLen int) {
+	tc := tipCount(eff)
 	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
-	nv.refs.Store(tipCount(eff))
-	if _, loaded := p.m.LoadOrStore(tip, nv); loaded {
-		return // already resident; keep its accumulated refcount
+	nv.refs.Store(tc)
+	if v, loaded := p.m.LoadOrStore(tip, nv); loaded {
+		v.refs.CompareAndSwap(0, tc) // promote a cache-only entry to owned, once
 	}
 }
 
