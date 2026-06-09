@@ -477,9 +477,10 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
 
 	conns := pm.fetchConns()
 
-	// No CDN fetcher: peer fetch only (original behavior)
+	// No CDN fetcher: peer fetch only (original behavior). No outer race to
+	// honor, so root the fetch in pm.ctx (lives for the manager's lifetime).
 	if cdnFetcher == nil {
-		return pm.fetchFromConns(offset, conns)
+		return pm.fetchFromConns(pm.ctx, offset, conns)
 	}
 
 	// Race CDN against peer fetch
@@ -498,9 +499,10 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
 		ch <- result{data, err}
 	}()
 
-	// Path 2: Peer fetch
+	// Path 2: Peer fetch — share the race ctx so peer fetches cancel the
+	// moment CDN wins (or the 10s timeout fires).
 	go func() {
-		data, err := pm.fetchFromConns(offset, conns)
+		data, err := pm.fetchFromConns(ctx, offset, conns)
 		ch <- result{data, err}
 	}()
 
@@ -566,7 +568,7 @@ func (pm *PeerManager) fetchConns() []*quic.Conn {
 
 // fetchFromConns fetches the offset over every connection in parallel,
 // returning the first successful result and cancelling the rest.
-func (pm *PeerManager) fetchFromConns(offset *pb.EffectRef, conns []*quic.Conn) ([]byte, error) {
+func (pm *PeerManager) fetchFromConns(ctx context.Context, offset *pb.EffectRef, conns []*quic.Conn) ([]byte, error) {
 	if len(conns) == 0 {
 		return nil, ErrPeerUnavailable
 	}
@@ -576,7 +578,7 @@ func (pm *PeerManager) fetchFromConns(offset *pb.EffectRef, conns []*quic.Conn) 
 		err  error
 	}
 
-	ctx, cancel := context.WithCancel(pm.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	ch := make(chan result, len(conns))
