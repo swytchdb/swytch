@@ -71,6 +71,7 @@ type PeerManager struct {
 
 	onPeerAdded   func(NodeId)
 	onPeerRemoved func(NodeId)
+	onInboundPeer func(NodeId)
 
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
@@ -194,8 +195,18 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				return pm.inboundConnFor(peerID)
 			},
 			func(peerID NodeId, conn *quic.Conn) {
-				if pm.registerInboundConn(peerID, conn) && pm.heartbeat != nil {
+				if !pm.registerInboundConn(peerID, conn) {
+					return
+				}
+				if pm.heartbeat != nil {
 					pm.heartbeat.SendHeartbeatTo(peerID)
+				}
+				// A previously-unreachable peer is now connected. Kick the
+				// membership read so its effects — and any dep only it holds —
+				// get pulled while it's reachable (the fetch path now falls back
+				// to this inbound connection). Must not block the stream handler.
+				if pm.onInboundPeer != nil {
+					pm.onInboundPeer(peerID)
 				}
 			},
 		)
@@ -299,6 +310,14 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 func (pm *PeerManager) SetPeerLifecycleHooks(onAdded, onRemoved func(NodeId)) {
 	pm.onPeerAdded = onAdded
 	pm.onPeerRemoved = onRemoved
+}
+
+// SetInboundPeerHook registers a callback fired when a peer opens a new inbound
+// connection to us. The callback runs on the transport's stream handler and
+// must not block. Used to kick a membership read so a freshly-reachable peer's
+// effects (and any deps only it holds) are pulled while it is connected.
+func (pm *PeerManager) SetInboundPeerHook(fn func(NodeId)) {
+	pm.onInboundPeer = fn
 }
 
 // Stop shuts down all components.
@@ -453,16 +472,14 @@ func (pm *PeerManager) SetCDNFetcher(f CDNFetcher) {
 // racing against CDN fetch if available. First successful result wins.
 func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
 	token := pm.mu.RLock()
-	peers := make([]*PeerConn, 0, len(pm.peers))
-	for _, pc := range pm.peers {
-		peers = append(peers, pc)
-	}
 	cdnFetcher := pm.cdnFetcher
 	pm.mu.RUnlock(token)
 
-	// No CDN fetcher: sequential peer fetch (original behavior)
+	conns := pm.fetchConns()
+
+	// No CDN fetcher: peer fetch only (original behavior)
 	if cdnFetcher == nil {
-		return pm.fetchFromPeers(offset, peers)
+		return pm.fetchFromConns(offset, conns)
 	}
 
 	// Race CDN against peer fetch
@@ -483,7 +500,7 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
 
 	// Path 2: Peer fetch
 	go func() {
-		data, err := pm.fetchFromPeers(offset, peers)
+		data, err := pm.fetchFromConns(offset, conns)
 		ch <- result{data, err}
 	}()
 
@@ -507,10 +524,50 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
 	return nil, ErrPeerUnavailable
 }
 
-// fetchFromPeers broadcasts to all peers in parallel, returning the first
-// successful result. Cancels remaining fetches once one succeeds.
-func (pm *PeerManager) fetchFromPeers(offset *pb.EffectRef, peers []*PeerConn) ([]byte, error) {
-	if len(peers) == 0 {
+// fetchConns returns every distinct QUIC connection we can fetch over: the
+// outbound connections we dialed (pm.peers) plus the inbound connections peers
+// dialed to us (pm.inboundConns). Deduped by connection pointer so a peer we
+// hold both ways is tried once. Including inbound connections is what lets us
+// pull an effect from a node we never dialed — e.g. a freshly-arrived transient
+// holding a dep no one else has yet. Without it, fetch is blind to exactly the
+// peers the send path already reaches via the transport's inbound fallback.
+func (pm *PeerManager) fetchConns() []*quic.Conn {
+	token := pm.mu.RLock()
+	pcs := make([]*PeerConn, 0, len(pm.peers))
+	for _, pc := range pm.peers {
+		pcs = append(pcs, pc)
+	}
+	pm.mu.RUnlock(token)
+
+	seen := make(map[*quic.Conn]struct{})
+	conns := make([]*quic.Conn, 0, len(pcs))
+	add := func(c *quic.Conn) {
+		if c == nil {
+			return
+		}
+		if _, ok := seen[c]; ok {
+			return
+		}
+		seen[c] = struct{}{}
+		conns = append(conns, c)
+	}
+	for _, pc := range pcs {
+		add(pc.GetQuicConn())
+	}
+
+	pm.inboundMu.RLock()
+	for _, c := range pm.inboundConns {
+		add(c)
+	}
+	pm.inboundMu.RUnlock()
+
+	return conns
+}
+
+// fetchFromConns fetches the offset over every connection in parallel,
+// returning the first successful result and cancelling the rest.
+func (pm *PeerManager) fetchFromConns(offset *pb.EffectRef, conns []*quic.Conn) ([]byte, error) {
+	if len(conns) == 0 {
 		return nil, ErrPeerUnavailable
 	}
 
@@ -522,10 +579,10 @@ func (pm *PeerManager) fetchFromPeers(offset *pb.EffectRef, peers []*PeerConn) (
 	ctx, cancel := context.WithCancel(pm.ctx)
 	defer cancel()
 
-	ch := make(chan result, len(peers))
-	for _, pc := range peers {
-		go func(pc *PeerConn) {
-			data, err := pc.Fetch(ctx, offset)
+	ch := make(chan result, len(conns))
+	for _, c := range conns {
+		go func(c *quic.Conn) {
+			data, err := fetchOverConn(ctx, c, offset)
 			if err != nil {
 				ch <- result{nil, err}
 				return
@@ -535,11 +592,11 @@ func (pm *PeerManager) fetchFromPeers(offset *pb.EffectRef, peers []*PeerConn) (
 				return
 			}
 			ch <- result{data, nil}
-		}(pc)
+		}(c)
 	}
 
 	var lastErr error
-	for range peers {
+	for range conns {
 		r := <-ch
 		if r.err != nil {
 			lastErr = r.err

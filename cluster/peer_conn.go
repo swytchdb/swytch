@@ -132,7 +132,15 @@ func (pc *PeerConn) Fetch(ctx context.Context, offset *pb.EffectRef) ([]byte, er
 	pc.mu.Lock()
 	conn := pc.quicConn
 	pc.mu.Unlock()
+	return fetchOverConn(ctx, conn, offset)
+}
 
+// fetchOverConn runs the fetch request/response protocol on an already-open
+// QUIC connection. Shared by PeerConn.Fetch (a connection we dialed) and the
+// PeerManager's inbound-connection fallback, so a peer we only have an inbound
+// connection to is still a valid fetch source — symmetric with the send path,
+// which already falls back to inboundConns in the notify transport.
+func fetchOverConn(ctx context.Context, conn *quic.Conn, offset *pb.EffectRef) ([]byte, error) {
 	if conn == nil {
 		return nil, ErrPeerUnavailable
 	}
