@@ -132,7 +132,15 @@ func (pc *PeerConn) Fetch(ctx context.Context, offset *pb.EffectRef) ([]byte, er
 	pc.mu.Lock()
 	conn := pc.quicConn
 	pc.mu.Unlock()
+	return fetchOverConn(ctx, conn, offset)
+}
 
+// fetchOverConn runs the fetch request/response protocol on an already-open
+// QUIC connection. Shared by PeerConn.Fetch (a connection we dialed) and the
+// PeerManager's inbound-connection fallback, so a peer we only have an inbound
+// connection to is still a valid fetch source — symmetric with the send path,
+// which already falls back to inboundConns in the notify transport.
+func fetchOverConn(ctx context.Context, conn *quic.Conn, offset *pb.EffectRef) ([]byte, error) {
 	if conn == nil {
 		return nil, ErrPeerUnavailable
 	}
@@ -142,6 +150,23 @@ func (pc *PeerConn) Fetch(ctx context.Context, offset *pb.EffectRef) ([]byte, er
 		return nil, fmt.Errorf("open fetch stream: %w", err)
 	}
 	defer stream.CancelRead(0)
+
+	// quic-go's stream Read/Write don't observe a context once the stream is
+	// open, so a fetch that loses its race (CDN won, a sibling conn replied
+	// first) would block on the peer's reply until it arrives. Tear the stream
+	// down on cancellation to unblock the in-flight Write/Read. done fires on
+	// normal return (defer runs LIFO, before the CancelRead defer) so the
+	// watcher never cancels a healthy stream.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.CancelWrite(0)
+			stream.CancelRead(0)
+		case <-done:
+		}
+	}()
 
 	// Write stream type prefix
 	if _, err := stream.Write([]byte{streamTypeFetch}); err != nil {
@@ -184,6 +209,21 @@ func (pc *PeerConn) ForwardTransaction(ctx context.Context, tx *pb.ForwardedTran
 		return nil, fmt.Errorf("open forward stream: %w", err)
 	}
 	defer stream.CancelRead(0)
+
+	// See fetchOverConn: quic-go stream Read/Write don't observe a context once
+	// the stream is open, so tear it down on cancellation to unblock the
+	// in-flight Write/Read. done fires on normal return so a healthy stream is
+	// never cancelled.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			stream.CancelWrite(0)
+			stream.CancelRead(0)
+		case <-done:
+		}
+	}()
 
 	// Write stream type prefix
 	if _, err := stream.Write([]byte{streamTypeForward}); err != nil {

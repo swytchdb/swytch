@@ -163,6 +163,25 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 			closeEngineOnError(engine),
 		)
 	}
+	// On a fresh inbound connection, kick an async membership read. A holey
+	// reconstruct (a referenced dep no live node had) stores no memo, so this
+	// forces a real DAG walk; the walk now backfills the missing dep from the
+	// just-connected peer via the inbound-connection fetch fallback — healing
+	// the hole while the (often short-lived) peer is reachable, instead of
+	// waiting for the next periodic beacon poll. Set before Start so a
+	// connection arriving immediately doesn't miss the hook.
+	pm.SetInboundPeerHook(func(cluster.NodeId) {
+		go func() {
+			ctx := engine.NewContext()
+			if _, _, err := ctx.GetSnapshot(MembershipKey); err != nil {
+				log.Debug("inbound-peer membership refresh incomplete", "error", err)
+			}
+			if err := ctx.Flush(); err != nil {
+				log.Debug("inbound-peer membership refresh flush failed", "error", err)
+			}
+		}()
+	})
+
 	if err := pm.Start(context.Background()); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("failed to start peer manager: %w", err),
