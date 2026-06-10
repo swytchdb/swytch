@@ -71,7 +71,6 @@ type PeerManager struct {
 
 	onPeerAdded   func(NodeId)
 	onPeerRemoved func(NodeId)
-	onInboundPeer func(NodeId)
 
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
@@ -201,13 +200,6 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				if pm.heartbeat != nil {
 					pm.heartbeat.SendHeartbeatTo(peerID)
 				}
-				// A previously-unreachable peer is now connected. Kick the
-				// membership read so its effects — and any dep only it holds —
-				// get pulled while it's reachable (the fetch path now falls back
-				// to this inbound connection). Must not block the stream handler.
-				if pm.onInboundPeer != nil {
-					pm.onInboundPeer(peerID)
-				}
 			},
 		)
 
@@ -310,14 +302,6 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 func (pm *PeerManager) SetPeerLifecycleHooks(onAdded, onRemoved func(NodeId)) {
 	pm.onPeerAdded = onAdded
 	pm.onPeerRemoved = onRemoved
-}
-
-// SetInboundPeerHook registers a callback fired when a peer opens a new inbound
-// connection to us. The callback runs on the transport's stream handler and
-// must not block. Used to kick a membership read so a freshly-reachable peer's
-// effects (and any deps only it holds) are pulled while it is connected.
-func (pm *PeerManager) SetInboundPeerHook(fn func(NodeId)) {
-	pm.onInboundPeer = fn
 }
 
 // Stop shuts down all components.

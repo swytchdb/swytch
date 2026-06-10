@@ -34,19 +34,11 @@ import (
 
 // Config holds beacon configuration parsed from CLI flags.
 type Config struct {
-	JoinAddr      string        // DNS name to resolve for peer discovery (empty = solo)
-	ClusterPort   int           // QUIC listen port for cluster traffic
-	AdvertiseAddr string        // host:port this node advertises (empty = auto-detect)
-	NodeID        pb.NodeID     // ephemeral node ID
-	Passphrase    string        // shared mTLS passphrase
-	SyncInterval  time.Duration // how often to reconcile local topology with __swytch:members (default 10s)
-}
-
-func (c *Config) syncInterval() time.Duration {
-	if c.SyncInterval > 0 {
-		return c.SyncInterval
-	}
-	return 10 * time.Second
+	JoinAddr      string    // DNS name to resolve for peer discovery (empty = solo)
+	ClusterPort   int       // QUIC listen port for cluster traffic
+	AdvertiseAddr string    // host:port this node advertises (empty = auto-detect)
+	NodeID        pb.NodeID // ephemeral node ID
+	Passphrase    string    // shared mTLS passphrase
 }
 
 // Beacon manages cluster discovery and dynamic membership via effects.
@@ -59,6 +51,11 @@ type Beacon struct {
 	expectedPeers int // DNS-discovered non-self candidate count, set during bootstrap
 	mu            sync.RWMutex
 
+	// topoRefresh coalesces "membership key changed" signals. Capacity 1: a
+	// pending signal already means "re-read on the next loop iteration", so
+	// additional signals during that window collapse into it.
+	topoRefresh chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -67,9 +64,10 @@ type Beacon struct {
 // New creates a beacon. Call Start to begin discovery and membership.
 func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
 	return &Beacon{
-		cfg:    cfg,
-		engine: engine,
-		pm:     pm,
+		cfg:         cfg,
+		engine:      engine,
+		pm:          pm,
+		topoRefresh: make(chan struct{}, 1),
 	}
 }
 
@@ -122,9 +120,14 @@ func (b *Beacon) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Phase 4: Background refresh + membership sync.
+	// Phase 4: Reactive topology projection. The membership key is a normal
+	// key; the connection table is just a projection of it, rebuilt whenever
+	// the key changes (signalled via OnKeyDataAdded → NotifyMembershipChanged).
+	// No polling, and crucially no write-back: we never re-register to "fix" a
+	// stale read — a stale read is a coherence problem to solve in the engine,
+	// not paper over here.
 	b.wg.Add(1)
-	go b.refreshLoop()
+	go b.topologyLoop()
 
 	slog.Info("beacon started",
 		"node_id", b.cfg.NodeID,
@@ -226,72 +229,63 @@ func (b *Beacon) registerSelf() error {
 	return ctx.Flush()
 }
 
-// refreshLoop reconciles the local topology with the replicated
-// membership list on a fixed cadence. Membership entries no longer
-// carry a TTL — they live until an explicit REMOVE_OP (graceful
-// departure, or address-collision sweep when a fresh process binds the
-// same host:port). The loop just pulls the latest snapshot so newly-
-// observed joins propagate into the PeerManager topology.
+// topologyLoop keeps the PeerManager's connection table as a reactive
+// projection of the __swytch:members key. It reads once at startup, then
+// rebuilds topology each time the key changes — driven by
+// NotifyMembershipChanged (wired to OnKeyDataAdded, which fires on both local
+// writes and remote effect arrivals). No poll.
 //
-// Runs in its own goroutine — the sync intentionally does not run from
-// engine OnKeyDataAdded callbacks, which fire synchronously inside
-// Flush and would deadlock the first registerSelf write (GetSnapshot
-// → ensureSubscribed blocks until peers ACK, but peers are
-// simultaneously stuck in their own registerSelf).
-func (b *Beacon) refreshLoop() {
+// It runs in its own goroutine precisely because OnKeyDataAdded fires
+// synchronously inside Flush / HandleRemote: doing the read there would
+// deadlock the write that triggered it (GetSnapshot → ensureSubscribed can
+// block on peer ACKs). So the callback only signals; the read happens here.
+//
+// There is deliberately no re-register. Membership entries live until an
+// explicit REMOVE_OP (graceful departure or the one-time address-collision
+// sweep in registerSelf). If our own entry ever reads back missing, that is a
+// DAG coherence problem to fix in the engine — re-writing membership to
+// compensate is exactly what produced the re-register storm.
+func (b *Beacon) topologyLoop() {
 	defer b.wg.Done()
 
-	// First sync runs immediately rather than after one tick —
-	// otherwise the local topology stays pinned to the DNS-synthetic
-	// view until the first tick fires, which at the 10s default is
-	// long enough for an early client query to route against an
-	// incomplete peer set.
-	{
-		ctx := b.engine.NewContext()
-		snapshot, _, err := ctx.GetSnapshot(MembershipKey)
-		if err == nil {
-			b.syncMembership(snapshot)
-		}
-		ctx.Flush()
-	}
-
-	ticker := time.NewTicker(b.cfg.syncInterval())
-	defer ticker.Stop()
+	// Initial projection: don't wait for the first signal, or the topology
+	// stays pinned to the DNS-synthetic view until something writes the key.
+	b.refreshTopology()
 
 	for {
 		select {
 		case <-b.ctx.Done():
 			return
-		case <-ticker.C:
-			ctx := b.engine.NewContext()
-			snapshot, _, err := ctx.GetSnapshot(MembershipKey)
-			ctx.Flush()
-			if err != nil {
-				slog.Debug("beacon: membership snapshot read failed", "error", err)
-				continue
-			}
-			if snapshot == nil || snapshot.NetAdds == nil || snapshot.NetAdds[string(nodeIDBytes(uint64(b.cfg.NodeID)))] == nil {
-				if err := b.registerSelf(); err != nil {
-					panic("beacon: failed to re-register after membership loss: " + err.Error())
-				}
-				continue
-			}
-			// If a prior registerSelf could not read the snapshot (e.g.
-			// partition or no symmetric peers) it skipped the collision
-			// sweep and a stale predecessor at our address may still be
-			// in the roster. Re-register so the sweep runs against the
-			// now-visible snapshot.
-			if hasDuplicateAdvertiseAddr(snapshot, uint64(b.cfg.NodeID), b.cfg.AdvertiseAddr) {
-				slog.Info("beacon: stale predecessor still at our address, re-registering",
-					"addr", b.cfg.AdvertiseAddr)
-				if err := b.registerSelf(); err != nil {
-					panic("beacon: failed to re-register after duplicate-address detection: " + err.Error())
-				}
-				continue
-			}
-			b.syncMembership(snapshot)
+		case <-b.topoRefresh:
+			b.refreshTopology()
 		}
 	}
+}
+
+// NotifyMembershipChanged signals that the membership key changed. Non-blocking
+// and coalescing: a pending signal already means "re-read on the next
+// iteration", so extras collapse into it. Safe to call from inside an engine
+// callback — it never reenters the engine.
+func (b *Beacon) NotifyMembershipChanged() {
+	select {
+	case b.topoRefresh <- struct{}{}:
+	default:
+	}
+}
+
+// refreshTopology reads the current membership and projects it onto the
+// PeerManager. Read-only with respect to membership — it never emits a member
+// effect (a GetSnapshot may still compact the chain, which is normal for any
+// key).
+func (b *Beacon) refreshTopology() {
+	ctx := b.engine.NewContext()
+	snapshot, _, err := ctx.GetSnapshot(MembershipKey)
+	ctx.Flush()
+	if err != nil {
+		slog.Debug("beacon: membership snapshot read failed", "error", err)
+		return
+	}
+	b.syncMembership(snapshot)
 }
 
 // syncMembership updates the PeerManager topology from the given snapshot
