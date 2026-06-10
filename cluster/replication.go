@@ -143,21 +143,6 @@ type trackedRequest struct {
 	traceContext []byte           // OTel trace context for correlating ACK spans
 }
 
-// Register creates a new tracked request and returns its ID and future.
-func (rt *requestTracker) Register(peerID NodeId, packetSize int) (uint64, *ReplicationFuture) {
-	id := rt.nextID.Add(1)
-	f := &ReplicationFuture{done: make(chan struct{})}
-	f.expected.Store(1)
-	f.setupDone.Store(true)
-	rt.pending.Store(id, &trackedRequest{
-		future:     f,
-		createdAt:  time.Now().UnixNano(),
-		packetSize: packetSize,
-		peerID:     peerID,
-	})
-	return id, f
-}
-
 // Resolve resolves the future for the given request ID. First call wins.
 // Returns the tracked request if found, nil otherwise.
 func (rt *requestTracker) Resolve(requestID uint64) *trackedRequest {
@@ -606,24 +591,34 @@ func (r *Replicator) ReplicateMarshalled(_ *pb.OffsetNotify, notifyBody []byte, 
 // packet, sends it, and blocks for the ACK/NACK. Shared by ReplicateTo (which
 // marshals per call) and ReplicateMarshalled (which reuses a shared body).
 func (r *Replicator) replicateBody(notifyBody []byte, targetPeerID NodeId) ([]*pb.NackNotify, error) {
-	requestID, future := r.tracker.Register(targetPeerID, 0)
-
+	requestID := r.tracker.nextID.Add(1)
 	notifyPkt := AssembleNotifyPacket(requestID, notifyBody)
+
+	// Populate every field — deadline and retransmit included — BEFORE storing,
+	// so the sweep can never observe a deadline=0 entry and expire it in the
+	// window before initialization. Stored before Send because a fast peer's
+	// ACK/NACK can land before Send() returns. retransmit stays false: this is
+	// the deadline-mode bind ReplicateTo path.
+	now := time.Now().UnixNano()
+	future := &ReplicationFuture{done: make(chan struct{})}
+	future.expected.Store(1)
+	future.setupDone.Store(true)
+	tr := &trackedRequest{
+		future:     future,
+		createdAt:  now,
+		deadline:   now + int64(r.replicationTimeout),
+		peerID:     targetPeerID,
+		packetData: notifyPkt,
+	}
+	tr.lastSentAt.Store(now)
+	r.tracker.pending.Store(requestID, tr)
 
 	wireSize, err := r.transport.Send(targetPeerID, notifyPkt)
 	if err != nil {
+		r.tracker.pending.Delete(requestID)
 		return nil, fmt.Errorf("send to peer %d: %w", targetPeerID, err)
 	}
-
-	// Set tracked request details for retransmission
-	now := time.Now().UnixNano()
-	deadlineNano := time.Now().Add(r.replicationTimeout).UnixNano()
-	if tr, ok := r.tracker.pending.Load(requestID); ok {
-		tr.lastSentAt.Store(now)
-		tr.deadline = deadlineNano
-		tr.packetSize = wireSize
-		tr.packetData = notifyPkt
-	}
+	tr.packetSize = wireSize
 
 	RecordNotificationSent()
 
