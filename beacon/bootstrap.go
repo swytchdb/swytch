@@ -41,12 +41,9 @@ import (
 // On return: PeerManager is connected to at least one candidate, or
 // we've fallen back to solo mode with a warning.
 func (b *Beacon) bootstrap(ctx context.Context) error {
-	resolveCtx, resolveCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer resolveCancel()
-
-	candidates, err := ResolveJoinAddr(resolveCtx, nil, b.cfg.JoinAddr, b.cfg.ClusterPort)
+	candidates, err := b.resolveJoinAddrWithRetry(ctx)
 	if err != nil {
-		slog.Warn("beacon: DNS resolution failed, starting solo", "error", err)
+		slog.Warn("beacon: DNS resolution failed after retries, starting solo", "error", err)
 		return nil
 	}
 
@@ -69,6 +66,47 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 		return nil
 	}
 	return nil
+}
+
+// resolveJoinAddrWithRetry resolves JoinAddr, retrying on error with capped
+// backoff until it succeeds or the deadline passes. A resolution error at
+// startup is almost always a transient race, not a permanent failure: a
+// Kubernetes headless service returns NXDOMAIN ("no such host") until at least
+// one peer's endpoint is Ready, so an error means "peers aren't up yet", not
+// "there is no cluster". Conceding solo on the first error is what stranded
+// nodes in a split-brain membership. A *successful* resolution that returns no
+// usable peers is authoritative (we may be the first node) — the caller starts
+// solo, and late joiners then converge via the reactive membership projection.
+func (b *Beacon) resolveJoinAddrWithRetry(ctx context.Context) ([]string, error) {
+	const (
+		perAttemptTimeout = 10 * time.Second
+		resolveDeadline   = 30 * time.Second
+		backoffStart      = 250 * time.Millisecond
+		backoffMax        = 3 * time.Second
+	)
+
+	deadlineCtx, cancel := context.WithTimeout(ctx, resolveDeadline)
+	defer cancel()
+
+	backoff := backoffStart
+	var lastErr error
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(deadlineCtx, perAttemptTimeout)
+		candidates, err := ResolveJoinAddr(attemptCtx, nil, b.cfg.JoinAddr, b.cfg.ClusterPort)
+		attemptCancel()
+		if err == nil {
+			return candidates, nil
+		}
+		lastErr = err
+		slog.Debug("beacon: DNS resolution failed, retrying", "error", err, "backoff", backoff)
+
+		select {
+		case <-deadlineCtx.Done():
+			return nil, lastErr
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, backoffMax)
+	}
 }
 
 // waitForMembershipConverged blocks until the membership key shows
