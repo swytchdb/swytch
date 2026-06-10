@@ -63,7 +63,7 @@ type ReplicationFuture struct {
 	err       atomic.Pointer[error]
 	nacks     atomic.Pointer[[]*pb.NackNotify] // NACKs from NACK response (status=0x01)
 	expected  atomic.Int32                     // total tracker entries attached to this future
-	dropped   atomic.Int32                     // tracked peers that responded with NotSubscribed
+	dropped   atomic.Int32                     // tracked peers that can no longer ACK: NotSubscribed, or swept after leaving the alive+symmetric set
 	setupDone atomic.Bool                      // true once expected has been finalized
 }
 
@@ -121,13 +121,24 @@ type requestTracker struct {
 }
 
 type trackedRequest struct {
-	future       *ReplicationFuture
-	createdAt    int64 // UnixNano
-	lastSentAt   int64 // UnixNano of most recent send (original or retransmit)
-	deadline     int64 // UnixNano — absolute deadline for this request
-	packetSize   int   // bytes sent (for metrics)
-	peerID       NodeId
-	packetData   []byte           // serialized plaintext for retransmission
+	future     *ReplicationFuture
+	createdAt  int64        // UnixNano
+	lastSentAt atomic.Int64 // UnixNano of most recent send attempt (original or retransmit)
+	deadline   int64        // UnixNano — absolute deadline (deadline-mode requests only)
+	packetSize int          // bytes sent (for metrics)
+	peerID     NodeId
+	packetData []byte // serialized plaintext for retransmission
+
+	// retransmit selects the sweep's give-up policy. When true (same-region
+	// first-ACK replication) a send that fails only because the peer's
+	// connection isn't up yet must be HELD and retried, not dropped: dropping
+	// it orphaned compaction snapshots whose dependents later became
+	// unreconstructable cluster-wide. The sweep retransmits the packet every
+	// tick until the peer ACKs or leaves the alive+symmetric set — no
+	// wall-clock deadline. When false (cross-region fire-and-forget, bind
+	// ReplicateTo) the sweep uses the deadline-based give-up below.
+	retransmit bool
+
 	nacks        []*pb.NackNotify // NACKs received in a NACK response (status=0x01)
 	traceContext []byte           // OTel trace context for correlating ACK spans
 }
@@ -157,18 +168,20 @@ func (rt *requestTracker) Resolve(requestID uint64) *trackedRequest {
 	return nil
 }
 
-// SweepDeadlines checks pending requests and rejects any that have exceeded
-// their deadline. QUIC handles all retransmission at the transport layer —
-// no application-level retransmit needed.
-func (rt *requestTracker) SweepDeadlines() {
+// rejectDeadlineExpired rejects deadline-mode requests (cross-region
+// fire-and-forget, bind ReplicateTo) that have exceeded their deadline.
+// Same-region first-ACK requests (retransmit=true) are swept by
+// Replicator.sweep, which retransmits instead of expiring on a clock.
+func (rt *requestTracker) rejectDeadlineExpired() {
 	nowNano := time.Now().UnixNano()
 
 	rt.pending.Range(func(key uint64, tr *trackedRequest) bool {
-		if nowNano > tr.deadline {
-			rt.pending.Delete(key)
-			tr.future.reject(ErrReplicationTimeout)
-			RecordRetransmissionGiveUp(tr.peerID)
+		if tr.retransmit || nowNano <= tr.deadline {
+			return true
 		}
+		rt.pending.Delete(key)
+		tr.future.reject(ErrReplicationTimeout)
+		RecordRetransmissionGiveUp(tr.peerID)
 		return true
 	})
 }
@@ -309,9 +322,6 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 	// One tracked request per peer; future resolves on FIRST ACK (first-ACK semantics).
 	future := &ReplicationFuture{done: make(chan struct{})}
 
-	var trackedCount atomic.Int32
-	deadlineNano := time.Now().Add(r.replicationTimeout).UnixNano()
-
 	// Fan the per-peer sends out concurrently: each transport.Send opens a
 	// QUIC uni-stream that can block on flow control, so a serial loop made
 	// PUT latency grow linearly with same-region peer count. wg.Wait below
@@ -333,40 +343,36 @@ func (r *Replicator) Replicate(notify *pb.OffsetNotify, wireData []byte) *Replic
 			tr := &trackedRequest{
 				future:       future,
 				createdAt:    now,
-				lastSentAt:   now,
-				deadline:     deadlineNano,
 				peerID:       targetID,
 				packetData:   notifyPkt,
+				retransmit:   true,
 				traceContext: notify.GetTraceContext(),
 			}
+			tr.lastSentAt.Store(now)
 			r.tracker.pending.Store(requestID, tr)
 			future.expected.Add(1)
 
+			// A send failure here is almost always "the peer's connection
+			// isn't up yet" (startup race, mid-reconnect). The request stays
+			// tracked; Replicator.sweep retransmits it once a connection is
+			// available and only gives up if the peer leaves the
+			// alive+symmetric set. We must NOT drop it: an un-replicated tip
+			// that a later effect depends on becomes an unrecoverable orphan.
 			wireSize, err := r.transport.Send(targetID, notifyPkt)
 			if err != nil {
-				// Remove the pre-registered tracked request on send failure
-				r.tracker.pending.Delete(requestID)
-				future.expected.Add(-1)
-				slog.Error("same-region send failed, replication degraded",
+				slog.Debug("same-region send failed, holding for retransmit",
 					"peer", targetID, "error", err)
 				return
 			}
 			tr.packetSize = wireSize
 			RecordNotificationSent()
-			trackedCount.Add(1)
 		}(targetID)
 	}
 	wg.Wait()
 
-	if trackedCount.Load() == 0 {
-		slog.Error("all same-region sends failed", "targets", len(targets))
-		future.reject(ErrNoPeers)
-		return future
-	}
-
-	// Finalize expected so any in-flight NotSubscribed responses can
-	// trigger fast-fail. Re-check here covers the race where every
-	// tracked peer responded before we set setupDone.
+	// Finalize expected so NotSubscribed responses and sweep give-ups can
+	// resolve the future. Re-check here covers the race where every tracked
+	// peer responded before we set setupDone.
 	future.setupDone.Store(true)
 	if future.dropped.Load() == future.expected.Load() {
 		future.reject(ErrAllPeersNotSubscribed)
@@ -409,11 +415,11 @@ func (r *Replicator) sendCrossRegion(notify *pb.OffsetNotify, regions map[NodeId
 		tr := &trackedRequest{
 			future:     nullFuture,
 			createdAt:  now,
-			lastSentAt: now,
 			deadline:   deadlineNano,
 			peerID:     peerID,
 			packetData: notifyPkt,
 		}
+		tr.lastSentAt.Store(now)
 		r.tracker.pending.Store(requestID, tr)
 
 		wireSize, err := r.transport.Send(peerID, notifyPkt)
@@ -613,7 +619,7 @@ func (r *Replicator) replicateBody(notifyBody []byte, targetPeerID NodeId) ([]*p
 	now := time.Now().UnixNano()
 	deadlineNano := time.Now().Add(r.replicationTimeout).UnixNano()
 	if tr, ok := r.tracker.pending.Load(requestID); ok {
-		tr.lastSentAt = now
+		tr.lastSentAt.Store(now)
 		tr.deadline = deadlineNano
 		tr.packetSize = wireSize
 		tr.packetData = notifyPkt
@@ -662,7 +668,8 @@ func (r *Replicator) SendNack(nack *pb.NackNotify, targetPeerID NodeId) {
 	}
 }
 
-// sweepLoop periodically checks pending requests and retransmits or gives up.
+// sweepLoop periodically retransmits held same-region requests and expires
+// deadline-mode ones.
 func (r *Replicator) sweepLoop() {
 	defer r.wg.Done()
 	ticker := time.NewTicker(sweepInterval)
@@ -678,7 +685,58 @@ func (r *Replicator) sweepLoop() {
 			})
 			return
 		case <-ticker.C:
-			r.tracker.SweepDeadlines()
+			r.sweep()
 		}
 	}
+}
+
+// sweep advances every pending request once per tick. Deadline-mode requests
+// (cross-region, bind ReplicateTo) expire on their clock. Same-region
+// first-ACK requests (retransmit=true) are driven to durability: a request
+// whose target has left the alive+symmetric set is given up — the peer is
+// declared dead, so we stop holding the write open and let the originator
+// fall back to local commit (it is now the last node standing on this key);
+// otherwise an unacked request is retransmitted. A request that ACKs is
+// removed from pending by the ACK handler, so only sends that never landed —
+// the peer's connection wasn't up at first attempt — keep reaching here.
+func (r *Replicator) sweep() {
+	r.tracker.rejectDeadlineExpired()
+
+	now := time.Now().UnixNano()
+	r.tracker.pending.Range(func(key uint64, tr *trackedRequest) bool {
+		if !tr.retransmit {
+			return true
+		}
+
+		// Give up only when the peer is no longer a replication target: no
+		// heartbeat within the liveness timeout. While it IS alive, connFunc
+		// always resolves a live connection (outbound, or inbound fallback) we
+		// can send over, so retransmission will land — no wall-clock needed.
+		if ph := r.healthTable.Get(tr.peerID); ph == nil || !ph.IsReplicationTarget() {
+			r.tracker.pending.Delete(key)
+			RecordRetransmissionGiveUp(tr.peerID)
+			// Mirror the NotSubscribed accounting: this peer can no longer
+			// positively resolve the future. When the last live target drops,
+			// reject so the caller (a blocking SafeMode flush) unblocks and
+			// commits locally.
+			dropped := tr.future.dropped.Add(1)
+			if tr.future.setupDone.Load() && dropped == tr.future.expected.Load() {
+				tr.future.reject(ErrNoPeers)
+			}
+			return true
+		}
+
+		if now-tr.lastSentAt.Load() < int64(sweepInterval) {
+			return true
+		}
+		tr.lastSentAt.Store(now)
+		if wireSize, err := r.transport.Send(tr.peerID, tr.packetData); err != nil {
+			slog.Debug("retransmit failed (peer connection not up yet)",
+				"peer", tr.peerID, "error", err)
+		} else {
+			tr.packetSize = wireSize
+			RecordNotificationSent()
+		}
+		return true
+	})
 }
