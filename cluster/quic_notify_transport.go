@@ -205,8 +205,12 @@ func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *qu
 }
 
 // dispatchPlaintext routes decrypted plaintext to the appropriate handler.
-// Same as UDPTransport.dispatchPlaintext but without chunking support.
 func (t *QUICNotifyTransport) dispatchPlaintext(peerID NodeId, plaintext []byte) {
+	// Reachable remotely: a zstd frame can decompress to zero bytes.
+	if len(plaintext) == 0 {
+		slog.Debug("empty uni-stream payload", "peer", peerID)
+		return
+	}
 	switch plaintext[0] {
 	case PacketTypeClockTick:
 		tick, err := ParseClockTick(plaintext)
