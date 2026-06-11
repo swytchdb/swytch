@@ -48,6 +48,42 @@ type StorageConfig struct {
 	HPKEPrivateKey string
 }
 
+// ClockConfig tunes the clock tick (heartbeat) subsystem. The zero value
+// selects all defaults, so existing callers need not populate it.
+type ClockConfig struct {
+	Interval        time.Duration // tick emission interval (default 1s)
+	WindowSize      int           // per-peer measurement window in samples (default 64)
+	MissedIntervals int           // ticks a peer may miss before being declared dead (default 3)
+	MinTimeout      time.Duration // floor for the adaptive liveness timeout (default 1s)
+	MaxTimeout      time.Duration // ceiling for the adaptive liveness timeout (default 10s)
+
+	// DisableAdaptiveInterval turns off the Nyquist self-tuning of the tick
+	// interval toward the closest peer's RTT_min (clamped to [10ms, 5s],
+	// adjusting at most 2× per adjustment window). Tuning is on by default;
+	// Interval is the starting point.
+	DisableAdaptiveInterval bool
+}
+
+// withDefaults returns the config with zero fields replaced by defaults.
+func (c ClockConfig) withDefaults() ClockConfig {
+	if c.Interval <= 0 {
+		c.Interval = time.Second
+	}
+	if c.WindowSize <= 0 {
+		c.WindowSize = 64
+	}
+	if c.MissedIntervals <= 0 {
+		c.MissedIntervals = 3
+	}
+	if c.MinTimeout <= 0 {
+		c.MinTimeout = time.Second
+	}
+	if c.MaxTimeout <= 0 {
+		c.MaxTimeout = 10 * time.Second
+	}
+	return c
+}
+
 // ClusterConfig holds the full cluster topology.
 type ClusterConfig struct {
 	NodeID             NodeId        // This node's ID
@@ -55,6 +91,7 @@ type ClusterConfig struct {
 	TLSPassphrase      string        // Shared passphrase for deterministic mTLS CA derivation
 	ReplicationTimeout time.Duration // Max time to wait for replication ACK (default 5s)
 	Storage            StorageConfig // Object storage for off-node durability
+	Clock              ClockConfig   // Clock tick / failure detection tuning
 }
 
 // Peers returns all nodes except self.

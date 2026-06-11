@@ -30,8 +30,7 @@ import (
 
 // PacketHandler dispatches parsed inbound packets to the appropriate handler.
 type PacketHandler interface {
-	HandleHeartbeat(peerID NodeId, timestamp uint64)
-	HandleHeartbeatACK(peerID NodeId, timestamp uint64)
+	HandleClockTick(peerID NodeId, tick *ClockTick)
 	HandleNotify(peerID NodeId, requestID uint64, notify *pb.OffsetNotify)
 	HandleNotifyACK(peerID NodeId, requestID uint64, status byte, credits uint32)
 	HandleNotifyACKWithData(peerID NodeId, requestID uint64, status byte, credits uint32, fullPacket []byte)
