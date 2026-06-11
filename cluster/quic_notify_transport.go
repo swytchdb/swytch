@@ -208,30 +208,18 @@ func (t *QUICNotifyTransport) handleInboundUniStream(conn *quic.Conn, stream *qu
 // Same as UDPTransport.dispatchPlaintext but without chunking support.
 func (t *QUICNotifyTransport) dispatchPlaintext(peerID NodeId, plaintext []byte) {
 	switch plaintext[0] {
-	case PacketTypeHeartbeat:
-		hbPeerID, timestamp, err := ParseHeartbeat(plaintext)
+	case PacketTypeClockTick:
+		tick, err := ParseClockTick(plaintext)
 		if err != nil {
+			slog.Debug("malformed clock tick", "peer", peerID, "error", err)
 			return
 		}
-		if hbPeerID != peerID {
-			slog.Warn("heartbeat payload nodeID mismatch", "payload", hbPeerID, "sender", peerID)
+		if tick.NodeID != peerID {
+			slog.Warn("clock tick payload nodeID mismatch", "payload", tick.NodeID, "sender", peerID)
 			return
 		}
 		if t.handler != nil {
-			t.handler.HandleHeartbeat(peerID, timestamp)
-		}
-
-	case PacketTypeHeartbeatACK:
-		hbPeerID, timestamp, err := ParseHeartbeat(plaintext)
-		if err != nil {
-			return
-		}
-		if hbPeerID != peerID {
-			slog.Warn("heartbeat ACK payload nodeID mismatch", "payload", hbPeerID, "sender", peerID)
-			return
-		}
-		if t.handler != nil {
-			t.handler.HandleHeartbeatACK(peerID, timestamp)
+			t.handler.HandleClockTick(peerID, tick)
 		}
 
 	case PacketTypeNotify:

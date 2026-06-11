@@ -171,7 +171,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 	}
 
 	if self != nil {
-		pm.healthTable = NewPeerHealthTable()
+		pm.healthTable = NewPeerHealthTable(pm.config.Clock)
 
 		// Create QUIC notification transport. Connection lookup tries
 		// the outbound map first (the one we dialed) and falls back to
@@ -198,13 +198,13 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 					return
 				}
 				if pm.heartbeat != nil {
-					pm.heartbeat.SendHeartbeatTo(peerID)
+					pm.heartbeat.SendTickTo(peerID)
 				}
 			},
 		)
 
 		// Start heartbeat manager
-		pm.heartbeat = NewHeartbeatManager(pm.config.NodeID, pm.healthTable)
+		pm.heartbeat = NewHeartbeatManager(pm.config.NodeID, pm.healthTable, pm.config.Clock)
 		pm.heartbeat.Start(func(peerID NodeId, data []byte) error {
 			return pm.quicTransport.SendDirect(peerID, data)
 		})
@@ -229,7 +229,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 		pc := newPeerConn(peer.ID, peer.Address, peer.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
 			if pm.heartbeat != nil {
-				pm.heartbeat.SendHeartbeatTo(peerID)
+				pm.heartbeat.SendTickTo(peerID)
 			}
 		})
 		pm.peers[peer.ID] = pc
@@ -637,7 +637,7 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 		return newPeerConn(n.ID, n.Address, n.Region, selfRegion, pm.handler, pm.clientTLS, func(conn *quic.Conn) {
 			pm.acceptOutboundStreams(conn)
 			if pm.heartbeat != nil {
-				pm.heartbeat.SendHeartbeatTo(peerID)
+				pm.heartbeat.SendTickTo(peerID)
 			}
 		})
 	}
@@ -735,17 +735,10 @@ func (pm *PeerManager) ListenAddr() string {
 
 // --- PacketHandler implementation (bridges QUIC events to heartbeat + replicator) ---
 
-// HandleHeartbeat routes inbound heartbeats to the heartbeat manager.
-func (pm *PeerManager) HandleHeartbeat(peerID NodeId, timestamp uint64) {
+// HandleClockTick routes inbound clock ticks to the heartbeat manager.
+func (pm *PeerManager) HandleClockTick(peerID NodeId, tick *ClockTick) {
 	if pm.heartbeat != nil {
-		pm.heartbeat.ProcessInbound(peerID, timestamp)
-	}
-}
-
-// HandleHeartbeatACK routes inbound heartbeat ACKs to the heartbeat manager.
-func (pm *PeerManager) HandleHeartbeatACK(peerID NodeId, timestamp uint64) {
-	if pm.heartbeat != nil {
-		pm.heartbeat.ProcessInboundACK(peerID, timestamp)
+		pm.heartbeat.ProcessInboundTick(peerID, tick)
 	}
 }
 

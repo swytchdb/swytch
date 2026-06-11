@@ -128,17 +128,17 @@ var (
 	}, []string{"peer"})
 )
 
-// --- 9.6 Heartbeat & UDP Fast Path ---
+// --- 9.6 Clock & UDP Fast Path ---
 
 var (
-	heartbeatsSentTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "cluster_heartbeats_sent_total",
-		Help: "Total heartbeat packets sent",
-	})
+	clockTicksReceivedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cluster_clock_ticks_received_total",
+		Help: "Clock ticks received per peer; rate() is the peer's effective tick rate at this node (shortfall vs its interval = loss)",
+	}, []string{"peer"})
 
-	heartbeatsReceivedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "cluster_heartbeats_received_total",
-		Help: "Total heartbeat packets received",
+	clockTickIntervalMs = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cluster_clock_tick_interval_ms",
+		Help: "This node's current tick emission interval in milliseconds (retunes when AdaptiveInterval is on)",
 	})
 
 	peerSymmetricGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -148,12 +148,37 @@ var (
 
 	peerAliveGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cluster_peer_alive",
-		Help: "1 if peer is alive (heartbeat within timeout), 0 if dead",
+		Help: "1 if peer is alive (clock tick within its liveness timeout), 0 if dead",
 	}, []string{"peer"})
 
 	peerRttMsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cluster_peer_rtt_ms",
-		Help: "Estimated RTT to peer in milliseconds (from heartbeat)",
+		Help: "Min-filtered RTT to peer in milliseconds (from clock ticks)",
+	}, []string{"peer"})
+
+	peerClockSkewMsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cluster_peer_clock_skew_ms",
+		Help: "Estimated peer wall-clock skew in milliseconds (positive: peer ahead); error bounded by half the path asymmetry",
+	}, []string{"peer"})
+
+	peerStalenessBoundMsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cluster_peer_staleness_bound_ms",
+		Help: "Standing staleness bound ε for the peer in milliseconds (tick interval + RTT_min)",
+	}, []string{"peer"})
+
+	peerTickIntervalMsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cluster_peer_tick_interval_ms",
+		Help: "Median inter-arrival gap of the peer's clock ticks in milliseconds (δ_B)",
+	}, []string{"peer"})
+
+	peerLivenessTimeoutMsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cluster_peer_liveness_timeout_ms",
+		Help: "Effective failure-detection timeout for the peer in milliseconds (adaptive M·δ_B + jitter margin, or warm-up fallback)",
+	}, []string{"peer"})
+
+	peerClockJumpsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cluster_peer_clock_jumps_total",
+		Help: "Total wall-clock jumps reported by the peer in its clock ticks",
 	}, []string{"peer"})
 
 	udpNotifyAckLatencyMs = promauto.NewHistogram(prometheus.HistogramOpts{
@@ -163,14 +188,14 @@ var (
 	})
 )
 
-// RecordHeartbeatsSent increments the heartbeat sent counter.
-func RecordHeartbeatsSent() {
-	heartbeatsSentTotal.Inc()
+// RecordClockTickReceived counts an inbound clock tick from a peer.
+func RecordClockTickReceived(peerID NodeId) {
+	clockTicksReceivedTotal.WithLabelValues(peerLabel(peerID)).Inc()
 }
 
-// RecordHeartbeatReceived increments the heartbeat received counter.
-func RecordHeartbeatReceived() {
-	heartbeatsReceivedTotal.Inc()
+// RecordClockTickInterval updates this node's tick emission interval gauge.
+func RecordClockTickInterval(intervalNanos int64) {
+	clockTickIntervalMs.Set(float64(intervalNanos) / 1e6)
 }
 
 // RecordPeerSymmetric updates the symmetry gauge for a peer.
@@ -196,9 +221,55 @@ func RecordPeerRTT(peerID NodeId, rttNanos int64) {
 	peerRttMsGauge.WithLabelValues(peerLabel(peerID)).Set(float64(rttNanos) / 1e6)
 }
 
+// RecordPeerClockSkew updates the wall-clock skew gauge for a peer.
+func RecordPeerClockSkew(peerID NodeId, skewNanos int64) {
+	peerClockSkewMsGauge.WithLabelValues(peerLabel(peerID)).Set(float64(skewNanos) / 1e6)
+}
+
+// RecordPeerStalenessBound updates the standing staleness bound gauge for a peer.
+func RecordPeerStalenessBound(peerID NodeId, boundNanos int64) {
+	peerStalenessBoundMsGauge.WithLabelValues(peerLabel(peerID)).Set(float64(boundNanos) / 1e6)
+}
+
+// RecordPeerTickInterval updates the peer tick inter-arrival gauge.
+func RecordPeerTickInterval(peerID NodeId, intervalNanos int64) {
+	peerTickIntervalMsGauge.WithLabelValues(peerLabel(peerID)).Set(float64(intervalNanos) / 1e6)
+}
+
+// RecordPeerLivenessTimeout updates the effective liveness timeout gauge for a peer.
+func RecordPeerLivenessTimeout(peerID NodeId, timeoutNanos int64) {
+	peerLivenessTimeoutMsGauge.WithLabelValues(peerLabel(peerID)).Set(float64(timeoutNanos) / 1e6)
+}
+
+// RecordPeerClockJump counts a wall-clock jump reported by a peer.
+func RecordPeerClockJump(peerID NodeId) {
+	peerClockJumpsTotal.WithLabelValues(peerLabel(peerID)).Inc()
+}
+
 // RecordUDPNotifyACKLatency records the latency of a notification ACK.
 func RecordUDPNotifyACKLatency(latencyMs float64) {
 	udpNotifyAckLatencyMs.Observe(latencyMs)
+}
+
+// removePeerMetrics deletes every per-peer label series for a departed peer.
+// NodeIDs are ephemeral (fresh per boot), so without this each peer restart
+// strands the old ID's series at its last value forever — dead peers pile up
+// in dashboards as permanent alive=0 rows.
+func removePeerMetrics(peerID NodeId) {
+	label := peerLabel(peerID)
+	peerConnected.DeleteLabelValues(label)
+	peerReconnectsTotal.DeleteLabelValues(label)
+	peerNotificationsDroppedTotal.DeleteLabelValues(label)
+	clockTicksReceivedTotal.DeleteLabelValues(label)
+	peerSymmetricGauge.DeleteLabelValues(label)
+	peerAliveGauge.DeleteLabelValues(label)
+	peerRttMsGauge.DeleteLabelValues(label)
+	peerClockSkewMsGauge.DeleteLabelValues(label)
+	peerStalenessBoundMsGauge.DeleteLabelValues(label)
+	peerTickIntervalMsGauge.DeleteLabelValues(label)
+	peerLivenessTimeoutMsGauge.DeleteLabelValues(label)
+	peerClockJumpsTotal.DeleteLabelValues(label)
+	retransmissionGiveUpsTotal.DeleteLabelValues(label)
 }
 
 // --- 9.7 Retransmission ---
@@ -232,7 +303,7 @@ func RecordNotificationReceived() {
 var (
 	quicStreamsOpenedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cluster_quic_streams_opened_total",
-		Help: "Total QUIC uni-streams opened for notification/heartbeat sends",
+		Help: "Total QUIC uni-streams opened for notification/clock tick sends",
 	})
 
 	quicStreamErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
