@@ -162,7 +162,7 @@ func TestLivenessTimeoutFormula(t *testing.T) {
 // adjustment window.
 func TestAdjustInterval(t *testing.T) {
 	health := NewPeerHealthTable(ClockConfig{})
-	hm := NewHeartbeatManager(1, health, ClockConfig{AdaptiveInterval: true})
+	hm := NewHeartbeatManager(1, health, ClockConfig{})
 	hm.AddPeer(2, "local")
 
 	// No primed stats: no adjustment even at the window boundary.

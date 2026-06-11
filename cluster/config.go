@@ -57,10 +57,11 @@ type ClockConfig struct {
 	MinTimeout      time.Duration // floor for the adaptive liveness timeout (default 1s)
 	MaxTimeout      time.Duration // ceiling for the adaptive liveness timeout (default 10s)
 
-	// AdaptiveInterval self-tunes the tick interval toward the closest
-	// peer's RTT_min (Nyquist rate), clamped to [10ms, 5s], adjusting at
-	// most 2× per adjustment window. Off by default.
-	AdaptiveInterval bool
+	// DisableAdaptiveInterval turns off the Nyquist self-tuning of the tick
+	// interval toward the closest peer's RTT_min (clamped to [10ms, 5s],
+	// adjusting at most 2× per adjustment window). Tuning is on by default;
+	// Interval is the starting point.
+	DisableAdaptiveInterval bool
 }
 
 // withDefaults returns the config with zero fields replaced by defaults.

@@ -138,7 +138,7 @@ var (
 
 	clockTickIntervalMs = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cluster_clock_tick_interval_ms",
-		Help: "This node's current tick emission interval in milliseconds (retunes when AdaptiveInterval is on)",
+		Help: "This node's current tick emission interval in milliseconds (retunes toward closest-peer RTT_min unless DisableAdaptiveInterval is set)",
 	})
 
 	peerSymmetricGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{

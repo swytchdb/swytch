@@ -41,7 +41,11 @@ const (
 
 // Clock tick protocol constants.
 const (
-	livenessCheckFreq = 500 * time.Millisecond
+	// Liveness check cadence tracks the current tick interval within these
+	// bounds, so detection latency follows adaptive tuning instead of being
+	// floored by a fixed sweep rate.
+	livenessCheckFloor = 10 * time.Millisecond
+	livenessCheckCeil  = 500 * time.Millisecond
 
 	clockTickVersion byte = 1
 
@@ -57,9 +61,9 @@ const (
 	// many tick intervals marks the tick as a wall-clock jump.
 	jumpDetectFactor = 10
 
-	// Adaptive interval bounds (ClockConfig.AdaptiveInterval). The floor
-	// prevents the measure-RTT→tune-interval feedback loop from running
-	// away; the ceiling bounds failure-detection latency.
+	// Adaptive interval bounds (see ClockConfig.DisableAdaptiveInterval).
+	// The floor prevents the measure-RTT→tune-interval feedback loop from
+	// running away; the ceiling bounds failure-detection latency.
 	intervalFloor       = 10 * time.Millisecond
 	intervalCeil        = 5 * time.Second
 	intervalAdjustEvery = 16 // ticks between interval adjustments
@@ -251,8 +255,8 @@ func (hm *HeartbeatManager) ProcessInboundTick(peerID NodeId, tick *ClockTick) {
 	slog.Debug("clock tick received", "from_peer", peerID, "seq", tick.Seq)
 }
 
-// sendLoop sends ticks to all peers every interval. With AdaptiveInterval
-// the interval retunes toward the closest peer's RTT_min — ticks faster than
+// sendLoop sends ticks to all peers every interval. Unless disabled, the
+// interval retunes toward the closest peer's RTT_min — ticks faster than
 // the path round-trip arrive superseded and carry no extra information.
 func (hm *HeartbeatManager) sendLoop() {
 	defer hm.wg.Done()
@@ -269,7 +273,7 @@ func (hm *HeartbeatManager) sendLoop() {
 			return
 		case <-ticker.C:
 			hm.sendTick()
-			if hm.cfg.AdaptiveInterval {
+			if !hm.cfg.DisableAdaptiveInterval {
 				if next, changed := hm.adjustInterval(); changed {
 					ticker.Reset(next)
 				}
@@ -278,12 +282,13 @@ func (hm *HeartbeatManager) sendLoop() {
 	}
 }
 
-// livenessLoop periodically checks peer liveness.
-// NOTE: the 500ms cadence floors detection latency; revisit if
-// AdaptiveInterval deployments tune ticks well below it.
+// livenessLoop periodically checks peer liveness, re-deriving its cadence
+// from the current tick interval so adaptive tuning shortens detection
+// latency rather than stalling at a fixed sweep rate.
 func (hm *HeartbeatManager) livenessLoop() {
 	defer hm.wg.Done()
-	ticker := time.NewTicker(livenessCheckFreq)
+	cadence := hm.livenessCadence()
+	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 
 	for {
@@ -292,8 +297,22 @@ func (hm *HeartbeatManager) livenessLoop() {
 			return
 		case <-ticker.C:
 			hm.healthTable.CheckLiveness()
+			if next := hm.livenessCadence(); next != cadence {
+				cadence = next
+				ticker.Reset(next)
+			}
 		}
 	}
+}
+
+// livenessCadence clamps the current tick interval into the liveness sweep
+// bounds: checking roughly once per tick keeps the cadence from dominating
+// the adaptive timeout (M·δ + margin) while bounding the sweep rate.
+func (hm *HeartbeatManager) livenessCadence() time.Duration {
+	hm.mu.Lock()
+	interval := hm.interval
+	hm.mu.Unlock()
+	return clampDuration(interval, livenessCheckFloor, livenessCheckCeil)
 }
 
 // sendTick emits the next clock tick to every registered peer: one sequence
