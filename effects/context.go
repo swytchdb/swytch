@@ -28,6 +28,7 @@ import (
 	"math/rand/v2"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -1612,6 +1613,7 @@ func BuildOffsetNotify(nodeID pb.NodeID, offset Tip, eff *pb.Effect, data []byte
 		Key:        eff.Key,
 		Deps:       eff.Deps,
 		EffectData: wireData,
+		SendTime:   uint64(time.Now().UnixNano()),
 	}
 
 	if traceCtx != nil {

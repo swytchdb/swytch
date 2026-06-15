@@ -26,18 +26,19 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
-// PeerHealth tracks the liveness, path symmetry, and clock measurements of a
-// single peer.
+// PeerHealth tracks the liveness and path symmetry of a single peer.
 type PeerHealth struct {
-	// alive indicates the peer has sent a tick within its liveness timeout.
+	// lastHeartbeat is the UnixNano timestamp of the last received heartbeat.
+	lastHeartbeat atomic.Int64
+
+	// alive indicates the peer has sent a heartbeat within heartbeatTimeout.
 	alive atomic.Bool
 
-	// symmetric indicates bidirectional path verification.
+	// symmetric indicates bidirectional path verification via hash chain.
 	symmetric atomic.Bool
 
-	// clock holds the per-peer measurement windows (offsets, inter-arrival)
-	// and derives RTT_min / skew / staleness bounds from them.
-	clock *peerClockStats
+	// rtt is the estimated round-trip time in nanoseconds from heartbeat exchange.
+	rtt atomic.Int64
 }
 
 // IsReplicationTarget returns true if this peer is both alive and has a
@@ -49,16 +50,13 @@ func (ph *PeerHealth) IsReplicationTarget() bool {
 // PeerHealthTable maps peer node IDs to their health state.
 type PeerHealthTable struct {
 	peers           *xsync.Map[NodeId, *PeerHealth]
-	cfg             ClockConfig
 	OnPeerRecovered func(peerID NodeId) // called when a peer transitions from dead to alive
 }
 
-// NewPeerHealthTable creates an empty health table. Zero-valued cfg fields
-// select defaults.
-func NewPeerHealthTable(cfg ClockConfig) *PeerHealthTable {
+// NewPeerHealthTable creates an empty health table.
+func NewPeerHealthTable() *PeerHealthTable {
 	return &PeerHealthTable{
 		peers: xsync.NewMap[NodeId, *PeerHealth](),
-		cfg:   cfg.withDefaults(),
 	}
 }
 
@@ -73,17 +71,13 @@ func (t *PeerHealthTable) Get(nodeID NodeId) *PeerHealth {
 
 // GetOrCreate returns the PeerHealth for the given node, creating it if needed.
 func (t *PeerHealthTable) GetOrCreate(nodeID NodeId) *PeerHealth {
-	if v, ok := t.peers.Load(nodeID); ok {
-		return v
-	}
-	v, _ := t.peers.LoadOrStore(nodeID, &PeerHealth{clock: newPeerClockStats(t.cfg.WindowSize)})
+	v, _ := t.peers.LoadOrStore(nodeID, &PeerHealth{})
 	return v
 }
 
-// Remove removes a peer from the health table and drops its metric series.
+// Remove removes a peer from the health table.
 func (t *PeerHealthTable) Remove(nodeID NodeId) {
 	t.peers.Delete(nodeID)
-	removePeerMetrics(nodeID)
 }
 
 // AliveSymmetricPeers returns the node IDs of all peers that are in the given
@@ -159,25 +153,15 @@ func (t *PeerHealthTable) InMajorityPartition(localRegion string, peerRegions ma
 	return reachable > total/2
 }
 
-// GetRTT returns the min-filtered round-trip time to the given peer.
-// Returns 0 if the peer is unknown or both offset directions haven't been
-// sampled yet. Implements effects.PeerRTTProvider.
+// GetRTT returns the estimated round-trip time to the given peer.
+// Returns 0 if the peer is unknown or RTT has not been measured.
+// Implements effects.PeerRTTProvider.
 func (t *PeerHealthTable) GetRTT(nodeID NodeId) time.Duration {
 	ph := t.Get(nodeID)
 	if ph == nil {
 		return 0
 	}
-	return ph.clock.snapshot(time.Now()).RTTMin
-}
-
-// ClockStats returns the derived clock measurements for the given peer, and
-// false if the peer is not tracked.
-func (t *PeerHealthTable) ClockStats(nodeID NodeId) (ClockStats, bool) {
-	ph := t.Get(nodeID)
-	if ph == nil {
-		return ClockStats{}, false
-	}
-	return ph.clock.snapshot(time.Now()), true
+	return time.Duration(ph.rtt.Load())
 }
 
 // AlivePeerIDs returns the IDs of all peers that are currently alive.
@@ -200,38 +184,16 @@ func (t *PeerHealthTable) PruneUnknownPeers(known map[NodeId]struct{}) {
 	t.peers.Range(func(nodeID NodeId, _ *PeerHealth) bool {
 		if _, ok := known[nodeID]; !ok {
 			t.peers.Delete(nodeID)
-			removePeerMetrics(nodeID)
 		}
 		return true
 	})
 }
 
-// CheckLiveness marks peers as dead when the monotonic elapsed time since
-// their last tick exceeds their timeout. Once a peer's inter-arrival window
-// is primed, the timeout adapts to its observed tick rate
-// (MissedIntervals·δ_B + q99 jitter margin, clamped); until then a warm-up
-// fallback derived from the configured interval applies. A single missed
-// tick never trips detection — delay is heavy-tailed and the margin term
-// absorbs GC pauses and packet drops.
-func (t *PeerHealthTable) CheckLiveness() {
-	now := time.Now()
-	fallback := clampDuration(
-		time.Duration(t.cfg.MissedIntervals)*t.cfg.Interval,
-		t.cfg.MinTimeout, t.cfg.MaxTimeout)
+// CheckLiveness marks peers as dead if their last heartbeat exceeds the timeout.
+func (t *PeerHealthTable) CheckLiveness(timeout time.Duration) {
+	deadline := time.Now().Add(-timeout).UnixNano()
 	t.peers.Range(func(nodeID NodeId, ph *PeerHealth) bool {
-		if !ph.alive.Load() {
-			return true
-		}
-		elapsed, heard := ph.clock.sinceLastArrival(now)
-		if !heard {
-			return true
-		}
-		timeout, adaptive := ph.clock.livenessTimeout(t.cfg)
-		if !adaptive {
-			timeout = fallback
-		}
-		RecordPeerLivenessTimeout(nodeID, int64(timeout))
-		if elapsed > timeout {
+		if ph.lastHeartbeat.Load() < deadline {
 			ph.alive.Store(false)
 			RecordPeerAlive(nodeID, false)
 		}

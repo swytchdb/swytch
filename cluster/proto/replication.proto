@@ -318,13 +318,12 @@ message Effect {
 
 // OffsetNotify is broadcast after every local write
 message OffsetNotify {
-  reserved 6; // was send_time; drift measurement lives in the clock tick protocol
-
   EffectRef origin = 1;              // where this effect lives
   google.protobuf.Timestamp hlc = 2; // effect's HLC timestamp (for causality ordering)
   repeated EffectRef deps = 3;       // parent effects (0 = root, 1 = linear, 2 = bind)
   bytes key = 4;                     // Redis key
   bytes effect_data = 5;             // eagerly-pushed effect bytes (same-region only)
+  uint64 send_time = 6;              // wall clock at send time (ns) for drift measurement
   bytes trace_context = 7;           // OTel trace context (26 bytes, optional)
 }
 
