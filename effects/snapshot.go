@@ -287,6 +287,17 @@ func (v verdictMap) harvest(snapshotTip Tip, snap *pb.SnapshotEffect) {
 	}
 }
 
+// isJSONType reports whether the type tag marks a RedisJSON node (key root or a
+// nested object/array). JSON nodes are exempt from Redis empty-collection
+// auto-delete — an empty {} or [] is a real value.
+func isJSONType(t pb.ValueType) bool {
+	switch t {
+	case pb.ValueType_TYPE_JSON, pb.ValueType_TYPE_JSON_OBJECT, pb.ValueType_TYPE_JSON_ARRAY:
+		return true
+	}
+	return false
+}
+
 // filterSnapshot applies post-reconstruction filtering: key-level expiry,
 // element-level expiry for KEYED collections, and auto-delete of empty
 // collections (Redis semantics: empty lists/sets/hashes/zsets don't exist).
@@ -297,6 +308,12 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 	// Key-level expiry
 	if result.ExpiresAt != nil && time.Now().After(result.ExpiresAt.AsTime()) {
 		return nil
+	}
+	// JSON nodes manage their own emptiness: an empty object/array (or a
+	// meta-only root) is a real value, not a Redis empty-collection auto-delete.
+	// (Cf. the TYPE_STREAM exception for empty streams below.)
+	if isJSONType(result.TypeTag) {
+		return result
 	}
 	// Filter expired elements from KEYED collections
 	if len(result.NetAdds) > 0 {
@@ -593,7 +610,7 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 	// TestGetSnapshot_ExpiredReconstructedStillReturnsState. When we
 	// surface nil here, also zero chainLen so the caller's compaction
 	// path doesn't dereference a nil result.
-	if result != nil &&
+	if result != nil && !isJSONType(result.TypeTag) &&
 		result.Scalar == nil && len(result.NetAdds) == 0 && len(result.OrderedElements) == 0 &&
 		(result.Op == pb.EffectOp_UNKNOWN_OP || result.Op == pb.EffectOp_REMOVE_OP) {
 		return nil, snapshotTips, 0

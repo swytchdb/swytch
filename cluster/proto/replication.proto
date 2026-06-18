@@ -90,7 +90,9 @@ enum ValueType {
   TYPE_HLL = 7;
   TYPE_BITMAP = 8;
   TYPE_GEO = 9;
-  TYPE_JSON = 10;
+  TYPE_JSON = 10;        // JSON key; root is a scalar leaf
+  TYPE_JSON_OBJECT = 11; // a JSON object node (ORDERED partition, elements keyed by member name)
+  TYPE_JSON_ARRAY = 12;  // a JSON array node (ORDERED partition, elements keyed by generated id)
 }
 
 // MetaEffect marks a causal dependency without changing state.

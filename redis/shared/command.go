@@ -298,6 +298,17 @@ const (
 	// ACL commands
 	CmdAcl
 
+	// RedisJSON (JSON.*) commands
+	CmdJSONSet
+	CmdJSONGet
+	CmdJSONMGet
+	CmdJSONMSet
+	CmdJSONMerge
+	CmdJSONDel
+	CmdJSONForget
+	CmdJSONClear
+	CmdJSONType
+
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
 	CmdMax
@@ -649,6 +660,17 @@ var commandNames = map[string]CommandType{
 
 	// ACL
 	"ACL": CmdAcl,
+
+	// RedisJSON
+	"JSON.SET":    CmdJSONSet,
+	"JSON.GET":    CmdJSONGet,
+	"JSON.MGET":   CmdJSONMGet,
+	"JSON.MSET":   CmdJSONMSet,
+	"JSON.MERGE":  CmdJSONMerge,
+	"JSON.DEL":    CmdJSONDel,
+	"JSON.FORGET": CmdJSONForget,
+	"JSON.CLEAR":  CmdJSONClear,
+	"JSON.TYPE":   CmdJSONType,
 }
 
 // commandStrings maps CommandType to command name strings
@@ -883,6 +905,15 @@ var commandStrings = map[CommandType]string{
 	CmdGeoSearch:           "geosearch",
 	CmdGeoSearchStore:      "geosearchstore",
 	CmdAcl:                 "acl",
+	CmdJSONSet:             "json.set",
+	CmdJSONGet:             "json.get",
+	CmdJSONMGet:            "json.mget",
+	CmdJSONMSet:            "json.mset",
+	CmdJSONMerge:           "json.merge",
+	CmdJSONDel:             "json.del",
+	CmdJSONForget:          "json.forget",
+	CmdJSONClear:           "json.clear",
+	CmdJSONType:            "json.type",
 }
 
 // String returns the command name
