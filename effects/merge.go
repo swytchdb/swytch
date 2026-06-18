@@ -28,16 +28,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Merge2 merges two reduced effects from concurrent branches into one.
-// The result is always a freshly constructed *pb.ReducedEffect — inputs
-// are never mutated, making reduced effects safe to treat as snapshots.
-//
-// Decision tree:
-//   - Both commutative, same collection → accumulate (sum/max/union)
-//   - Both non-commutative → HLC tiebreaker
-//   - Mixed (comm + non-comm), compatible → apply comm on top of non-comm
-//   - Mixed, incompatible → non-comm wins
-//   - Cross-collection → HLC tiebreaker
+// Merge2 merges two reduced effects from concurrent branches into one,
+// including their virtual partitions (each merged independently; flat keys
+// carry no partitions and take the unchanged top-level path). The result is
+// always a freshly constructed *pb.ReducedEffect — inputs are never mutated.
 func Merge2(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 	if a == nil {
 		return b
@@ -45,7 +39,61 @@ func Merge2(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 	if b == nil {
 		return a
 	}
+	r := merge2Flat(a, b)
+	if len(a.Partitions) > 0 || len(b.Partitions) > 0 {
+		if r == nil {
+			r = &pb.ReducedEffect{}
+		}
+		r.Partitions = mergePartitionsN([]*pb.ReducedEffect{a, b})
+	}
+	return r
+}
 
+// mergePartitionsN canonically merges the virtual partitions across N branches:
+// each virtual key is merged independently via MergeN over the branches that
+// carry it. Merging per virtual (rather than pairwise-folding whole maps) keeps
+// a partition with mixed commutativity — e.g. a leaf seeing both JSON.NUMINCRBY
+// (additive) and JSON.SET (LWW) — correct. Recursion terminates because
+// partition values are flat (their own .Partitions is empty). Returns nil when
+// no branch has partitions.
+func mergePartitionsN(branches []*pb.ReducedEffect) map[string]*pb.ReducedEffect {
+	var keys map[string]struct{}
+	for _, b := range branches {
+		for v := range b.Partitions {
+			if keys == nil {
+				keys = make(map[string]struct{})
+			}
+			keys[v] = struct{}{}
+		}
+	}
+	if keys == nil {
+		return nil
+	}
+	out := make(map[string]*pb.ReducedEffect, len(keys))
+	for v := range keys {
+		subs := make([]*pb.ReducedEffect, 0, len(branches))
+		for _, b := range branches {
+			if p, ok := b.Partitions[v]; ok {
+				subs = append(subs, p)
+			}
+		}
+		if m := MergeN(subs); m != nil {
+			out[v] = m
+		}
+	}
+	return out
+}
+
+// merge2Flat merges two reduced effects' top-level (non-partition) state.
+// This is the pre-nesting Merge2.
+//
+// Decision tree:
+//   - Both commutative, same collection → accumulate (sum/max/union)
+//   - Both non-commutative → HLC tiebreaker
+//   - Mixed (comm + non-comm), compatible → apply comm on top of non-comm
+//   - Mixed, incompatible → non-comm wins
+//   - Cross-collection → HLC tiebreaker
+func merge2Flat(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 	// Metadata-only branches (subscriptions, serialization) carry no data.
 	// Merge their metadata onto the data branch transparently.
 	if isMetadataOnly(a) {
@@ -180,6 +228,7 @@ func MergeN(branches []*pb.ReducedEffect) *pb.ReducedEffect {
 		ExpiresAt:           result.ExpiresAt,
 		SerializationLeader: mergeSerializationLeaderN(filtered),
 		ForkChoiceHash:      result.ForkChoiceHash,
+		Partitions:          mergePartitionsN(filtered),
 	}
 }
 

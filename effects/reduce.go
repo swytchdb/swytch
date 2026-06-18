@@ -37,7 +37,116 @@ func ReduceBranch(effects []*pb.Effect) *pb.ReducedEffect {
 // This is used at DAG merge points: the seed is the merged result of
 // concurrent dep subtrees, and effects are the linear chain above.
 // The seed is never mutated; a clone is made before any modifications.
+//
+// Virtual partitions: effects carry an optional `virtual` partition key that
+// addresses nested state WITHIN the key (empty = root partition). Flat keys
+// (no virtual effects, no seed partitions) take the fast path and reduce
+// byte-identically to the pre-nesting engine. Otherwise the chain is split by
+// virtual and each partition reduces independently via reduceFlat, with a root
+// key-level DEL wiping all partitions (it deletes the whole key).
 func ReduceChain(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
+	if (seed == nil || len(seed.Partitions) == 0) && !hasVirtualEffects(effects) {
+		return reduceFlat(seed, effects)
+	}
+	return reducePartitioned(seed, effects)
+}
+
+// hasVirtualEffects reports whether any effect addresses a non-root partition.
+func hasVirtualEffects(effects []*pb.Effect) bool {
+	for _, e := range effects {
+		if len(e.Virtual) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isRootKeyDel reports whether e is a key-level delete (REMOVE on a root-virtual
+// SCALAR with no element id) — it tombstones the whole key, all partitions.
+func isRootKeyDel(e *pb.Effect) bool {
+	if len(e.Virtual) > 0 {
+		return false
+	}
+	d := e.GetData()
+	return d != nil && d.Op == pb.EffectOp_REMOVE_OP &&
+		d.Collection == pb.CollectionKind_SCALAR && len(d.Id) == 0
+}
+
+// reducePartitioned reduces a chain that touches virtual partitions. Root
+// (virtual=="") effects reduce into the top-level ReducedEffect; non-root
+// effects reduce into per-partition ReducedEffects hung off .Partitions. A
+// root key-level DEL drops all prior state (whole-key delete).
+func reducePartitioned(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
+	// A root key-level DEL wipes everything before it (seed + all partitions);
+	// split at the last one so the live tail reduces from a clean slate.
+	liveSeed := seed
+	live := effects
+	for i := len(effects) - 1; i >= 0; i-- {
+		if isRootKeyDel(effects[i]) {
+			liveSeed = nil
+			live = effects[i:]
+			break
+		}
+	}
+
+	// Partition the live effects by virtual, preserving order within each.
+	var rootChain []*pb.Effect
+	partChains := make(map[string][]*pb.Effect)
+	for _, e := range live {
+		if v := string(e.Virtual); v == "" {
+			rootChain = append(rootChain, e)
+		} else {
+			partChains[v] = append(partChains[v], e)
+		}
+	}
+
+	// Root partition: the exact flat reduction on the root seed (sans partitions).
+	root := reduceFlat(rootSeedOf(liveSeed), rootChain)
+
+	// Non-root partitions: reduce new effects on top of the carried seed state.
+	parts := make(map[string]*pb.ReducedEffect)
+	for v, chain := range partChains {
+		var base *pb.ReducedEffect
+		if liveSeed != nil {
+			base = liveSeed.Partitions[v]
+		}
+		if rp := reduceFlat(base, chain); rp != nil {
+			parts[v] = rp
+		}
+	}
+	// Carry over seed partitions that received no new effects this chain.
+	if liveSeed != nil {
+		for v, sp := range liveSeed.Partitions {
+			if _, touched := partChains[v]; !touched {
+				parts[v] = cloneReduced(sp)
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return root
+	}
+	if root == nil {
+		root = &pb.ReducedEffect{}
+	}
+	root.Partitions = parts
+	return root
+}
+
+// rootSeedOf returns a view of seed with partitions stripped, so the root
+// reduction never sees nested state. Returns nil for a nil seed.
+func rootSeedOf(seed *pb.ReducedEffect) *pb.ReducedEffect {
+	if seed == nil || len(seed.Partitions) == 0 {
+		return seed
+	}
+	c := cloneReduced(seed)
+	c.Partitions = nil
+	return c
+}
+
+// reduceFlat reduces one partition's linear chain. This is the pre-nesting
+// ReduceChain, unchanged — flat keys route here directly.
+func reduceFlat(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
 	if seed == nil && len(effects) == 0 {
 		return nil
 	}
@@ -456,6 +565,12 @@ func cloneReduced(r *pb.ReducedEffect) *pb.ReducedEffect {
 	if r.OrderedElements != nil {
 		c.OrderedElements = make([]*pb.ReducedElement, len(r.OrderedElements))
 		copy(c.OrderedElements, r.OrderedElements)
+	}
+	if r.Partitions != nil {
+		c.Partitions = make(map[string]*pb.ReducedEffect, len(r.Partitions))
+		for k, v := range r.Partitions {
+			c.Partitions[k] = cloneReduced(v)
+		}
 	}
 	// Subscribers is intentionally NOT cloned: it is not part of the read/data
 	// reduction pipeline. A snapshot's State.Subscribers is read directly from
