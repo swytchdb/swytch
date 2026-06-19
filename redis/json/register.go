@@ -42,6 +42,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdJSONStrLen, Entry: &shared.CommandEntry{Handler: handleJSONStrLen}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONObjKeys, Entry: &shared.CommandEntry{Handler: handleJSONObjKeys}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONObjLen, Entry: &shared.CommandEntry{Handler: handleJSONObjLen}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONResp, Entry: &shared.CommandEntry{Handler: handleJSONResp}},
 
 		// Write commands.
 		shared.ModuleEntry{Cmd: shared.CmdJSONSet, Entry: &shared.CommandEntry{Handler: handleJSONSet, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},

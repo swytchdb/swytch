@@ -321,6 +321,7 @@ const (
 	CmdJSONObjKeys
 	CmdJSONObjLen
 	CmdJSONToggle
+	CmdJSONResp
 
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
@@ -697,6 +698,7 @@ var commandNames = map[string]CommandType{
 	"JSON.OBJKEYS":   CmdJSONObjKeys,
 	"JSON.OBJLEN":    CmdJSONObjLen,
 	"JSON.TOGGLE":    CmdJSONToggle,
+	"JSON.RESP":      CmdJSONResp,
 }
 
 // commandStrings maps CommandType to command name strings
@@ -953,6 +955,7 @@ var commandStrings = map[CommandType]string{
 	CmdJSONObjKeys:         "json.objkeys",
 	CmdJSONObjLen:          "json.objlen",
 	CmdJSONToggle:          "json.toggle",
+	CmdJSONResp:            "json.resp",
 }
 
 // String returns the command name
