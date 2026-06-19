@@ -116,12 +116,34 @@ func jsonReadInt(cmd *shared.Command, w *shared.Writer, key, pathStr, expected s
 	w.WriteInteger(n)
 }
 
-// scalarIntWrite performs an LWW read-modify-write of the scalar addressed by
+// writeTarget is one concrete location a write addresses: the matched value
+// (for the type check / reply) and the concrete single-location path that the
+// write machinery (walkToParent / setValueAtPath) applies.
+type writeTarget struct {
+	val  *Value
+	path *Path
+}
+
+// writeTargets resolves path to every existing concrete location it addresses,
+// in document order. For legacy paths only the first match is kept (legacy
+// operates on the first match). A nil root yields no targets.
+func writeTargets(root *pb.ReducedEffect, path *Path) []writeTarget {
+	ms := path.resolveMatches(assemble(root, ""))
+	if !path.JSONPath && len(ms) > 1 {
+		ms = ms[:1]
+	}
+	out := make([]writeTarget, len(ms))
+	for i, m := range ms {
+		out[i] = writeTarget{val: m.val, path: &Path{JSONPath: path.JSONPath, segs: m.segs}}
+	}
+	return out
+}
+
+// scalarIntWrite performs an LWW read-modify-write of the scalar(s) addressed by
 // path inside an implicit transaction (Noop carries the read tips), replying an
 // integer. fn returns the replacement value to store and the integer reply;
 // ok=false marks a wrong-type match (JSONPath → null entry, legacy → wrong-type
-// error). The supported path grammar resolves to at most one location, so at
-// most one write.
+// error). Multi-match paths write every matched scalar in one transaction.
 func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expected string, fn func(*Value) (repl *Value, reply int64, ok bool)) {
 	path, err := ParsePath(pathStr)
 	if err != nil {
@@ -141,23 +163,26 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 		w.WriteError("ERR could not perform this operation on a key that doesn't exist")
 		return
 	}
-	matches := path.resolve(assemble(root, ""))
+	targets := writeTargets(root, path)
 
 	type result struct {
 		reply int64
 		ok    bool
 	}
-	results := make([]result, len(matches))
-	var repl *Value
-	write := false
-	for i, m := range matches {
-		r, n, ok := fn(m)
+	results := make([]result, len(targets))
+	type pending struct {
+		path *Path
+		repl *Value
+	}
+	var writes []pending
+	for i, t := range targets {
+		r, n, ok := fn(t.val)
 		results[i] = result{n, ok}
 		if ok {
-			repl, write = r, true
+			writes = append(writes, pending{t.path, r})
 		}
 	}
-	if write {
+	if len(writes) > 0 {
 		cmd.Context.BeginTx()
 		// Record the read for this key (Noop carries its tips).
 		if e := cmd.Context.Emit(&pb.Effect{
@@ -167,14 +192,17 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 			w.WriteError(e.Error())
 			return
 		}
-		applied, e := setValueAtPath(func(ef *pb.Effect) error { return cmd.Context.Emit(ef) }, root, key, path, repl, exists)
-		if e != nil {
-			w.WriteError(e.Error())
-			return
-		}
-		if !applied {
-			w.WriteError(errPathNotSet.Error())
-			return
+		plain := func(ef *pb.Effect) error { return cmd.Context.Emit(ef) }
+		for _, pw := range writes {
+			applied, e := setValueAtPath(plain, root, key, pw.path, pw.repl, exists)
+			if e != nil {
+				w.WriteError(e.Error())
+				return
+			}
+			if !applied {
+				w.WriteError(errPathNotSet.Error())
+				return
+			}
 		}
 	}
 
@@ -189,12 +217,12 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 		}
 		return
 	}
-	if len(matches) == 0 {
+	if len(targets) == 0 {
 		w.WriteError("ERR Path '" + pathStr + "' does not exist")
 		return
 	}
 	if !results[0].ok {
-		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + matches[0].TypeName())
+		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + targets[0].val.TypeName())
 		return
 	}
 	w.WriteInteger(results[0].reply)

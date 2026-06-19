@@ -73,80 +73,73 @@ func numBy(cmd *shared.Command, w *shared.Writer, op byte, name string) (valid b
 			w.WriteError("ERR could not perform this operation on a key that doesn't exist")
 			return
 		}
-		matches := path.resolve(assemble(root, ""))
+		targets := writeTargets(root, path)
 
-		if path.JSONPath {
-			// One result entry per match: the new number, or null for a
-			// non-number match. Only numbers are written. The supported path
-			// grammar resolves to at most one location, so at most one write.
-			out := &Value{Kind: KindArray}
-			var newVal *Value
-			for _, m := range matches {
-				if isNumber(m) {
-					newVal = applyNumOp(op, m, by)
-					out.Arr = append(out.Arr, newVal)
-				} else {
-					out.Arr = append(out.Arr, newNull())
+		// Compute the new number per match (null for a non-number match); collect
+		// the writes to apply.
+		type pending struct {
+			path *Path
+			val  *Value
+		}
+		var writes []pending
+		out := &Value{Kind: KindArray}
+		for _, t := range targets {
+			if isNumber(t.val) {
+				nv := applyNumOp(op, t.val, by)
+				out.Arr = append(out.Arr, nv)
+				writes = append(writes, pending{t.path, nv})
+			} else {
+				out.Arr = append(out.Arr, newNull())
+			}
+		}
+		apply := func() bool {
+			cmd.Context.BeginTx()
+			// Record the read for this key (Noop carries its tips).
+			if err := cmd.Context.Emit(&pb.Effect{
+				Key:  []byte(key),
+				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+			}, tips); err != nil {
+				w.WriteError(err.Error())
+				return false
+			}
+			plain := func(e *pb.Effect) error { return cmd.Context.Emit(e) }
+			for _, pw := range writes {
+				applied, err := setValueAtPath(plain, root, key, pw.path, pw.val, exists)
+				if err != nil {
+					w.WriteError(err.Error())
+					return false
+				}
+				if !applied {
+					w.WriteError(errPathNotSet.Error())
+					return false
 				}
 			}
-			if newVal != nil {
-				cmd.Context.BeginTx()
-				// Record the read for this key (Noop carries its tips).
-				if err := cmd.Context.Emit(&pb.Effect{
-					Key:  []byte(key),
-					Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-				}, tips); err != nil {
-					w.WriteError(err.Error())
-					return
-				}
-				if err := writeNum(cmd, root, key, path, newVal, exists); err != nil {
-					w.WriteError(err.Error())
-					return
-				}
+			return true
+		}
+
+		if path.JSONPath {
+			if len(writes) > 0 && !apply() {
+				return
 			}
 			w.WriteBulkString(Serialize(out))
 			return
 		}
 
 		// Legacy path: bare number, errors on a missing or non-number path.
-		if len(matches) == 0 {
+		if len(targets) == 0 {
 			w.WriteError("ERR Path '" + string(cmd.Args[1]) + "' does not exist")
 			return
 		}
-		cur := matches[0]
-		if !isNumber(cur) {
-			w.WriteError("ERR wrong type of path value - expected a number but found " + cur.TypeName())
+		if !isNumber(targets[0].val) {
+			w.WriteError("ERR wrong type of path value - expected a number but found " + targets[0].val.TypeName())
 			return
 		}
-		newVal := applyNumOp(op, cur, by)
-		cmd.Context.BeginTx()
-		// Record the read for this key (Noop carries its tips).
-		if err := cmd.Context.Emit(&pb.Effect{
-			Key:  []byte(key),
-			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-		}, tips); err != nil {
-			w.WriteError(err.Error())
+		if !apply() {
 			return
 		}
-		if err := writeNum(cmd, root, key, path, newVal, exists); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		w.WriteBulkString(Serialize(newVal))
+		w.WriteBulkString(Serialize(out.Arr[0]))
 	}
 	return
-}
-
-// writeNum emits the leaf write for the computed number at path.
-func writeNum(cmd *shared.Command, root *pb.ReducedEffect, key string, path *Path, v *Value, exists bool) error {
-	applied, err := setValueAtPath(func(e *pb.Effect) error { return cmd.Context.Emit(e) }, root, key, path, v, exists)
-	if err != nil {
-		return err
-	}
-	if !applied {
-		return errPathNotSet
-	}
-	return nil
 }
 
 func isNumber(v *Value) bool { return v != nil && (v.Kind == KindInt || v.Kind == KindFloat) }

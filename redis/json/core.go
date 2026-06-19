@@ -88,16 +88,33 @@ func handleJSONSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 
 		emit := tipEmitter(cmd, tips)
-		applied, err := setValueAtPath(emit, root, key, path, newVal, exists)
-		if err != nil {
-			w.WriteError(err.Error())
+		// A concrete path creates-or-replaces its single location; a multi-match
+		// path (wildcard, slice, descent, …) replaces every existing match.
+		if path.isConcrete() {
+			applied, err := setValueAtPath(emit, root, key, path, newVal, exists)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !applied {
+				// A non-creatable path (missing intermediate) returns nil,
+				// matching RedisJSON.
+				w.WriteNullBulkString()
+				return
+			}
+			w.WriteOK()
 			return
 		}
-		if !applied {
-			// A non-creatable path (missing intermediate) returns nil, matching
-			// RedisJSON.
-			w.WriteNullBulkString()
-			return
+		for _, t := range writeTargets(root, path) {
+			applied, err := setValueAtPath(emit, root, key, t.path, newVal, exists)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !applied {
+				w.WriteNullBulkString()
+				return
+			}
 		}
 		w.WriteOK()
 	}
@@ -370,23 +387,40 @@ func handleJSONMerge(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			return
 		}
 
-		var cur *Value
-		if exists {
-			if m := path.resolve(assemble(root, "")); len(m) > 0 {
-				cur = m[0]
-			}
-		}
-		merged := mergePatch(cur, patch)
-
 		emit := tipEmitter(cmd, tips)
-		applied, err := setValueAtPath(emit, root, key, path, merged, exists)
-		if err != nil {
-			w.WriteError(err.Error())
+		// A concrete path merges into (or creates) its single location; a
+		// multi-match path merges into every existing match.
+		if path.isConcrete() {
+			var cur *Value
+			if exists {
+				if m := path.resolve(assemble(root, "")); len(m) > 0 {
+					cur = m[0]
+				}
+			}
+			merged := mergePatch(cur, patch)
+			applied, err := setValueAtPath(emit, root, key, path, merged, exists)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !applied {
+				w.WriteNullBulkString()
+				return
+			}
+			w.WriteOK()
 			return
 		}
-		if !applied {
-			w.WriteNullBulkString()
-			return
+		for _, t := range writeTargets(root, path) {
+			merged := mergePatch(t.val, patch)
+			applied, err := setValueAtPath(emit, root, key, t.path, merged, exists)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !applied {
+				w.WriteNullBulkString()
+				return
+			}
 		}
 		w.WriteOK()
 	}
@@ -459,38 +493,40 @@ func handleJSONDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			w.WriteInteger(1)
 			return
 		}
-		segs := path.segs
-		parentVid, parent, ok := walkToParent(root, segs[:len(segs)-1])
-		if !ok {
-			w.WriteInteger(0)
-			return
-		}
-		last := segs[len(segs)-1]
-		var id []byte
-		switch last.kind {
-		case segKey:
-			if parent.TypeTag != pb.ValueType_TYPE_JSON_OBJECT || elementByKey(parent, last.key) == nil {
-				w.WriteInteger(0)
+		// Remove every matched location; reply the count actually removed. Each
+		// removal is by element id, so it is unaffected by the others.
+		count := 0
+		for _, t := range writeTargets(root, path) {
+			segs := t.path.segs
+			parentVid, parent, ok := walkToParent(root, segs[:len(segs)-1])
+			if !ok {
+				continue
+			}
+			last := segs[len(segs)-1]
+			var id []byte
+			switch last.kind {
+			case segKey:
+				if parent.TypeTag != pb.ValueType_TYPE_JSON_OBJECT || elementByKey(parent, last.key) == nil {
+					continue
+				}
+				id = []byte(last.key)
+			case segIndex:
+				if parent.TypeTag != pb.ValueType_TYPE_JSON_ARRAY {
+					continue
+				}
+				el := elementByIndex(parent, last.idx)
+				if el == nil {
+					continue
+				}
+				id = el.GetData().GetId()
+			}
+			if err := emit(orderedRemoveEffect(key, parentVid, id)); err != nil {
+				w.WriteError(err.Error())
 				return
 			}
-			id = []byte(last.key)
-		case segIndex:
-			if parent.TypeTag != pb.ValueType_TYPE_JSON_ARRAY {
-				w.WriteInteger(0)
-				return
-			}
-			el := elementByIndex(parent, last.idx)
-			if el == nil {
-				w.WriteInteger(0)
-				return
-			}
-			id = el.GetData().GetId()
+			count++
 		}
-		if err := emit(orderedRemoveEffect(key, parentVid, id)); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		w.WriteInteger(1)
+		w.WriteInteger(int64(count))
 	}
 	return
 }
@@ -527,27 +563,25 @@ func handleJSONClear(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			writeWrongType(w)
 			return
 		}
-		matches := path.resolve(assemble(root, ""))
-		if len(matches) == 0 {
-			w.WriteInteger(0)
-			return
-		}
-		cleared, didClear := clearValue(matches[0])
-		if !didClear {
-			w.WriteInteger(0)
-			return
-		}
 		emit := tipEmitter(cmd, tips)
-		applied, err := setValueAtPath(emit, root, key, path, cleared, exists)
-		if err != nil {
-			w.WriteError(err.Error())
-			return
+		// Clear every matched container/number; reply the count actually cleared
+		// (strings, booleans, and null are left untouched and not counted).
+		count := 0
+		for _, t := range writeTargets(root, path) {
+			cleared, didClear := clearValue(t.val)
+			if !didClear {
+				continue
+			}
+			applied, err := setValueAtPath(emit, root, key, t.path, cleared, exists)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if applied {
+				count++
+			}
 		}
-		if !applied {
-			w.WriteInteger(0)
-			return
-		}
-		w.WriteInteger(1)
+		w.WriteInteger(int64(count))
 	}
 	return
 }

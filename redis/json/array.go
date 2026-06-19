@@ -27,24 +27,35 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
-// arrTarget is the array node addressed by a path: its assembled matches (0 or 1
-// for the supported path grammar), and — when the single match is an array — the
-// partition vid and reduced node needed to emit element effects against it.
+// arrTarget is one matched location for an array command: the matched value
+// and — when it is an array — the partition vid and reduced node needed to emit
+// element effects against it.
 type arrTarget struct {
-	matches []*Value
+	val     *Value
 	vid     string
 	node    *pb.ReducedEffect
 	isArray bool
 }
 
-func resolveArray(root *pb.ReducedEffect, path *Path) arrTarget {
-	t := arrTarget{matches: path.resolve(assemble(root, ""))}
-	if len(t.matches) == 1 && t.matches[0].Kind == KindArray {
-		if vid, node, ok := walkToParent(root, path.segs); ok && node.TypeTag == pb.ValueType_TYPE_JSON_ARRAY {
-			t.vid, t.node, t.isArray = vid, node, true
-		}
+// resolveArrays resolves path to every matched location in document order,
+// marking each array match with its partition. Legacy paths keep only the first
+// match.
+func resolveArrays(root *pb.ReducedEffect, path *Path) []arrTarget {
+	ms := path.resolveMatches(assemble(root, ""))
+	if !path.JSONPath && len(ms) > 1 {
+		ms = ms[:1]
 	}
-	return t
+	out := make([]arrTarget, len(ms))
+	for i, m := range ms {
+		t := arrTarget{val: m.val}
+		if m.val.Kind == KindArray {
+			if vid, node, ok := walkToParent(root, m.segs); ok && node.TypeTag == pb.ValueType_TYPE_JSON_ARRAY {
+				t.vid, t.node, t.isArray = vid, node, true
+			}
+		}
+		out[i] = t
+	}
+	return out
 }
 
 func notArrayErr(m *Value) error {
@@ -180,18 +191,30 @@ func arrayWriteInt(cmd *shared.Command, w *shared.Writer, key, pathStr string, o
 		w.WriteError("ERR could not perform this operation on a key that doesn't exist")
 		return
 	}
-	t := resolveArray(root, path)
+	targets := resolveArrays(root, path)
 
-	var apply func(emitFn) error
-	var reply int64
-	if t.isArray {
-		apply, reply, err = op(t.vid, t.node)
+	// Compute each array match's effects and reply up front (an error — e.g. an
+	// out-of-range index — aborts before any effect is emitted).
+	type planned struct {
+		isArray bool
+		apply   func(emitFn) error
+		reply   int64
+	}
+	plans := make([]planned, len(targets))
+	hasWrite := false
+	for i, t := range targets {
+		if !t.isArray {
+			continue
+		}
+		apply, reply, err := op(t.vid, t.node)
 		if err != nil {
 			w.WriteError(err.Error())
 			return
 		}
+		plans[i] = planned{true, apply, reply}
+		hasWrite = true
 	}
-	commit := func() bool {
+	if hasWrite {
 		cmd.Context.BeginTx()
 		// Record the read for this key (Noop carries its tips).
 		if e := cmd.Context.Emit(&pb.Effect{
@@ -199,44 +222,39 @@ func arrayWriteInt(cmd *shared.Command, w *shared.Writer, key, pathStr string, o
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); e != nil {
 			w.WriteError(e.Error())
-			return false
+			return
 		}
-		if e := apply(func(eff *pb.Effect) error { return cmd.Context.Emit(eff) }); e != nil {
-			w.WriteError(e.Error())
-			return false
+		plain := func(eff *pb.Effect) error { return cmd.Context.Emit(eff) }
+		for _, pl := range plans {
+			if pl.isArray {
+				if e := pl.apply(plain); e != nil {
+					w.WriteError(e.Error())
+					return
+				}
+			}
 		}
-		return true
 	}
 
 	if path.JSONPath {
-		if !t.isArray {
-			if len(t.matches) == 0 {
-				w.WriteArray(0)
+		w.WriteArray(len(targets))
+		for i := range targets {
+			if plans[i].isArray {
+				w.WriteInteger(plans[i].reply)
 			} else {
-				w.WriteArray(1)
 				w.WriteNullBulkString()
 			}
-			return
 		}
-		if !commit() {
-			return
-		}
-		w.WriteArray(1)
-		w.WriteInteger(reply)
 		return
 	}
-	if len(t.matches) == 0 {
+	if len(targets) == 0 {
 		w.WriteError("ERR Path '" + pathStr + "' does not exist")
 		return
 	}
-	if !t.isArray {
-		w.WriteError(notArrayErr(t.matches[0]).Error())
+	if !targets[0].isArray {
+		w.WriteError(notArrayErr(targets[0].val).Error())
 		return
 	}
-	if !commit() {
-		return
-	}
-	w.WriteInteger(reply)
+	w.WriteInteger(plans[0].reply)
 }
 
 // handleJSONArrAppend — JSON.ARRAPPEND key path value [value ...]
@@ -433,7 +451,7 @@ func handleJSONArrPop(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			w.WriteError("ERR could not perform this operation on a key that doesn't exist")
 			return
 		}
-		t := resolveArray(root, path)
+		targets := resolveArrays(root, path)
 
 		// popAt resolves the element to remove at the (clamped) index; ok=false
 		// for an empty array. Out-of-range indexes round to the array ends.
@@ -455,11 +473,29 @@ func handleJSONArrPop(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			el := node.OrderedElements[i]
 			return decodeRef(root, el.GetData()), el.GetData().GetId(), true
 		}
-		pop := func(node *pb.ReducedEffect, vid string) (*Value, bool) {
-			v, id, ok := popAt(node)
-			if !ok {
-				return nil, false
+
+		// Resolve each array match's popped element, then remove them all in one
+		// transaction.
+		type popped struct {
+			isArray bool
+			val     *Value
+			vid     string
+			id      []byte
+			has     bool
+		}
+		pops := make([]popped, len(targets))
+		any := false
+		for i, t := range targets {
+			if !t.isArray {
+				continue
 			}
+			v, id, ok := popAt(t.node)
+			pops[i] = popped{isArray: true, val: v, vid: t.vid, id: id, has: ok}
+			if ok {
+				any = true
+			}
+		}
+		if any {
 			cmd.Context.BeginTx()
 			// Record the read for this key (Noop carries its tips).
 			if e := cmd.Context.Emit(&pb.Effect{
@@ -467,43 +503,39 @@ func handleJSONArrPop(cmd *shared.Command, w *shared.Writer, db *shared.Database
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); e != nil {
 				w.WriteError(e.Error())
-				return nil, false
+				return
 			}
-			if e := cmd.Context.Emit(orderedRemoveEffect(key, vid, id)); e != nil {
-				w.WriteError(e.Error())
-				return nil, false
+			for _, p := range pops {
+				if p.isArray && p.has {
+					if e := cmd.Context.Emit(orderedRemoveEffect(key, p.vid, p.id)); e != nil {
+						w.WriteError(e.Error())
+						return
+					}
+				}
 			}
-			return v, true
 		}
 
 		if path.JSONPath {
-			if !t.isArray {
-				if len(t.matches) == 0 {
-					w.WriteArray(0)
+			w.WriteArray(len(targets))
+			for i := range targets {
+				if pops[i].isArray && pops[i].has {
+					w.WriteBulkString(Serialize(pops[i].val))
 				} else {
-					w.WriteArray(1)
 					w.WriteNullBulkString()
 				}
-				return
-			}
-			w.WriteArray(1)
-			if v, ok := pop(t.node, t.vid); ok {
-				w.WriteBulkString(Serialize(v))
-			} else {
-				w.WriteNullBulkString()
 			}
 			return
 		}
-		if len(t.matches) == 0 {
+		if len(targets) == 0 {
 			w.WriteError("ERR Path '" + pathStr + "' does not exist")
 			return
 		}
-		if !t.isArray {
-			w.WriteError(notArrayErr(t.matches[0]).Error())
+		if !targets[0].isArray {
+			w.WriteError(notArrayErr(targets[0].val).Error())
 			return
 		}
-		if v, ok := pop(t.node, t.vid); ok {
-			w.WriteBulkString(Serialize(v))
+		if pops[0].has {
+			w.WriteBulkString(Serialize(pops[0].val))
 		} else {
 			w.WriteNullBulkString()
 		}
