@@ -308,6 +308,8 @@ const (
 	CmdJSONForget
 	CmdJSONClear
 	CmdJSONType
+	CmdJSONNumIncrBy
+	CmdJSONNumMultBy
 
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
@@ -671,6 +673,8 @@ var commandNames = map[string]CommandType{
 	"JSON.FORGET": CmdJSONForget,
 	"JSON.CLEAR":  CmdJSONClear,
 	"JSON.TYPE":   CmdJSONType,
+	"JSON.NUMINCRBY": CmdJSONNumIncrBy,
+	"JSON.NUMMULTBY": CmdJSONNumMultBy,
 }
 
 // commandStrings maps CommandType to command name strings
@@ -914,6 +918,8 @@ var commandStrings = map[CommandType]string{
 	CmdJSONForget:          "json.forget",
 	CmdJSONClear:           "json.clear",
 	CmdJSONType:            "json.type",
+	CmdJSONNumIncrBy:       "json.numincrby",
+	CmdJSONNumMultBy:       "json.nummultby",
 }
 
 // String returns the command name

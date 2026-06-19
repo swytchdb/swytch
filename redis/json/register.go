@@ -45,5 +45,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdJSONDel, Entry: &shared.CommandEntry{Handler: handleJSONDel, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONForget, Entry: &shared.CommandEntry{Handler: handleJSONDel, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONClear, Entry: &shared.CommandEntry{Handler: handleJSONClear, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONNumIncrBy, Entry: &shared.CommandEntry{Handler: handleJSONNumIncrBy, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONNumMultBy, Entry: &shared.CommandEntry{Handler: handleJSONNumMultBy, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 	)
 }
