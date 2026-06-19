@@ -68,6 +68,138 @@ func tipEmitter(cmd *shared.Command, tips []effects.Tip) emitFn {
 	}
 }
 
+// jsonReadInt drives a read-only per-match integer command. fn returns the
+// integer for a match, ok=false when the match is the wrong type (expected
+// names the wanted type, e.g. "a string"). JSONPath replies an array (null per
+// wrong-type match); legacy replies a bare integer (error on a missing path or
+// wrong type); a missing key replies null.
+func jsonReadInt(cmd *shared.Command, w *shared.Writer, key, pathStr, expected string, fn func(*Value) (int64, bool)) {
+	path, err := ParsePath(pathStr)
+	if err != nil {
+		w.WriteError("ERR " + err.Error())
+		return
+	}
+	root, _, exists, wrongType, err := getJSONSnapshot(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	if !exists {
+		w.WriteNullBulkString()
+		return
+	}
+	if wrongType {
+		writeWrongType(w)
+		return
+	}
+	matches := path.resolve(assemble(root, ""))
+	if path.JSONPath {
+		w.WriteArray(len(matches))
+		for _, m := range matches {
+			if n, ok := fn(m); ok {
+				w.WriteInteger(n)
+			} else {
+				w.WriteNullBulkString()
+			}
+		}
+		return
+	}
+	if len(matches) == 0 {
+		w.WriteError("ERR Path '" + pathStr + "' does not exist")
+		return
+	}
+	n, ok := fn(matches[0])
+	if !ok {
+		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + matches[0].TypeName())
+		return
+	}
+	w.WriteInteger(n)
+}
+
+// scalarIntWrite performs an LWW read-modify-write of the scalar addressed by
+// path inside an implicit transaction (Noop carries the read tips), replying an
+// integer. fn returns the replacement value to store and the integer reply;
+// ok=false marks a wrong-type match (JSONPath → null entry, legacy → wrong-type
+// error). The supported path grammar resolves to at most one location, so at
+// most one write.
+func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expected string, fn func(*Value) (repl *Value, reply int64, ok bool)) {
+	path, err := ParsePath(pathStr)
+	if err != nil {
+		w.WriteError("ERR " + err.Error())
+		return
+	}
+	root, tips, exists, wrongType, err := getJSONSnapshot(cmd, key)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
+	if wrongType {
+		writeWrongType(w)
+		return
+	}
+	if !exists {
+		w.WriteError("ERR could not perform this operation on a key that doesn't exist")
+		return
+	}
+	matches := path.resolve(assemble(root, ""))
+
+	type result struct {
+		reply int64
+		ok    bool
+	}
+	results := make([]result, len(matches))
+	var repl *Value
+	write := false
+	for i, m := range matches {
+		r, n, ok := fn(m)
+		results[i] = result{n, ok}
+		if ok {
+			repl, write = r, true
+		}
+	}
+	if write {
+		cmd.Context.BeginTx()
+		// Record the read for this key (Noop carries its tips).
+		if e := cmd.Context.Emit(&pb.Effect{
+			Key:  []byte(key),
+			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+		}, tips); e != nil {
+			w.WriteError(e.Error())
+			return
+		}
+		applied, e := setValueAtPath(func(ef *pb.Effect) error { return cmd.Context.Emit(ef) }, root, key, path, repl, exists)
+		if e != nil {
+			w.WriteError(e.Error())
+			return
+		}
+		if !applied {
+			w.WriteError(errPathNotSet.Error())
+			return
+		}
+	}
+
+	if path.JSONPath {
+		w.WriteArray(len(results))
+		for _, r := range results {
+			if r.ok {
+				w.WriteInteger(r.reply)
+			} else {
+				w.WriteNullBulkString()
+			}
+		}
+		return
+	}
+	if len(matches) == 0 {
+		w.WriteError("ERR Path '" + pathStr + "' does not exist")
+		return
+	}
+	if !results[0].ok {
+		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + matches[0].TypeName())
+		return
+	}
+	w.WriteInteger(results[0].reply)
+}
+
 func keyDelEffect(key string) *pb.Effect {
 	return &pb.Effect{
 		Key:  []byte(key),
@@ -80,6 +212,23 @@ func orderedSelfEffect(key, vid string, id []byte, ref elemRef) *pb.Effect {
 		Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
 		Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_SELF,
 		Id: id,
+	}
+	setRefValue(d, ref)
+	return &pb.Effect{
+		Key:     []byte(key),
+		Virtual: virtBytes(vid),
+		Kind:    &pb.Effect_Data{Data: d},
+	}
+}
+
+// orderedInsertBeforeEffect inserts a new element with id immediately before the
+// element refID in partition vid (ARRINSERT). Sequential inserts before the same
+// refID preserve their emission order.
+func orderedInsertBeforeEffect(key, vid string, id, refID []byte, ref elemRef) *pb.Effect {
+	d := &pb.DataEffect{
+		Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
+		Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_BEFORE,
+		Id: id, Reference: refID,
 	}
 	setRefValue(d, ref)
 	return &pb.Effect{
