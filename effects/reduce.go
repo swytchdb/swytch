@@ -100,8 +100,10 @@ func reducePartitioned(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.Reduced
 		}
 	}
 
-	// Root partition: the exact flat reduction on the root seed (sans partitions).
-	root := reduceFlat(rootSeedOf(liveSeed), rootChain)
+	// Root partition: the exact flat reduction on the root seed. reduceFlat
+	// clones via cloneReducedFlat, which excludes nested partitions, so the root
+	// reduction never sees (nor carries) partition state — it's reattached below.
+	root := reduceFlat(liveSeed, rootChain)
 
 	// Non-root partitions: reduce new effects on top of the carried seed state.
 	parts := make(map[string]*pb.ReducedEffect)
@@ -114,11 +116,16 @@ func reducePartitioned(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.Reduced
 			parts[v] = rp
 		}
 	}
-	// Carry over seed partitions that received no new effects this chain.
+	// Carry over seed partitions that received no new effects this chain. Share
+	// the pointer (copy-on-write): published partitions are never mutated in
+	// place — every writer goes through reduceFlat, which clones before mutating
+	// and emits a fresh ReducedEffect — so the untouched partition is immutable.
+	// Deep-cloning it here was the per-effect O(document) cost that made
+	// reconstructing a partitioned key quadratic in its write count.
 	if liveSeed != nil {
 		for v, sp := range liveSeed.Partitions {
 			if _, touched := partChains[v]; !touched {
-				parts[v] = cloneReduced(sp)
+				parts[v] = sp
 			}
 		}
 	}
@@ -133,31 +140,33 @@ func reducePartitioned(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.Reduced
 	return root
 }
 
-// rootSeedOf returns a view of seed with partitions stripped, so the root
-// reduction never sees nested state. Returns nil for a nil seed.
-func rootSeedOf(seed *pb.ReducedEffect) *pb.ReducedEffect {
-	if seed == nil || len(seed.Partitions) == 0 {
-		return seed
-	}
-	c := cloneReduced(seed)
-	c.Partitions = nil
-	return c
-}
-
 // reduceFlat reduces one partition's linear chain. This is the pre-nesting
 // ReduceChain, unchanged — flat keys route here directly.
 func reduceFlat(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
 	if seed == nil && len(effects) == 0 {
 		return nil
 	}
-	return reduceChainOwned(cloneReduced(seed), effects)
+	return reduceFlatOwned(cloneReducedFlat(seed), effects)
 }
 
 // reduceChainOwned is ReduceChain for a seed the caller exclusively owns: the
 // seed is mutated and returned, never cloned. reconstruct accumulates through
 // here once per visited DAG node — a defensive clone at each step would copy
 // the whole accumulated state, making reconstruct quadratic in chain length.
-func reduceChainOwned(r *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
+//
+// It dispatches on partitions exactly as ReduceChain does: only the flat case
+// can reduce in place. A partitioned chain has to split by virtual key, so it
+// routes through reducePartitioned and gives up the ownership optimization.
+func reduceChainOwned(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
+	if (seed == nil || len(seed.Partitions) == 0) && !hasVirtualEffects(effects) {
+		return reduceFlatOwned(seed, effects)
+	}
+	return reducePartitioned(seed, effects)
+}
+
+// reduceFlatOwned reduces a flat chain into a seed the caller exclusively owns,
+// mutating and returning it rather than cloning.
+func reduceFlatOwned(r *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
 	hadDel := false
 
 	// A REMOVE_OP seed is a DEL marker — subsequent effects start fresh.
@@ -536,6 +545,25 @@ func isCommutative(m pb.MergeRule) bool {
 // maps/slices are shared — callers must replace (not mutate) elements
 // during reduction to avoid corrupting cached snapshots.
 func cloneReduced(r *pb.ReducedEffect) *pb.ReducedEffect {
+	c := cloneReducedFlat(r)
+	if c == nil {
+		return nil
+	}
+	if r.Partitions != nil {
+		c.Partitions = make(map[string]*pb.ReducedEffect, len(r.Partitions))
+		for k, v := range r.Partitions {
+			c.Partitions[k] = cloneReduced(v)
+		}
+	}
+	return c
+}
+
+// cloneReducedFlat clones a ReducedEffect's own (root) state — scalar fields,
+// Scalar, and the NetAdds/NetRemoves/OrderedElements collections — WITHOUT
+// recursing into nested partitions. reduceFlat uses this: it only reduces a
+// single partition's flat state, and the root reduction wants partitions
+// excluded (reducePartitioned reattaches them). cloneReduced builds on it.
+func cloneReducedFlat(r *pb.ReducedEffect) *pb.ReducedEffect {
 	if r == nil {
 		return nil
 	}
@@ -565,12 +593,6 @@ func cloneReduced(r *pb.ReducedEffect) *pb.ReducedEffect {
 	if r.OrderedElements != nil {
 		c.OrderedElements = make([]*pb.ReducedElement, len(r.OrderedElements))
 		copy(c.OrderedElements, r.OrderedElements)
-	}
-	if r.Partitions != nil {
-		c.Partitions = make(map[string]*pb.ReducedEffect, len(r.Partitions))
-		for k, v := range r.Partitions {
-			c.Partitions[k] = cloneReduced(v)
-		}
 	}
 	// Subscribers is intentionally NOT cloned: it is not part of the read/data
 	// reduction pipeline. A snapshot's State.Subscribers is read directly from

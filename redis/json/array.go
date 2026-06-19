@@ -151,8 +151,9 @@ func arrIndexOf(arr []*Value, needle *Value, start, stop int) int64 {
 	if e > n {
 		e = n
 	}
+	needleBytes := Serialize(needle)
 	for i := s; i < e; i++ {
-		if valueEqual(arr[i], needle) {
+		if bytes.Equal(Serialize(arr[i]), needleBytes) {
 			return int64(i)
 		}
 	}

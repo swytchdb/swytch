@@ -57,26 +57,20 @@ func Merge2(a, b *pb.ReducedEffect) *pb.ReducedEffect {
 // partition values are flat (their own .Partitions is empty). Returns nil when
 // no branch has partitions.
 func mergePartitionsN(branches []*pb.ReducedEffect) map[string]*pb.ReducedEffect {
-	var keys map[string]struct{}
+	var byKey map[string][]*pb.ReducedEffect
 	for _, b := range branches {
-		for v := range b.Partitions {
-			if keys == nil {
-				keys = make(map[string]struct{})
+		for v, p := range b.Partitions {
+			if byKey == nil {
+				byKey = make(map[string][]*pb.ReducedEffect)
 			}
-			keys[v] = struct{}{}
+			byKey[v] = append(byKey[v], p)
 		}
 	}
-	if keys == nil {
+	if byKey == nil {
 		return nil
 	}
-	out := make(map[string]*pb.ReducedEffect, len(keys))
-	for v := range keys {
-		subs := make([]*pb.ReducedEffect, 0, len(branches))
-		for _, b := range branches {
-			if p, ok := b.Partitions[v]; ok {
-				subs = append(subs, p)
-			}
-		}
+	out := make(map[string]*pb.ReducedEffect, len(byKey))
+	for v, subs := range byKey {
 		if m := MergeN(subs); m != nil {
 			out[v] = m
 		}
