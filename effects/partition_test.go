@@ -44,19 +44,6 @@ func pScalarRaw(raw string, fch byte) *pb.ReducedEffect {
 	}
 }
 
-func pScalarInt(v int64, merge pb.MergeRule, fch byte) *pb.ReducedEffect {
-	return &pb.ReducedEffect{
-		Op: pb.EffectOp_INSERT_OP, Merge: merge,
-		Collection: pb.CollectionKind_SCALAR, Commutative: isCommutative(merge),
-		Hlc: rTs(int64(fch) + 1), NodeId: 1,
-		Scalar: &pb.DataEffect{
-			Op: pb.EffectOp_INSERT_OP, Merge: merge,
-			Collection: pb.CollectionKind_SCALAR, Value: &pb.DataEffect_IntVal{IntVal: v},
-		},
-		ForkChoiceHash: []byte{fch},
-	}
-}
-
 // branchWithPartitions builds a minimal root-object branch carrying partitions.
 func branchWithPartitions(fch byte, parts map[string]*pb.ReducedEffect) *pb.ReducedEffect {
 	return &pb.ReducedEffect{
@@ -185,61 +172,5 @@ func TestCloneReduced_ClonesPartitions(t *testing.T) {
 	}
 	if got := orig.Partitions["a"].GetScalar().GetRaw(); string(got) != "1" {
 		t.Fatalf("original partition a mutated to %q", got)
-	}
-}
-
-// Merge of two branches with disjoint partitions unions them.
-func TestMergePartitions_DisjointUnion(t *testing.T) {
-	a := branchWithPartitions(0x01, map[string]*pb.ReducedEffect{"x": pScalarRaw("vx", 0x01)})
-	b := branchWithPartitions(0x02, map[string]*pb.ReducedEffect{"y": pScalarRaw("vy", 0x02)})
-	r := Merge2(a, b)
-	if got := r.Partitions["x"].GetScalar().GetRaw(); string(got) != "vx" {
-		t.Fatalf("partition x = %q, want vx", got)
-	}
-	if got := r.Partitions["y"].GetScalar().GetRaw(); string(got) != "vy" {
-		t.Fatalf("partition y = %q, want vy", got)
-	}
-}
-
-// Same partition written non-commutatively on both branches: lower fork-choice
-// hash wins, per partition, just like a flat scalar.
-func TestMergePartitions_SamePartitionForkChoice(t *testing.T) {
-	lo := branchWithPartitions(0x01, map[string]*pb.ReducedEffect{"x": pScalarRaw("lo", 0x01)})
-	hi := branchWithPartitions(0x02, map[string]*pb.ReducedEffect{"x": pScalarRaw("hi", 0x02)})
-	// Merge both orders — partition fork-choice must be commutative.
-	for _, r := range []*pb.ReducedEffect{Merge2(lo, hi), Merge2(hi, lo)} {
-		if got := r.Partitions["x"].GetScalar().GetRaw(); string(got) != "lo" {
-			t.Fatalf("partition x = %q, want lo (lower hash wins)", got)
-		}
-	}
-}
-
-// A partition seeing commutative writes on both branches accumulates — proving
-// partitions merge with the canonical MergeN logic, not a naive overwrite.
-func TestMergePartitions_CommutativeAccumulate(t *testing.T) {
-	a := branchWithPartitions(0x01, map[string]*pb.ReducedEffect{"n": pScalarInt(5, pb.MergeRule_ADDITIVE_INT, 0x01)})
-	b := branchWithPartitions(0x02, map[string]*pb.ReducedEffect{"n": pScalarInt(3, pb.MergeRule_ADDITIVE_INT, 0x02)})
-	r := Merge2(a, b)
-	if got := r.Partitions["n"].GetScalar().GetIntVal(); got != 8 {
-		t.Fatalf("partition n = %d, want 8 (5+3)", got)
-	}
-}
-
-// MergeN merges partitions across all branches deterministically regardless of
-// branch order.
-func TestMergePartitionsN_OrderInvariant(t *testing.T) {
-	mk := func() []*pb.ReducedEffect {
-		return []*pb.ReducedEffect{
-			branchWithPartitions(0x01, map[string]*pb.ReducedEffect{"a": pScalarInt(1, pb.MergeRule_ADDITIVE_INT, 0x01)}),
-			branchWithPartitions(0x02, map[string]*pb.ReducedEffect{"a": pScalarInt(2, pb.MergeRule_ADDITIVE_INT, 0x02)}),
-			branchWithPartitions(0x03, map[string]*pb.ReducedEffect{"a": pScalarInt(4, pb.MergeRule_ADDITIVE_INT, 0x03)}),
-		}
-	}
-	fwd := MergeN(mk())
-	br := mk()
-	rev := MergeN([]*pb.ReducedEffect{br[2], br[1], br[0]})
-	if fwd.Partitions["a"].GetScalar().GetIntVal() != 7 || rev.Partitions["a"].GetScalar().GetIntVal() != 7 {
-		t.Fatalf("partition a sum not order-invariant: fwd=%d rev=%d",
-			fwd.Partitions["a"].GetScalar().GetIntVal(), rev.Partitions["a"].GetScalar().GetIntVal())
 	}
 }

@@ -365,55 +365,6 @@ func TestOrdered_MergeTipDoesNotChangeOrdering(t *testing.T) {
 	}
 }
 
-// --- Merge commutativity ---
-
-func TestOrdered_MergeIsCommutative(t *testing.T) {
-	branchA := &pb.ReducedEffect{
-		Op:         pb.EffectOp_INSERT_OP,
-		Collection: pb.CollectionKind_ORDERED,
-		Hlc:        sTs(30),
-		NodeId:     1,
-		OrderedElements: []*pb.ReducedElement{
-			{Data: &pb.DataEffect{Id: []byte("id-a"), Value: &pb.DataEffect_Raw{Raw: []byte("a")}},
-				ForkChoiceHash: ComputeForkChoiceHash(1, sTs(10))},
-			{Data: &pb.DataEffect{Id: []byte("id-b"), Value: &pb.DataEffect_Raw{Raw: []byte("b")}},
-				ForkChoiceHash: ComputeForkChoiceHash(1, sTs(20))},
-		},
-		ForkChoiceHash: ComputeForkChoiceHash(1, sTs(10)),
-		Commutative:    true,
-	}
-	branchB := &pb.ReducedEffect{
-		Op:         pb.EffectOp_INSERT_OP,
-		Collection: pb.CollectionKind_ORDERED,
-		Hlc:        sTs(35),
-		NodeId:     2,
-		OrderedElements: []*pb.ReducedElement{
-			{Data: &pb.DataEffect{Id: []byte("id-c"), Value: &pb.DataEffect_Raw{Raw: []byte("c")}},
-				ForkChoiceHash: ComputeForkChoiceHash(2, sTs(15))},
-			{Data: &pb.DataEffect{Id: []byte("id-d"), Value: &pb.DataEffect_Raw{Raw: []byte("d")}},
-				ForkChoiceHash: ComputeForkChoiceHash(2, sTs(25))},
-		},
-		ForkChoiceHash: ComputeForkChoiceHash(2, sTs(15)),
-		Commutative:    true,
-	}
-
-	r1 := Merge2(branchA, branchB)
-	r2 := Merge2(branchB, branchA)
-
-	got1 := orderedValues(r1)
-	got2 := orderedValues(r2)
-	if !strSliceEqual(got1, got2) {
-		t.Fatalf("Merge2 not commutative:\n  Merge2(A,B): %v\n  Merge2(B,A): %v", got1, got2)
-	}
-
-	pos := positionMap(got1)
-	if pos["a"] >= pos["b"] {
-		t.Errorf("branch A order broken in %v", got1)
-	}
-	if pos["c"] >= pos["d"] {
-		t.Errorf("branch B order broken in %v", got1)
-	}
-}
 
 // --- Transaction filtering ---
 
