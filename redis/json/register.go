@@ -43,6 +43,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdJSONObjKeys, Entry: &shared.CommandEntry{Handler: handleJSONObjKeys}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONObjLen, Entry: &shared.CommandEntry{Handler: handleJSONObjLen}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONResp, Entry: &shared.CommandEntry{Handler: handleJSONResp}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONDebug, Entry: &shared.CommandEntry{Handler: handleJSONDebug}},
 
 		// Write commands.
 		shared.ModuleEntry{Cmd: shared.CmdJSONSet, Entry: &shared.CommandEntry{Handler: handleJSONSet, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
@@ -53,6 +54,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdJSONClear, Entry: &shared.CommandEntry{Handler: handleJSONClear, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONNumIncrBy, Entry: &shared.CommandEntry{Handler: handleJSONNumIncrBy, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONNumMultBy, Entry: &shared.CommandEntry{Handler: handleJSONNumMultBy, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONNumPowBy, Entry: &shared.CommandEntry{Handler: handleJSONNumPowBy, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONArrAppend, Entry: &shared.CommandEntry{Handler: handleJSONArrAppend, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONArrInsert, Entry: &shared.CommandEntry{Handler: handleJSONArrInsert, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONArrPop, Entry: &shared.CommandEntry{Handler: handleJSONArrPop, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},

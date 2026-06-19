@@ -310,6 +310,7 @@ const (
 	CmdJSONType
 	CmdJSONNumIncrBy
 	CmdJSONNumMultBy
+	CmdJSONNumPowBy
 	CmdJSONArrLen
 	CmdJSONArrAppend
 	CmdJSONArrInsert
@@ -322,6 +323,7 @@ const (
 	CmdJSONObjLen
 	CmdJSONToggle
 	CmdJSONResp
+	CmdJSONDebug
 
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
@@ -687,6 +689,7 @@ var commandNames = map[string]CommandType{
 	"JSON.TYPE":   CmdJSONType,
 	"JSON.NUMINCRBY": CmdJSONNumIncrBy,
 	"JSON.NUMMULTBY": CmdJSONNumMultBy,
+	"JSON.NUMPOWBY":  CmdJSONNumPowBy,
 	"JSON.ARRLEN":    CmdJSONArrLen,
 	"JSON.ARRAPPEND": CmdJSONArrAppend,
 	"JSON.ARRINSERT": CmdJSONArrInsert,
@@ -699,6 +702,7 @@ var commandNames = map[string]CommandType{
 	"JSON.OBJLEN":    CmdJSONObjLen,
 	"JSON.TOGGLE":    CmdJSONToggle,
 	"JSON.RESP":      CmdJSONResp,
+	"JSON.DEBUG":     CmdJSONDebug,
 }
 
 // commandStrings maps CommandType to command name strings
@@ -944,6 +948,7 @@ var commandStrings = map[CommandType]string{
 	CmdJSONType:            "json.type",
 	CmdJSONNumIncrBy:       "json.numincrby",
 	CmdJSONNumMultBy:       "json.nummultby",
+	CmdJSONNumPowBy:        "json.numpowby",
 	CmdJSONArrLen:          "json.arrlen",
 	CmdJSONArrAppend:       "json.arrappend",
 	CmdJSONArrInsert:       "json.arrinsert",
@@ -956,6 +961,7 @@ var commandStrings = map[CommandType]string{
 	CmdJSONObjLen:          "json.objlen",
 	CmdJSONToggle:          "json.toggle",
 	CmdJSONResp:            "json.resp",
+	CmdJSONDebug:           "json.debug",
 }
 
 // String returns the command name

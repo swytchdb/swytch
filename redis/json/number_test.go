@@ -24,6 +24,27 @@ import (
 	"testing"
 )
 
+func TestJSON_NumPowBy(t *testing.T) {
+	h := newHarness()
+	h.run(handleJSONSet, "k", "$", `{"i":2,"f":2.0,"a":3,"c":{"a":2},"s":"x"}`)
+	// Legacy int^int → bare integer.
+	if got := h.run(handleJSONNumPowBy, "k", ".i", "10"); !strings.Contains(got, "\r\n1024\r\n") {
+		t.Fatalf("NUMPOWBY .i 10: %q", got)
+	}
+	// JSONPath multi → array of new values (3^2=9, 2^2=4).
+	if got := h.run(handleJSONNumPowBy, "k", "$..a", "2"); !strings.Contains(got, "[9,4]") {
+		t.Fatalf("NUMPOWBY $..a 2: %q", got)
+	}
+	// Integer exponentiation by a negative power is a numeric overflow.
+	if got := h.run(handleJSONNumPowBy, "k", ".i", "-1"); !strings.Contains(got, "numeric overflow") {
+		t.Fatalf("NUMPOWBY .i -1: %q", got)
+	}
+	// Non-number legacy → error.
+	if got := h.run(handleJSONNumPowBy, "k", ".s", "2"); !strings.HasPrefix(got, "-ERR") {
+		t.Fatalf("NUMPOWBY .s 2: %q", got)
+	}
+}
+
 func TestJSON_NumIncrBy(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"a":5,"b":{"c":2},"f":1.5,"s":"x"}`)

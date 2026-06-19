@@ -21,6 +21,7 @@ package json
 
 import (
 	"errors"
+	"math"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/redis/shared"
@@ -36,6 +37,11 @@ func handleJSONNumIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 // handleJSONNumMultBy — JSON.NUMMULTBY key path number
 func handleJSONNumMultBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	return numBy(cmd, w, '*', "json.nummultby")
+}
+
+// handleJSONNumPowBy — JSON.NUMPOWBY key path number
+func handleJSONNumPowBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+	return numBy(cmd, w, '^', "json.numpowby")
 }
 
 // numBy implements NUMINCRBY/NUMMULTBY: a read-modify-write on the number(s) at
@@ -85,7 +91,11 @@ func numBy(cmd *shared.Command, w *shared.Writer, op byte, name string) (valid b
 		out := &Value{Kind: KindArray}
 		for _, t := range targets {
 			if isNumber(t.val) {
-				nv := applyNumOp(op, t.val, by)
+				nv, err := applyNumOp(op, t.val, by)
+				if err != nil {
+					w.WriteError(err.Error())
+					return
+				}
 				out.Arr = append(out.Arr, nv)
 				writes = append(writes, pending{t.path, nv})
 			} else {
@@ -151,18 +161,45 @@ func numAsFloat(v *Value) float64 {
 	return v.Float
 }
 
-// applyNumOp combines cur and by. Integer operands keep an integer result
-// (matching RedisJSON); any float operand promotes to a float result.
-func applyNumOp(op byte, cur, by *Value) *Value {
+// applyNumOp combines cur and by for op ('+' add, '*' multiply, '^' power).
+// Integer operands keep an integer result (matching RedisJSON); any float
+// operand promotes to a float result. Integer exponentiation by a negative power
+// has no integer result, which RedisJSON reports as a numeric overflow.
+func applyNumOp(op byte, cur, by *Value) (*Value, error) {
 	if cur.Kind == KindInt && by.Kind == KindInt {
-		if op == '+' {
-			return newInt(cur.Int + by.Int)
+		switch op {
+		case '+':
+			return newInt(cur.Int + by.Int), nil
+		case '*':
+			return newInt(cur.Int * by.Int), nil
+		case '^':
+			if by.Int < 0 {
+				return nil, errors.New("ERR numeric overflow")
+			}
+			return newInt(intPow(cur.Int, by.Int)), nil
 		}
-		return newInt(cur.Int * by.Int)
 	}
 	a, b := numAsFloat(cur), numAsFloat(by)
-	if op == '+' {
-		return newFloat(a + b)
+	switch op {
+	case '+':
+		return newFloat(a + b), nil
+	case '*':
+		return newFloat(a * b), nil
+	case '^':
+		return newFloat(math.Pow(a, b)), nil
 	}
-	return newFloat(a * b)
+	return nil, errors.New("ERR unknown numeric operation")
+}
+
+// intPow returns base**exp for exp >= 0 by binary exponentiation.
+func intPow(base, exp int64) int64 {
+	result := int64(1)
+	for exp > 0 {
+		if exp&1 == 1 {
+			result *= base
+		}
+		base *= base
+		exp >>= 1
+	}
+	return result
 }
