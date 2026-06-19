@@ -75,15 +75,17 @@ func keyDelEffect(key string) *pb.Effect {
 	}
 }
 
-func orderedSelfEffect(key, vid string, id, ref []byte) *pb.Effect {
+func orderedSelfEffect(key, vid string, id []byte, ref elemRef) *pb.Effect {
+	d := &pb.DataEffect{
+		Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
+		Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_SELF,
+		Id: id,
+	}
+	setRefValue(d, ref)
 	return &pb.Effect{
 		Key:     []byte(key),
 		Virtual: virtBytes(vid),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
-			Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_SELF,
-			Id: id, Value: &pb.DataEffect_Raw{Raw: ref},
-		}},
+		Kind:    &pb.Effect_Data{Data: d},
 	}
 }
 
@@ -121,9 +123,8 @@ func elementByIndex(p *pb.ReducedEffect, idx int) *pb.ReducedElement {
 }
 
 func containerChildVid(el *pb.ReducedElement) (string, bool) {
-	ref := el.GetData().GetRaw()
-	if len(ref) > 0 && ref[0] == refContainer {
-		return string(ref[1:]), true
+	if child := el.GetData().GetChild(); len(child) > 0 {
+		return string(child), true
 	}
 	return "", false
 }

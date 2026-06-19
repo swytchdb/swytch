@@ -76,6 +76,7 @@ message DataEffect {
     sint64 int_val = 11;
     double float_val = 12;
     CompressedValue compressed = 13;
+    bytes child = 14;      // element references a child container partition (JSON); value lives in partition <child>
   }
 }
 

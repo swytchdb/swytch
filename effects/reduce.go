@@ -600,6 +600,8 @@ func cloneData(d *pb.DataEffect) *pb.DataEffect {
 		// The CompressedValue is immutable once built; share it like the
 		// byte slices above.
 		result.Value = &pb.DataEffect_Compressed{Compressed: v.Compressed}
+	case *pb.DataEffect_Child:
+		result.Value = &pb.DataEffect_Child{Child: v.Child}
 	}
 	return result
 }

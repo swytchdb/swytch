@@ -32,22 +32,38 @@ import (
 //   - object: element id = member name, in insertion order.
 //   - array:  element id = a generated handle, in positional order.
 //
-// An element's value is a reference: 's' + JSON text for a scalar member
-// (inline, no child partition), or 'c' + childVid for a container member whose
-// contents live in partition childVid. Replacing a node just points its parent
-// element at a fresh childVid; the old partition becomes an unreachable orphan.
+// An element's value rides on the DataEffect value oneof: the raw variant holds
+// JSON text for an inline scalar member (no child partition); the child variant
+// holds a childVid for a container member whose contents live in partition
+// childVid. Replacing a node just points its parent element at a fresh childVid;
+// the old partition becomes an unreachable orphan.
 //
 // A root scalar (e.g. JSON.SET k $ 5) is stored as a SCALAR root partition with
 // TypeTag TYPE_JSON.
 
-const (
-	refScalar    = 's'
-	refContainer = 'c'
-)
-
 // emitFn emits one effect. Handlers pass a closure over cmd.Context.Emit (with
 // the read tips threaded onto the first call); tests pass a collector.
 type emitFn func(*pb.Effect) error
+
+// elemRef is a member element's value: an inline scalar (raw JSON text) or a
+// reference to a child container partition (childVid).
+type elemRef struct {
+	childVid string
+	scalar   []byte
+}
+
+func scalarRef(text []byte) elemRef   { return elemRef{scalar: text} }
+func containerRef(vid string) elemRef { return elemRef{childVid: vid} }
+
+// setRefValue installs a member element's value onto a DataEffect's value oneof:
+// the child variant for a container reference, the raw variant for inline JSON.
+func setRefValue(d *pb.DataEffect, ref elemRef) {
+	if ref.childVid != "" {
+		d.Value = &pb.DataEffect_Child{Child: []byte(ref.childVid)}
+		return
+	}
+	d.Value = &pb.DataEffect_Raw{Raw: ref.scalar}
+}
 
 // newVid mints a globally-unique virtual id for a container node.
 func newVid() string {
@@ -80,15 +96,17 @@ func scalarEffect(key, vid string, raw []byte) *pb.Effect {
 	}
 }
 
-func orderedInsertEffect(key, vid string, id, ref []byte) *pb.Effect {
+func orderedInsertEffect(key, vid string, id []byte, ref elemRef) *pb.Effect {
+	d := &pb.DataEffect{
+		Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
+		Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_TAIL,
+		Id: id,
+	}
+	setRefValue(d, ref)
 	return &pb.Effect{
 		Key:     []byte(key),
 		Virtual: virtBytes(vid),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op: pb.EffectOp_INSERT_OP, Merge: pb.MergeRule_LAST_WRITE_WINS,
-			Collection: pb.CollectionKind_ORDERED, Placement: pb.Placement_PLACE_TAIL,
-			Id: id, Value: &pb.DataEffect_Raw{Raw: ref},
-		}},
+		Kind:    &pb.Effect_Data{Data: d},
 	}
 }
 
@@ -137,15 +155,15 @@ func encodeContainer(emit emitFn, key, vid string, v *Value) error {
 
 // encodeRef returns a member's element-value reference, recursively encoding a
 // container member into its own fresh partition.
-func encodeRef(emit emitFn, key string, v *Value) ([]byte, error) {
+func encodeRef(emit emitFn, key string, v *Value) (elemRef, error) {
 	if v.IsContainer() {
 		childVid := newVid()
 		if err := encodeContainer(emit, key, childVid, v); err != nil {
-			return nil, err
+			return elemRef{}, err
 		}
-		return append([]byte{refContainer}, childVid...), nil
+		return containerRef(childVid), nil
 	}
-	return append([]byte{refScalar}, Serialize(v)...), nil
+	return scalarRef(Serialize(v)), nil
 }
 
 // nodeAt returns the partition holding the node at vid (root for "").
@@ -168,7 +186,7 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 	case pb.ValueType_TYPE_JSON_OBJECT:
 		obj := &Value{Kind: KindObject}
 		for _, el := range p.OrderedElements {
-			if v := decodeRef(root, el.GetData().GetRaw()); v != nil {
+			if v := decodeRef(root, el.GetData()); v != nil {
 				obj.Obj = append(obj.Obj, Member{Key: string(el.GetData().GetId()), Val: v})
 			}
 		}
@@ -176,7 +194,7 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 	case pb.ValueType_TYPE_JSON_ARRAY:
 		arr := &Value{Kind: KindArray}
 		for _, el := range p.OrderedElements {
-			if v := decodeRef(root, el.GetData().GetRaw()); v != nil {
+			if v := decodeRef(root, el.GetData()); v != nil {
 				arr.Arr = append(arr.Arr, v)
 			}
 		}
@@ -191,18 +209,16 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 	}
 }
 
-// decodeRef resolves a member element-value reference to a Value.
-func decodeRef(root *pb.ReducedEffect, ref []byte) *Value {
-	if len(ref) == 0 {
-		return nil
+// decodeRef resolves a member element's value to a Value: the child variant
+// recurses into its partition; otherwise the raw variant is inline JSON text.
+func decodeRef(root *pb.ReducedEffect, d *pb.DataEffect) *Value {
+	if child := d.GetChild(); len(child) > 0 {
+		return assemble(root, string(child))
 	}
-	switch ref[0] {
-	case refScalar:
-		if v, err := Parse(ref[1:]); err == nil {
+	if raw := d.GetRaw(); len(raw) > 0 {
+		if v, err := Parse(raw); err == nil {
 			return v
 		}
-	case refContainer:
-		return assemble(root, string(ref[1:]))
 	}
 	return nil
 }

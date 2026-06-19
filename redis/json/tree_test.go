@@ -103,11 +103,12 @@ func TestTree_PartitionsPerContainer(t *testing.T) {
 	if len(root.Partitions) != 3 {
 		t.Fatalf("got %d non-root partitions, want 3: keys=%v", len(root.Partitions), partitionKinds(root))
 	}
-	// The scalar member a is inline (no partition): its element value starts 's'.
+	// The scalar member a is inline (no child partition): its value is the raw
+	// variant holding JSON text, not the child variant.
 	for _, el := range root.OrderedElements {
 		if string(el.Data.Id) == "a" {
-			if ref := el.Data.GetRaw(); len(ref) == 0 || ref[0] != refScalar {
-				t.Fatalf("member a not inline scalar: %q", ref)
+			if d := el.Data; len(d.GetChild()) != 0 || string(d.GetRaw()) != "1" {
+				t.Fatalf("member a not inline scalar: child=%q raw=%q", d.GetChild(), d.GetRaw())
 			}
 		}
 	}
