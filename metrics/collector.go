@@ -113,6 +113,9 @@ type Collector struct {
 	reachedProtected   *prometheus.Desc
 	windowHitRate      *prometheus.Desc
 	ghostCount         *prometheus.Desc
+	reapBackoff        *prometheus.Desc
+	reapBacklog        *prometheus.Desc
+	reapOverflowsTotal *prometheus.Desc
 	bytesReadTotal     *prometheus.Desc
 	bytesWrittenTotal  *prometheus.Desc
 	uptimeSeconds      *prometheus.Desc
@@ -251,6 +254,21 @@ func NewCollector(provider StatsProvider) *Collector {
 			"Ghost leaves retained for warm restart after eviction",
 			[]string{"shard"}, nil,
 		),
+		reapBackoff: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "reap_backoff"),
+			"Adaptive reaper pacing multiplier (lower = reaping harder; settles at the gentlest pacing that keeps up)",
+			[]string{"shard"}, nil,
+		),
+		reapBacklog: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "reap_backlog"),
+			"Deleted-but-linked leaves awaiting unlink by the background reaper",
+			[]string{"shard"}, nil,
+		),
+		reapOverflowsTotal: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "reap_overflows_total"),
+			"Reaper cycles where dead-leaf production overflowed the queue into the BFS backstop",
+			[]string{"shard"}, nil,
+		),
 		bytesReadTotal: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "bytes_read_total"),
 			"Total bytes read from network",
@@ -330,6 +348,9 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.reachedProtected
 	ch <- c.windowHitRate
 	ch <- c.ghostCount
+	ch <- c.reapBackoff
+	ch <- c.reapBacklog
+	ch <- c.reapOverflowsTotal
 	ch <- c.bytesReadTotal
 	ch <- c.bytesWrittenTotal
 	ch <- c.uptimeSeconds
@@ -394,6 +415,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.reachedProtected, prometheus.GaugeValue, float64(s.ReachedProtected), shard)
 		ch <- prometheus.MustNewConstMetric(c.windowHitRate, prometheus.GaugeValue, s.WindowHitRate, shard)
 		ch <- prometheus.MustNewConstMetric(c.ghostCount, prometheus.GaugeValue, float64(s.GhostCount), shard)
+		ch <- prometheus.MustNewConstMetric(c.reapBackoff, prometheus.GaugeValue, float64(s.ReapBackoff), shard)
+		ch <- prometheus.MustNewConstMetric(c.reapBacklog, prometheus.GaugeValue, float64(s.ReapBacklog), shard)
+		ch <- prometheus.MustNewConstMetric(c.reapOverflowsTotal, prometheus.CounterValue, float64(s.ReapOverflows), shard)
 	}
 
 	// Network stats

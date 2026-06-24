@@ -29,6 +29,7 @@ package keytrie
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -53,6 +54,21 @@ const (
 	// acquisition — small, so inserts interleave between batches instead of
 	// stalling behind a whole-tree pass.
 	reapBatchSize = 64
+
+	// reapBackoff{Init,Min,Max} bound the adaptive pacing multiplier (see
+	// Critbit.reapBackoff and paceReap): after a write-locked batch the reaper
+	// sleeps this multiple of the batch's hold time before taking the lock again.
+	// Short holds alone are not enough — reacquiring back-to-back keeps the reaper
+	// permanently contending with insert read-locks and craters throughput.
+	// Sleeping held×factor caps the reaper at ~1/(factor+1) of the structural
+	// lock's wall time and hands the rest to inserts, while scaling with batch
+	// cost so the duty cycle holds across machines. The factor is not fixed: a
+	// controller (see maybeReap) drives it down when the reap queue overflows
+	// (production outran the reaper) and back up when it does not, settling at the
+	// gentlest pacing that keeps up.
+	reapBackoffInit = 7
+	reapBackoffMin  = 1
+	reapBackoffMax  = 32
 )
 
 // critNode is a flattened node that serves as both internal and leaf.
@@ -106,10 +122,14 @@ type Critbit[T any] struct {
 	reapQueue   *xsync.MPMCQueue[*critNode[T]]
 	reapDropped atomic.Int64
 
-	// clock is a monotonic counter stamped onto a leaf's lastAccess on each
-	// access, giving the eviction policy an LRU tiebreak among equal-freq
-	// leaves without a wall clock.
-	clock atomic.Uint64
+	// reapBackoff is the adaptive pacing multiplier (bounds reapBackoffMin..Max).
+	// maybeReap's controller lowers it on queue overflow and raises it otherwise;
+	// paceReap reads it between batches. See reapBackoffInit.
+	reapBackoff atomic.Int64
+
+	// reapOverflows counts reaper cycles where the queue overflowed (production
+	// outran the reaper, forcing the BFS backstop). Lifetime total, for telemetry.
+	reapOverflows atomic.Int64
 
 	// Eviction policy (lifted from CloxCache as a single bounded domain;
 	// see evict.go). Sweeps run serialized under evictMu — a cold path —
@@ -122,8 +142,8 @@ type Critbit[T any] struct {
 	evictHand      uint64
 	evictK         atomic.Int32  // protected-freq threshold (adaptive)
 	ghostCount     atomic.Int64  // soft-deleted leaves retained for warm restart
-	windowHits     atomic.Uint64 // live accesses in the current adapt window
-	windowOps      atomic.Uint64 // total accesses (live + ghost) in the window
+	windowHits     windowCounter // live accesses in the current adapt window (sharded)
+	windowOps      windowCounter // total accesses (live + ghost) in the window (sharded)
 	evictedProt    atomic.Uint64 // evicted with freq > k (protected fallback)
 	evictedUnprot  atomic.Uint64 // evicted with freq <= k (unprotected)
 	reachedProt    atomic.Uint64 // leaves whose freq crossed k under pressure
@@ -132,10 +152,15 @@ type Critbit[T any] struct {
 	rateHigh       atomic.Uint32 // adaptive high graduation threshold * 10000
 	lastKDir       atomic.Int32  // direction of the last k change (+1/-1/0)
 	lastAdaptCheck atomic.Uint64 // eviction count at the last adapt check
-	lastEvictClock atomic.Uint64 // trie clock at the last EvictBatch; detects eviction resuming after a pause
 	evictDecider   func(key string) bool
 	evictNotify    func(key string, tips []EffectRef, data *T)
-	evictActive    atomic.Bool // true once eviction hooks are installed
+	// underPressure reports whether the consumer is currently over its eviction
+	// target — the keytrie analogue of CloxCache's instantaneous
+	// entryCount >= capacity check. A graduation (a leaf's freq crossing k) is
+	// counted only while this is true, so adaptive-k measures the current
+	// eviction episode instead of accumulating graduations across idle pauses.
+	underPressure func() bool
+	evictActive   atomic.Bool // true once eviction hooks are installed
 
 	// refDelta, if set, is called on every leaf tip-set transition so the
 	// consumer can maintain per-tip refcounts without re-deriving them at each
@@ -300,6 +325,7 @@ func (c *Critbit[T]) ensureInit() {
 		})
 		c.internalArena.init(defaultCritbitArenaChunkSize, nil)
 		c.reapQueue = xsync.NewMPMCQueue[*critNode[T]](reapQueueCapacity)
+		c.reapBackoff.Store(reapBackoffInit)
 		c.evictK.Store(defaultProtectedFreqThreshold)
 		c.rateLow.Store(defaultRateLow)
 		c.rateHigh.Store(defaultRateHigh)
@@ -326,7 +352,7 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n.key = key
 	n.tips.Store(ts)
 	n.freq.Store(1) // start warm enough to survive one sweep
-	n.lastAccess.Store(c.clock.Add(1))
+	n.lastAccess.Store(monotonic())
 	return n
 }
 
@@ -610,7 +636,7 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 }
 
 // bumpAccess records an access to leaf: it raises the frequency counter
-// (saturating at maxLeafFreq) and stamps lastAccess from the trie clock.
+// (saturating at maxLeafFreq) and stamps lastAccess from the monotonic clock.
 // Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —
 // it is promoted explicitly when its key is re-inserted.
 func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
@@ -626,24 +652,29 @@ func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
 			break
 		}
 		if leaf.freq.CompareAndSwap(f, f+1) {
-			// Count a leaf crossing into protected status, but only under
-			// eviction pressure — the graduation rate is graduated/evictions, so
-			// a graduation logged while nothing is evicting (cold start, cache
-			// not yet full) inflates the numerator against a zero denominator and
-			// pushes k around on noise. evicted>0 is the keytrie analogue of
-			// CloxCache's entryCount>=capacity guard: once a victim has been
-			// taken we are, by definition, under pressure. The extra loads only
-			// run at the f==k crossing (once per leaf lifetime), not every read.
-			if f == c.evictK.Load() && c.evictedUnprot.Load()+c.evictedProt.Load() > 0 {
+			// Count a leaf crossing into protected status, but only while
+			// instantaneously over the eviction target — CloxCache's
+			// entryCount >= capacity guard (cloxcache.go Get/PutBack). The
+			// graduation rate is graduated/evictions; counting graduations while
+			// not under pressure (cold start, or an idle pause after the governor
+			// brought us back under target) inflates the numerator against a
+			// frozen denominator and rails k. underPressure must be the *current*
+			// over-target condition, not a "have we ever evicted" latch — a latch
+			// never falls back to false, so the rate accumulates across pauses.
+			// The predicate runs only at the f==k crossing (once per leaf
+			// lifetime), not on every read.
+			if f == c.evictK.Load() && c.underPressure != nil && c.underPressure() {
 				c.reachedProt.Add(1)
 			}
 			break
 		}
 	}
-	leaf.lastAccess.Store(c.clock.Add(1))
-	// Window accounting for adaptive-k: a live-leaf access is a hit.
-	c.windowHits.Add(1)
-	c.windowOps.Add(1)
+	leaf.lastAccess.Store(monotonic())
+	// Window accounting for adaptive-k: a live-leaf access is a hit. Sharded by
+	// leaf address so the per-access increment doesn't serialize on one line.
+	p := unsafe.Pointer(leaf)
+	c.windowHits.add(p, 1)
+	c.windowOps.add(p, 1)
 }
 
 // LoadOrStoreData returns the leaf payload for key, installing def if none is
@@ -1250,11 +1281,32 @@ func (c *Critbit[T]) maybeReap() {
 		}
 		// Backstop: if any pushes were dropped on a full queue, a full BFS pass
 		// rediscovers those stragglers so nothing lingers linked forever.
-		if c.reapDropped.Swap(0) > 0 {
+		overflowed := c.reapDropped.Swap(0) > 0
+		if overflowed {
 			for c.reap() > 0 {
 			}
 		}
+		c.adaptReapBackoff(overflowed)
 	}()
+}
+
+// adaptReapBackoff tunes the pacing multiplier once per reaper cycle (AIMD).
+// Overflow means dead-leaf production outran the reaper this cycle, so the queue
+// filled and pushes were dropped into the BFS backstop — halve the backoff to
+// reap harder. A clean cycle means we kept up with room to spare — nudge the
+// backoff up by one so the reaper drifts toward the gentlest pacing that still
+// avoids overflow, handing the reclaimed lock time back to inserts. Multiplicative
+// decrease / additive increase keeps the loop stable: it backs off hard the
+// instant it falls behind and probes back up slowly.
+func (c *Critbit[T]) adaptReapBackoff(overflowed bool) {
+	f := c.reapBackoff.Load()
+	if overflowed {
+		c.reapOverflows.Add(1)
+		f = max(f/2, reapBackoffMin)
+	} else {
+		f = min(f+1, reapBackoffMax)
+	}
+	c.reapBackoff.Store(f)
 }
 
 // drainReap pops up to reapBatchSize queued leaves and unlinks them under a
@@ -1279,12 +1331,28 @@ func (c *Critbit[T]) drainReap() int {
 	if n == 0 {
 		return 0
 	}
+	t := time.Now()
 	c.reapMu.Lock()
 	for i := range n {
 		c.unlinkLeaf(batch[i])
 	}
 	c.reapMu.Unlock()
+	// Pace only after a full batch: a short batch means the queue is drained, so
+	// there is no next hold to back off from.
+	if n == reapBatchSize {
+		c.paceReap(time.Since(t))
+	}
 	return n
+}
+
+// paceReap sleeps after a write-locked reap batch so the reaper's share of the
+// structural lock stays bounded (see reapBackoffFactor). held is how long the
+// just-released batch held the lock; sleeping a multiple of it keeps the duty
+// cycle constant regardless of how long the batch took.
+func (c *Critbit[T]) paceReap(held time.Duration) {
+	if held > 0 {
+		time.Sleep(held * time.Duration(c.reapBackoff.Load()))
+	}
 }
 
 // unlinkLeaf removes one dead leaf (and the internal node it collapses) from the
@@ -1342,97 +1410,70 @@ func (c *Critbit[T]) unlinkLeaf(leaf *critNode[T]) bool {
 	return true
 }
 
-// reap does a single BFS walk pruning every deleted leaf it finds.
-// Takes the write-lock on reapMu so no structural insert can race.
-// Returns the number of deleted leaves unlinked.
+// collectDeadLeaves walks the tree read-only — atomic child reads, no lock, the
+// same way an ordinary reader (findBestMatch) traverses — and returns every leaf
+// that is deleted and not a ghost (freq < 0 is retained for warm restart). It is
+// the backstop's rediscovery step: the leaves whose direct enqueue was dropped
+// on a full reapQueue. Because it holds no lock, concurrent inserts may reshape
+// the tree under it; that only risks missing a straggler (caught on the next
+// pass) or listing a leaf that revives before unlink (unlinkLeaf re-validates
+// from the root and skips it) — never corruption.
+func (c *Critbit[T]) collectDeadLeaves(root *critNode[T]) []*critNode[T] {
+	// deletedCount is a best-effort hint (concurrent Add(-1) paths can drive it
+	// transiently negative), so clamp it before using it as a capacity.
+	dead := make([]*critNode[T], 0, max(c.deletedCount.Load(), 0))
+	stack := []*critNode[T]{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n.isLeaf {
+			if n.isDeleted() && n.freq.Load() >= 0 {
+				dead = append(dead, n)
+			}
+			continue
+		}
+		for dir := range 2 {
+			if child := n.child[dir].Load(); child != nil {
+				stack = append(stack, child)
+			}
+		}
+	}
+	return dead
+}
+
+// reap is the queue-overflow backstop: it rediscovers the dead leaves that were
+// dropped from reapQueue and unlinks them. Unlike a single write-locked BFS over
+// the whole tree — which paused every insert for the full walk (seconds on a
+// large trie) — it splits the work: a lock-free walk collects the victims, then
+// unlinkLeaf removes them in reapBatchSize chunks, releasing the write lock
+// between batches so inserts interleave. The world is paused for at most one
+// batch at a time, never the whole walk. Returns the number unlinked.
 func (c *Critbit[T]) reap() int {
 	if c.closed.Load() {
 		return 0
 	}
-
-	c.reapMu.Lock()
-	defer c.reapMu.Unlock()
-
 	root := c.root.Load()
 	if root == nil {
 		return 0
 	}
-	if root.isLeaf {
-		// Ghosts (deleted, freq < 0) are retained for warm restart.
-		if root.isDeleted() && root.freq.Load() >= 0 {
-			c.root.Store(nil)
-			c.deletedCount.Add(-1)
-			c.leafArena.recordReaped(root.chunkIdx)
-			return 1
-		}
-		return 0
-	}
 
-	type bfsEntry struct {
-		node          *critNode[T]
-		parent        *critNode[T]
-		dirFromParent int
-	}
+	dead := c.collectDeadLeaves(root)
 
 	reaped := 0
-	queue := make([]bfsEntry, 1, 64)
-	queue[0] = bfsEntry{node: root}
-
-	for i := 0; i < len(queue); i++ {
-		e := queue[i]
-		node := e.node
-
-		pruned := false
-		for dir := range 2 {
-			child := node.child[dir].Load()
-			// Skip live leaves, internal nodes, and ghosts (freq < 0).
-			if child == nil || !child.isLeaf || !child.isDeleted() || child.freq.Load() < 0 {
-				continue
+	for start := 0; start < len(dead); start += reapBatchSize {
+		end := min(start+reapBatchSize, len(dead))
+		t := time.Now()
+		c.reapMu.Lock()
+		for _, leaf := range dead[start:end] {
+			if c.unlinkLeaf(leaf) {
+				reaped++
 			}
-
-			sibling := node.child[1-dir].Load()
-			if sibling == nil {
-				continue
-			}
-
-			if e.parent == nil {
-				c.root.Store(sibling)
-			} else {
-				e.parent.child[e.dirFromParent].Store(sibling)
-			}
-			c.deletedCount.Add(-1)
-			reaped++
-			pruned = true
-
-			// Both the deleted leaf and the internal node it collapsed are now
-			// unlinked; tell each arena so it can drop a fully-dead chunk.
-			c.leafArena.recordReaped(child.chunkIdx)
-			c.internalArena.recordReaped(node.chunkIdx)
-
-			if !sibling.isLeaf {
-				queue = append(queue, bfsEntry{
-					node:          sibling,
-					parent:        e.parent,
-					dirFromParent: e.dirFromParent,
-				})
-			}
-			break
 		}
-
-		if !pruned {
-			for dir := range 2 {
-				child := node.child[dir].Load()
-				if child != nil && !child.isLeaf {
-					queue = append(queue, bfsEntry{
-						node:          child,
-						parent:        node,
-						dirFromParent: dir,
-					})
-				}
-			}
+		c.reapMu.Unlock()
+		if end < len(dead) { // back off between batches, but not after the last
+			c.paceReap(time.Since(t))
 		}
 	}
-
 	return reaped
 }
 

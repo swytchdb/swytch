@@ -991,6 +991,10 @@ type AdaptiveStats struct {
 	LearnedRateHigh float64 // learned high threshold (rate above which k increases)
 	WindowHitRate   float64 // current window hit rate
 	GhostCount      int64   // soft-deleted leaves retained for warm restart (keytrie only; 0 for CloxCache)
+	// Reaper pacing (keytrie only; 0 for CloxCache, which tombstones in place).
+	ReapBackoff   int64  // current reaper pacing multiplier (lower = reaping harder)
+	ReapBacklog   int64  // deleted-but-linked leaves awaiting unlink
+	ReapOverflows uint64 // lifetime reaper cycles that overflowed into the BFS backstop
 }
 
 // GetAdaptiveStats returns adaptive threshold stats for all shards

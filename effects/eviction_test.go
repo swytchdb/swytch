@@ -74,6 +74,7 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const keys = 64
@@ -151,6 +152,7 @@ func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const n = 200
@@ -208,6 +210,7 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const keys = 100
@@ -269,6 +272,7 @@ func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const n = 300
@@ -316,6 +320,7 @@ func TestEvictBounded_PinsSystemKey(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const sys = "__swytch:members"
@@ -577,7 +582,7 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 func TestEvictBounded_CASProtectsConcurrentWrites(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
-	e.index.SetEvictHooks(func(string) bool { return true }, e.onLeafEvicted)
+	e.index.SetEvictHooks(func(string) bool { return true }, e.onLeafEvicted, func() bool { return true })
 
 	const key = "user:contended"
 	const iterations = 200

@@ -36,6 +36,7 @@ func TestEvictBounded_EvictsColdNotProtected(t *testing.T) {
 	c.SetEvictHooks(
 		func(string) bool { return true },
 		func(k string, _ []EffectRef, _ *struct{}) { evicted = append(evicted, k) },
+		func() bool { return true },
 	)
 
 	for i, k := range []string{"hot-a", "hot-b", "cold-c"} {
@@ -66,7 +67,7 @@ func TestEvictBounded_EvictsColdNotProtected(t *testing.T) {
 // to a live leaf (warm restart) rather than starting cold.
 func TestEvictBounded_GhostPromoteOnReinsert(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	c.Insert("x", nil, NewTipSet(tip(1)))
 	if !c.EvictBounded(64) {
@@ -94,7 +95,7 @@ func TestEvictBounded_GhostPromoteOnReinsert(t *testing.T) {
 // most-recently-written ones (read-your-writes).
 func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	const n = 100
 	keys := make([]string, n)
@@ -123,7 +124,7 @@ func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
 // eviction reclaims the oldest ghost instead of evicting a hot (protected) key.
 func TestEvictBounded_ReclaimsGhostBeforeHotKey(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	all := []string{"cold-1", "cold-2", "hot-1", "hot-2"}
 	for _, k := range all {
@@ -236,7 +237,7 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 			t.Fatalf("surviving key %s missing after chunk reclaim", keys[i])
 		}
 	}
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 	c.EvictBounded(64) // must not panic on the nil chunk
 }
 
@@ -245,7 +246,7 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 // deleted leaf.
 func TestEvictBounded_GhostNotReaped(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	c.Insert("ghost", nil, NewTipSet(tip(1)))
 	c.Insert("normal", nil, NewTipSet(tip(2)))
@@ -257,5 +258,43 @@ func TestEvictBounded_GhostNotReaped(t *testing.T) {
 	c.reap()
 	if g := c.ghostCount.Load(); g < 1 {
 		t.Fatalf("ghostCount = %d; a ghost should have survived reap", g)
+	}
+}
+
+// TestReapBackoff_AIMD verifies the adaptive pacing controller: clean cycles
+// raise the backoff additively up to the max, overflow halves it, and both
+// directions saturate at their bounds.
+func TestReapBackoff_AIMD(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	if got := c.reapBackoff.Load(); got != reapBackoffInit {
+		t.Fatalf("initial backoff = %d; want %d", got, reapBackoffInit)
+	}
+
+	// A clean cycle increases the factor by exactly one.
+	c.adaptReapBackoff(false)
+	if got := c.reapBackoff.Load(); got != reapBackoffInit+1 {
+		t.Fatalf("after one clean cycle = %d; want %d", got, reapBackoffInit+1)
+	}
+
+	// Many clean cycles climb to, but never past, the max.
+	for range 100 {
+		c.adaptReapBackoff(false)
+	}
+	if got := c.reapBackoff.Load(); got != reapBackoffMax {
+		t.Fatalf("after many clean cycles = %d; want max %d", got, reapBackoffMax)
+	}
+
+	// Overflow halves the factor (multiplicative decrease).
+	c.adaptReapBackoff(true)
+	if got := c.reapBackoff.Load(); got != reapBackoffMax/2 {
+		t.Fatalf("after overflow = %d; want %d", got, reapBackoffMax/2)
+	}
+
+	// Repeated overflow floors at the min, never below.
+	for range 100 {
+		c.adaptReapBackoff(true)
+	}
+	if got := c.reapBackoff.Load(); got != reapBackoffMin {
+		t.Fatalf("after many overflows = %d; want min %d", got, reapBackoffMin)
 	}
 }

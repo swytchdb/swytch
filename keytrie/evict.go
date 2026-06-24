@@ -22,6 +22,7 @@ package keytrie
 import (
 	"math"
 	"sort"
+	"unsafe"
 )
 
 // Eviction policy constants, lifted from CloxCache. The trie runs the policy
@@ -70,11 +71,14 @@ const (
 // decider vetoes a key as an eviction victim (return false to pin it, e.g.
 // system keys). notify fires after a victim leaf is soft-deleted, handing the
 // consumer the dropped key's tips and leaf payload so it can release refs and
-// tear down (e.g. unsubscribe). Both run without any trie lock the consumer
-// could re-enter; keep them prompt.
-func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T)) {
+// tear down (e.g. unsubscribe). pressure reports whether the consumer is
+// currently over its eviction target — the instantaneous condition that gates
+// graduation counting in bumpAccess (see underPressure). All three run without
+// any trie lock the consumer could re-enter; keep them prompt.
+func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T), pressure func() bool) {
 	c.evictDecider = decider
 	c.evictNotify = notify
+	c.underPressure = pressure
 	// Hooks are only ever consumed by EvictBounded, so their presence marks
 	// eviction as active: bumpAccess then maintains the freq/LRU/adaptive-k
 	// bookkeeping. Without them, reads skip that bookkeeping entirely.
@@ -122,6 +126,9 @@ type EvictStats struct {
 	ReachedProtected   uint64  // windowed: leaves that graduated past k
 	WindowHitRate      float64 // current adapt-window hit rate (self-tuning gradient input)
 	GhostCount         int64   // ghosts retained for warm restart
+	ReapBackoff        int64   // current reaper pacing multiplier (lower = reaping harder)
+	ReapBacklog        int64   // deleted-but-linked leaves awaiting unlink
+	ReapOverflows      uint64  // lifetime reaper cycles that overflowed into the BFS backstop
 }
 
 // EvictStats snapshots the adaptive policy's internals. Lock-free reads of the
@@ -136,8 +143,8 @@ func (c *Critbit[T]) EvictStats() EvictStats {
 		rate = float64(grad) / float64(total)
 	}
 	var hitRate float64
-	if ops := c.windowOps.Load(); ops > 0 {
-		hitRate = float64(c.windowHits.Load()) / float64(ops)
+	if ops := c.windowOps.load(); ops > 0 {
+		hitRate = float64(c.windowHits.load()) / float64(ops)
 	}
 	return EvictStats{
 		K:                  c.evictK.Load(),
@@ -149,6 +156,9 @@ func (c *Critbit[T]) EvictStats() EvictStats {
 		ReachedProtected:   grad,
 		WindowHitRate:      hitRate,
 		GhostCount:         c.ghostCount.Load(),
+		ReapBackoff:        c.reapBackoff.Load(),
+		ReapBacklog:        max(c.deletedCount.Load(), 0),
+		ReapOverflows:      uint64(max(c.reapOverflows.Load(), 0)),
 	}
 }
 
@@ -176,25 +186,6 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 
 	c.evictMu.Lock()
 	defer c.evictMu.Unlock()
-
-	// Eviction here is bursty — driven by memory pressure, it pauses when under
-	// target and resumes when over (unlike CloxCache, where a write over capacity
-	// always precipitated an eviction, so eviction was continuous). reachedProt
-	// (the graduation_rate numerator) is bumped on the read path but only decayed
-	// by maybeAdaptK on the eviction path, so across a pause it accumulates with
-	// nothing balancing it: graduation_rate explodes on resume and rails adaptive
-	// k. When eviction resumes after a real gap (the read clock advanced past a
-	// full adapt window with no EvictBatch), reset the windowed graduation/eviction
-	// counters so the rate measures this episode from scratch. The learned k and
-	// rate thresholds persist — only the windowed measurement restarts.
-	now := c.clock.Load()
-	if last := c.lastEvictClock.Load(); last != 0 && now-last > hitRateWindowSize {
-		c.reachedProt.Store(0)
-		c.evictedUnprot.Store(0)
-		c.evictedProt.Store(0)
-		c.lastAdaptCheck.Store(0)
-	}
-	c.lastEvictClock.Store(now)
 
 	k := c.evictK.Load()
 	// Window: wide enough to choose the want oldest cold leaves with some
@@ -381,7 +372,9 @@ func (c *Critbit[T]) promoteIfGhost(leaf *critNode[T]) {
 		nf := min(-f+1, maxLeafFreq)
 		if leaf.freq.CompareAndSwap(f, nf) {
 			c.ghostCount.Add(-1)
-			c.windowOps.Add(1)
+			// A returning ghost is a window miss (op, not hit). Shard by the
+			// reactivated leaf's address, same as the live-hit path.
+			c.windowOps.add(unsafe.Pointer(leaf), 1)
 			return
 		}
 	}
@@ -424,8 +417,8 @@ func (c *Critbit[T]) maybeAdaptK() {
 
 	// Self-tune the rate thresholds from the hit-rate gradient once the
 	// window has enough samples.
-	if ops := c.windowOps.Load(); ops >= hitRateWindowSize {
-		hitRate := uint64(float64(c.windowHits.Load()) / float64(ops) * 10000)
+	if ops := c.windowOps.load(); ops >= hitRateWindowSize {
+		hitRate := uint64(float64(c.windowHits.load()) / float64(ops) * 10000)
 		prev := c.prevHitRate.Load()
 		dir := c.lastKDir.Load()
 		if prev > 0 && dir != 0 {
@@ -451,8 +444,8 @@ func (c *Critbit[T]) maybeAdaptK() {
 			}
 		}
 		c.prevHitRate.Store(hitRate)
-		c.windowHits.Store(0)
-		c.windowOps.Store(0)
+		c.windowHits.reset()
+		c.windowOps.reset()
 	}
 
 	rate := float64(graduated) / float64(total)

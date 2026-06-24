@@ -341,6 +341,11 @@ func (e *Engine) startMemoryGovernor(targetBytes int64) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		// Live over-target signal: the governor sets evictBudget > 0 each tick it
+		// measures live heap above target, and writers drain it back to 0. This is
+		// the keytrie analogue of CloxCache's instantaneous entryCount >= capacity,
+		// so a graduation is counted only while there is genuinely room to reclaim.
+		func() bool { return e.evictBudget.Load() > 0 },
 	)
 	if cur := debug.SetMemoryLimit(-1); cur == math.MaxInt64 {
 		// Reserve 5% of the target for non-heap memory (stacks, mmap, etc.).

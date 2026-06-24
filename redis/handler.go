@@ -250,6 +250,9 @@ func (h *Handler) GetAdaptiveStats() []cache.AdaptiveStats {
 		LearnedRateHigh:    s.RateHigh,
 		WindowHitRate:      s.WindowHitRate,
 		GhostCount:         s.GhostCount,
+		ReapBackoff:        s.ReapBackoff,
+		ReapBacklog:        s.ReapBacklog,
+		ReapOverflows:      s.ReapOverflows,
 	}}
 }
 
