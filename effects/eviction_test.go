@@ -78,19 +78,19 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 
 	const keys = 64
 	names := make([]string, keys)
-	for k := 0; k < keys; k++ {
+	for k := range keys {
 		key := fmt.Sprintf("user:c%d", k)
 		names[k] = key
 		off := log.putEffect(&pb.Effect{
 			Key: []byte(key), Hlc: sTs(int64(k + 1)), NodeId: 1,
-			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d", k)))},
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d", k))},
 		})
 		e.index.Insert(key, nil, keytrie.NewTipSet(off))
 	}
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
@@ -104,9 +104,7 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 			}
 		}(g)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -115,7 +113,7 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 			}
 			e.reclaimUnreferenced()
 		}
-	}()
+	})
 
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
@@ -154,7 +152,7 @@ func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
 	)
 
 	const n = 200
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := fmt.Sprintf("user:s%d", i)
 		if err := e.ensureSubscribed(key); err != nil {
 			t.Fatalf("ensureSubscribed(%s): %v", key, err)
@@ -212,14 +210,14 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 
 	const keys = 100
 	const rewrites = 10
-	for k := 0; k < keys; k++ {
+	for k := range keys {
 		key := fmt.Sprintf("user:k%d", k)
 		var curTip Tip
 		hasCur := false
-		for w := 0; w < rewrites; w++ {
+		for w := range rewrites {
 			eff := &pb.Effect{
 				Key: []byte(key), Hlc: sTs(int64(k*1000 + w + 1)), NodeId: 1,
-				Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d-%d", k, w)))},
+				Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d-%d", k, w))},
 			}
 			if hasCur {
 				eff.Deps = []*pb.EffectRef{toPbRef(curTip)}
@@ -272,11 +270,11 @@ func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	)
 
 	const n = 300
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := fmt.Sprintf("user:k%d", i)
 		off := log.putEffect(&pb.Effect{
 			Key: []byte(key), Hlc: sTs(int64(10 + i)), NodeId: 1,
-			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("value-%d", i)))},
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "value-%d", i))},
 		})
 		e.index.Insert(key, nil, keytrie.NewTipSet(off))
 		// Read it so the subdag and reduced memo are built and pin their vertices.

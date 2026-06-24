@@ -20,7 +20,7 @@
 package cluster
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -75,7 +75,7 @@ func (w *clockWindow) min() int64 {
 func (w *clockWindow) quantile(q float64) int64 {
 	sorted := make([]int64, w.count)
 	copy(sorted, w.samples[:w.count])
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	slices.Sort(sorted)
 	idx := int(q * float64(w.count-1))
 	return sorted[idx]
 }
@@ -228,10 +228,7 @@ func (s *peerClockStats) livenessTimeout(cfg ClockConfig) (time.Duration, bool) 
 		return 0, false
 	}
 	median := s.interArrival.quantile(0.5)
-	margin := s.interArrival.quantile(0.99) - median
-	if margin < 0 {
-		margin = 0
-	}
+	margin := max(s.interArrival.quantile(0.99)-median, 0)
 	timeout := time.Duration(int64(cfg.MissedIntervals)*median + margin)
 	return clampDuration(timeout, cfg.MinTimeout, cfg.MaxTimeout), true
 }

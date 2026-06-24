@@ -221,7 +221,7 @@ func TestAdaptiveLivenessTimeout(t *testing.T) {
 	// 3×100ms + 0 margin = 300ms < 400ms elapsed → dead. The warm-up
 	// fallback (3s) would have kept it alive.
 	base := time.Now().Add(-400 * time.Millisecond)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		at := base.Add(-time.Duration(9-i) * 100 * time.Millisecond)
 		ph.clock.observeTick(&ClockTick{NodeID: 1, Seq: uint64(i + 1), WallClock: at.UnixNano()}, at)
 	}
@@ -237,7 +237,7 @@ func TestAdaptiveLivenessTimeout(t *testing.T) {
 	// adaptive value clamps up to 1s and 400ms of silence is tolerated.
 	healthClamped := NewPeerHealthTable(ClockConfig{})
 	phC := healthClamped.GetOrCreate(1)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		at := base.Add(-time.Duration(9-i) * 100 * time.Millisecond)
 		phC.clock.observeTick(&ClockTick{NodeID: 1, Seq: uint64(i + 1), WallClock: at.UnixNano()}, at)
 	}
