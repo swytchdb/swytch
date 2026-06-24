@@ -214,7 +214,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.pr_sha }}
           fetch-depth: 0
@@ -274,7 +274,7 @@ jobs:
       JEPSEN_TIME_LIMIT: ${{ needs.prepare.outputs.time_limit }}
       JEPSEN_JOIN_DNS: jepsen.swytch.local
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.pr_sha }}
           sparse-checkout: |
