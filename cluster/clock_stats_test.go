@@ -76,7 +76,7 @@ func TestSkewAndRTTDerivation(t *testing.T) {
 	s := newPeerClockStats(64)
 	base := time.Now().Add(-time.Duration(samples) * 50 * time.Millisecond)
 
-	for i := 0; i < samples; i++ {
+	for i := range samples {
 		arrival := base.Add(time.Duration(i) * 50 * time.Millisecond)
 		// Queueing jitter on every sample except one per direction, so the
 		// min-filter must dig the floor out of noisy measurements.
@@ -129,7 +129,7 @@ func TestLivenessTimeoutFormula(t *testing.T) {
 
 	// N arrivals yield N−1 gaps: below minAdaptiveSamples, not adaptive yet.
 	now := time.Now()
-	for i := 0; i < minAdaptiveSamples; i++ {
+	for i := range minAdaptiveSamples {
 		at := now.Add(time.Duration(i) * 100 * time.Millisecond)
 		s.observeTick(&ClockTick{NodeID: 2, Seq: uint64(i + 1), WallClock: at.UnixNano()}, at)
 	}
@@ -166,7 +166,7 @@ func TestAdjustInterval(t *testing.T) {
 	hm.AddPeer(2, "local")
 
 	// No primed stats: no adjustment even at the window boundary.
-	for i := 0; i < intervalAdjustEvery; i++ {
+	for range intervalAdjustEvery {
 		if _, changed := hm.adjustInterval(); changed {
 			t.Fatal("interval must not change without primed peer stats")
 		}
@@ -193,7 +193,7 @@ func TestAdjustInterval(t *testing.T) {
 	for stepIdx, want := range expected {
 		var next time.Duration
 		var changed bool
-		for i := 0; i < intervalAdjustEvery; i++ {
+		for range intervalAdjustEvery {
 			next, changed = hm.adjustInterval()
 		}
 		if want == 0 {
