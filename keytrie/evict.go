@@ -75,6 +75,11 @@ const (
 // currently over its eviction target — the instantaneous condition that gates
 // graduation counting in bumpAccess (see underPressure). All three run without
 // any trie lock the consumer could re-enter; keep them prompt.
+//
+// decider must be installed before any Insert: the sweep reads each leaf's pin
+// verdict (critNode.pinned) cached at creation, so a leaf written before the
+// decider exists would carry the default (unpinned) verdict. The memory governor
+// installs the hooks at engine construction, before any write, so this holds.
 func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T), pressure func() bool) {
 	c.evictDecider = decider
 	c.evictNotify = notify
@@ -144,7 +149,10 @@ func (c *Critbit[T]) EvictStats() EvictStats {
 	}
 	var hitRate float64
 	if ops := c.windowOps.load(); ops > 0 {
-		hitRate = float64(c.windowHits.load()) / float64(ops)
+		// windowHits/windowOps are bumped as two separate atomics, so a reader can
+		// momentarily observe more hits than ops; clamp so the rate never exceeds 1.
+		hits := min(c.windowHits.load(), ops)
+		hitRate = float64(hits) / float64(ops)
 	}
 	return EvictStats{
 		K:                  c.evictK.Load(),
@@ -224,8 +232,8 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			}
 			return
 		}
-		if c.evictDecider != nil && !c.evictDecider(leaf.key) {
-			return // pinned (e.g. a system key)
+		if leaf.pinned {
+			return // pinned (e.g. a system key) — verdict cached at write time
 		}
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access
@@ -418,7 +426,10 @@ func (c *Critbit[T]) maybeAdaptK() {
 	// Self-tune the rate thresholds from the hit-rate gradient once the
 	// window has enough samples.
 	if ops := c.windowOps.load(); ops >= hitRateWindowSize {
-		hitRate := uint64(float64(c.windowHits.load()) / float64(ops) * 10000)
+		// Clamp: the two counters are bumped independently, so hits can briefly
+		// read above ops — never let the gradient see a rate over 1.
+		hits := min(c.windowHits.load(), ops)
+		hitRate := uint64(float64(hits) / float64(ops) * 10000)
 		prev := c.prevHitRate.Load()
 		dir := c.lastKDir.Load()
 		if prev > 0 && dir != 0 {
@@ -444,8 +455,13 @@ func (c *Critbit[T]) maybeAdaptK() {
 			}
 		}
 		c.prevHitRate.Store(hitRate)
-		c.windowHits.reset()
+		// bumpAccess bumps hits before ops. Resetting in the same order (ops first,
+		// hits last) means a concurrent access straddling the reset has its hits
+		// increment wiped while its ops increment survives, so the residual is
+		// always ops >= hits — never a persisted windowHits > windowOps skew
+		// bleeding into the next window.
 		c.windowOps.reset()
+		c.windowHits.reset()
 	}
 
 	rate := float64(graduated) / float64(total)

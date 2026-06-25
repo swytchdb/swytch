@@ -32,6 +32,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // r is a test helper: r(v) creates an EffectRef with nodeID=0 and offset=v.
@@ -2138,5 +2139,60 @@ func TestReap_ConcurrentInsertAndReap(t *testing.T) {
 	})
 	if count != c.Size() {
 		t.Errorf("Range count %d != Size %d", count, c.Size())
+	}
+}
+
+// TestCritNodeCacheLineLayout pins the hot/cold cache-line split of critNode
+// (see its doc): read-hot fields on line 0, the per-access writer (lastAccess)
+// isolated on line 1, and the node sized to two whole lines so arena-adjacent
+// leaves never share one. A future field reorder that breaks this fails here.
+func TestCritNodeCacheLineLayout(t *testing.T) {
+	const wantSize = 2 * cacheLineSize
+	if got := unsafe.Sizeof(critNode[struct{}]{}); got != wantSize {
+		t.Fatalf("sizeof(critNode) = %d, want %d (two cache lines)", got, wantSize)
+	}
+
+	var n critNode[struct{}]
+	readHot := map[string]uintptr{
+		"child":     unsafe.Offsetof(n.child),
+		"key":       unsafe.Offsetof(n.key),
+		"tips":      unsafe.Offsetof(n.tips),
+		"data":      unsafe.Offsetof(n.data),
+		"bytePos":   unsafe.Offsetof(n.bytePos),
+		"deleted":   unsafe.Offsetof(n.deleted),
+		"freq":      unsafe.Offsetof(n.freq),
+		"otherbits": unsafe.Offsetof(n.otherbits),
+		"isLeaf":    unsafe.Offsetof(n.isLeaf),
+	}
+	for name, off := range readHot {
+		if off >= cacheLineSize {
+			t.Errorf("read-hot field %s at offset %d, want < %d (line 0)", name, off, cacheLineSize)
+		}
+	}
+	if off := unsafe.Offsetof(n.lastAccess); off < cacheLineSize {
+		t.Errorf("lastAccess at offset %d, want >= %d (isolated on line 1)", off, cacheLineSize)
+	}
+}
+
+// TestCritbitArenaSlotAlignment verifies the assumption critNode's padding
+// relies on: a leaf-arena chunk is a large object, so the runtime returns it
+// page-aligned, putting every 128 B slot on a 64 B boundary (no straddle).
+func TestCritbitArenaSlotAlignment(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	defer func() { _ = c.Close() }()
+	for i := range 8 {
+		c.Insert(fmt.Sprintf("k%05d", i), nil, NewTipSet(r(uint64(i))))
+	}
+	chunks, _ := c.leafArena.chunkSnapshot()
+	if len(chunks) == 0 || chunks[0] == nil || len(chunks[0]) < 2 {
+		t.Fatalf("expected a populated leaf chunk, got %d chunks", len(chunks))
+	}
+	base := uintptr(unsafe.Pointer(&chunks[0][0]))
+	if base%cacheLineSize != 0 {
+		t.Errorf("leaf chunk base %#x is not %d-byte aligned", base, cacheLineSize)
+	}
+	stride := uintptr(unsafe.Pointer(&chunks[0][1])) - base
+	if stride != 2*cacheLineSize {
+		t.Errorf("leaf node stride = %d, want %d", stride, 2*cacheLineSize)
 	}
 }

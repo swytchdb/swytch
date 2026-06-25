@@ -36,7 +36,17 @@ import (
 )
 
 const (
+	// defaultCritbitArenaChunkSize is the per-arena allocation granularity. At
+	// 2048 nodes × 128 B (sizeof critNode) a chunk is 256 KB — comfortably a Go
+	// large object (≥ 32 KB), so the runtime returns it page-aligned. That page
+	// alignment is what makes each 128 B slot land on a 64 B boundary, so a node
+	// never straddles a cache line. Keep this large enough to stay a large object.
 	defaultCritbitArenaChunkSize = 2048
+
+	// cacheLineSize is the assumed cache-line width. critNode is laid out as two
+	// of these with a hot/cold split: read-hot fields on line 0, the per-access
+	// writer (lastAccess) isolated on line 1. See the critNode doc.
+	cacheLineSize = 64
 
 	// maxLeafFreq caps the per-leaf access-frequency counter. The eviction
 	// policy protects leaves whose freq exceeds the shard's adaptive
@@ -71,31 +81,52 @@ const (
 	reapBackoffMax  = 32
 )
 
-// critNode is a flattened node that serves as both internal and leaf.
-// Hot-path fields (child, bytePos, otherbits, isLeaf) are in the first 22 bytes.
-// Leaf fields start at offset 24.
+// critNode is a flattened node serving as both internal and leaf. Its fields
+// are laid out as two cache lines with a hot/cold split:
+//
+//   - Line 0 (read-hot): child/bytePos/otherbits/isLeaf for internal traversal,
+//     key/tips/data/deleted/freq for leaf reads. Every field a lookup touches
+//     lives here and is either immutable or written only at mutation rate, so
+//     the line stays Shared across reader cores.
+//   - Line 1 (write-hot): lastAccess is stored on every access by bumpAccess
+//     and read only by the cold eviction sweep. It is the one field written at
+//     read rate, so isolating it on its own line keeps that store traffic off
+//     line 0. chunkIdx (reap-only) fills the remainder.
+//
+// The 128-byte size also keeps arena-adjacent leaves on disjoint cache lines,
+// so one leaf's writes never false-share a neighbor's line.
 //
 // The type parameter T is the consumer-owned leaf payload. The trie itself
 // never inspects it — it only stores the pointer on each leaf so a consumer
 // (the effects engine) can attach a per-key cached subdag without leaking its
 // types into keytrie. Plain tip indexes use T = struct{} and never touch it.
 type critNode[T any] struct {
-	child     [2]atomic.Pointer[critNode[T]] // 16 bytes, offset 0  (internal)
-	bytePos   uint32                         // 4 bytes,  offset 16 (internal)
-	otherbits uint8                          // 1 byte,   offset 20 (internal)
-	isLeaf    bool                           // 1 byte,   offset 21
-	_         [2]byte                        //           offset 22
-	key       string                         // 16 bytes, offset 24 (leaf)
-	tips      atomic.Pointer[TipSet]         // 8 bytes,  offset 40 (leaf)
-	deleted   atomic.Bool                    // 4 bytes,  offset 44 (leaf)
-	// Eviction metadata (leaf). A leaf spans a second cache line now;
-	// these are written on the hot read path (freq bump) so they sit
-	// apart from the structural fields above. freq < 0 marks a ghost:
-	// a soft-deleted leaf retaining |freq| so a returning key warms back.
-	freq       atomic.Int32      // 4 bytes,  offset 48
-	chunkIdx   uint32            // 4 bytes,  offset 52 (arena chunk, for reclamation)
-	lastAccess atomic.Uint64     // 8 bytes,  offset 56 (LRU tiebreak)
-	data       atomic.Pointer[T] // 8 bytes,  offset 64 (leaf payload)
+	// Line 0 — read-hot.
+	child   [2]atomic.Pointer[critNode[T]]
+	key     string
+	tips    atomic.Pointer[TipSet]
+	data    atomic.Pointer[T]
+	bytePos uint32
+	deleted atomic.Bool
+	// freq < 0 marks a ghost: a soft-deleted leaf retaining |freq| so a
+	// returning key warms back.
+	freq      atomic.Int32
+	otherbits uint8
+	isLeaf    bool
+	// pinned caches the eviction decider's verdict (the system-key pin) computed
+	// once when the leaf is created (allocLeafNode), so the sweep reads a bit
+	// instead of calling the decider — a func-pointer indirect plus a per-key
+	// bytes.HasPrefix — on every leaf it visits. The verdict is a pure function of
+	// the immutable key; key updates reuse the leaf, so it never needs recomputing.
+	// Written once before publish, so no atomic is needed (same discipline as key).
+	pinned bool
+	_      [1]byte // pad line 0 to the cache-line boundary
+
+	// Line 1 — write-hot, isolated so lastAccess's per-access stores never
+	// invalidate line 0.
+	lastAccess atomic.Uint64
+	chunkIdx   uint32                   // arena chunk, for reclamation (reap-only)
+	_          [cacheLineSize - 12]byte // pad line 1 (lastAccess+chunkIdx = 12 B) to a full line
 }
 
 func noop() {}
@@ -196,12 +227,20 @@ func NewCritbit[T any]() *Critbit[T] {
 	return c
 }
 
+// freeSlotCapacity bounds the per-arena recycled-slot free list. Recycling that
+// would overflow it falls back to dropping the dead chunk to nil (the old
+// behavior), so this only caps how much eviction churn the allocator can buffer,
+// never correctness. 64Ki slots ≈ 32 chunks.
+const freeSlotCapacity = 1 << 16
+
 // arenaChunkList holds an immutable snapshot of the chunk slice plus, per chunk,
 // a count of how many of its nodes have been unlinked (reaped). Swapped
-// atomically so readers never see a partially-grown slice. A dropped chunk is
-// left as a nil entry (indices stay stable; the monotonic next never revisits
-// it), so GC reclaims it once no stale reader still points into it. reaped
-// entries are *atomic.Int64 so the copy-on-write swap shares the live counters.
+// atomically so readers never see a partially-grown slice. A fully-reaped chunk
+// is either recycled — replaced with a fresh empty chunk whose slots return to
+// the free list — or, if the free list is saturated, dropped to a nil entry
+// (indices stay stable; GC reclaims the old array once no stale reader still
+// points into it). reaped entries are *atomic.Int64 so the copy-on-write swap
+// shares the live counters.
 type arenaChunkList[T any] struct {
 	chunks [][]T
 	reaped []*atomic.Int64
@@ -212,6 +251,20 @@ type critbitArena[T any] struct {
 	chunkSize uint64
 	growMu    sync.Mutex // only held when allocating a new chunk (every chunkSize allocs)
 	list      atomic.Pointer[arenaChunkList[T]]
+	// freeList recycles the slots of fully-reaped chunks so the arena's footprint
+	// tracks the live working set instead of the all-time high-water mark — without
+	// it, monotonic next climbs forever under key churn (billions of keys over
+	// weeks) and the eviction sweep walks an ever-larger arena of dead slots. It
+	// holds reusable slot indices; alloc drains it before bumping next. freeCount
+	// mirrors its occupancy (it has no Size) so dropChunk can pre-check room for a
+	// whole chunk before committing a recycle. MPMC: many allocators dequeue, the
+	// serialized dropChunk enqueues. Reuse is safe because recycling installs a
+	// brand-new chunk array — its slots have never been published, so no lock-free
+	// reader can hold a pointer into them, while the dead array goes to GC exactly
+	// as the nil path does.
+	freeList  *xsync.MPMCQueue[uint64]
+	freeCount atomic.Int64
+	freeCap   uint64
 	// initNode, if set, runs on every node of a freshly-grown chunk before that
 	// chunk is published in list. The leaf arena uses it to stamp deleted=true on
 	// every slot, so the eviction sweep (which scans the arena directly) skips a
@@ -225,6 +278,8 @@ func (a *critbitArena[T]) init(chunkSize int, initNode func(*T)) {
 	}
 	a.chunkSize = uint64(chunkSize)
 	a.initNode = initNode
+	a.freeCap = freeSlotCapacity
+	a.freeList = xsync.NewMPMCQueue[uint64](freeSlotCapacity)
 	a.list.Store(&arenaChunkList[T]{})
 }
 
@@ -236,7 +291,18 @@ func (a *critbitArena[T]) chunkSnapshot() ([][]T, uint64) {
 }
 
 func (a *critbitArena[T]) alloc() (*T, uint32) {
-	// Fast path: atomically claim a slot index. No lock needed.
+	// Reuse a recycled slot first, so the arena's footprint tracks live keys
+	// rather than the all-time high-water mark. A recycled index points into a
+	// fresh chunk dropChunk installed (and published in list before enqueuing the
+	// index), so the load below sees it.
+	if idx, ok := a.freeList.TryDequeue(); ok {
+		a.freeCount.Add(-1)
+		chunkIdx := idx / a.chunkSize
+		list := a.list.Load()
+		return &list.chunks[chunkIdx][idx%a.chunkSize], uint32(chunkIdx)
+	}
+
+	// Fast path: atomically claim a fresh slot index. No lock needed.
 	idx := a.next.Add(1) - 1
 	chunkIdx := idx / a.chunkSize
 	offset := idx % a.chunkSize
@@ -266,11 +332,19 @@ func (a *critbitArena[T]) recordReaped(chunkIdx uint32) {
 	}
 }
 
-// dropChunk removes a fully-unlinked chunk from the arena (a nil placeholder
-// keeps later indices stable). No node in it is reachable, so dropping the
-// arena's reference lets GC reclaim it once any stale lock-free reader releases
-// its own node pointer. next never revisits the chunk (it is monotonic and the
-// chunk was fully allocated before it could be fully reaped).
+// dropChunk handles a fully-unlinked chunk. The dead array is always released to
+// GC (it is no longer referenced by list once we swap), so a stale lock-free
+// reader still pointing into it stays valid until it drops its own pointer.
+//
+// When the free list has room for a whole chunk, it RECYCLES: a fresh empty chunk
+// takes the slot's place and its pristine slots return to the free list for
+// reuse, so the arena stops growing under churn. The fresh array's slots have
+// never been published, so no reader can be mid-read on them — reuse is safe. The
+// reaped counter is reset for the new generation. Otherwise it falls back to the
+// old behavior: a nil placeholder (indices stay stable; monotonic next never
+// revisits a nil'd chunk). Runs under reapMu (its sole caller, recordReaped) so
+// it is the only enqueuer; concurrent allocs only dequeue, so the room pre-check
+// is conservative and every TryEnqueue below succeeds.
 func (a *critbitArena[T]) dropChunk(chunkIdx uint32) {
 	a.growMu.Lock()
 	defer a.growMu.Unlock()
@@ -280,6 +354,27 @@ func (a *critbitArena[T]) dropChunk(chunkIdx uint32) {
 	}
 	newChunks := make([][]T, len(list.chunks))
 	copy(newChunks, list.chunks)
+
+	if a.freeCount.Load()+int64(a.chunkSize) <= int64(a.freeCap) {
+		fresh := make([]T, a.chunkSize)
+		if a.initNode != nil {
+			for i := range fresh {
+				a.initNode(&fresh[i])
+			}
+		}
+		newChunks[chunkIdx] = fresh
+		list.reaped[chunkIdx].Store(0) // fresh generation: nothing reaped yet
+		// Publish the fresh chunk before its slots become reachable via the free
+		// list, so a concurrent alloc that dequeues an index sees the new array.
+		a.list.Store(&arenaChunkList[T]{chunks: newChunks, reaped: list.reaped})
+		base := uint64(chunkIdx) * a.chunkSize
+		for i := uint64(0); i < a.chunkSize; i++ {
+			a.freeList.TryEnqueue(base + i) // room pre-checked: cannot fail
+		}
+		a.freeCount.Add(int64(a.chunkSize))
+		return
+	}
+
 	newChunks[chunkIdx] = nil
 	a.list.Store(&arenaChunkList[T]{chunks: newChunks, reaped: list.reaped})
 }
@@ -311,6 +406,17 @@ func (a *critbitArena[T]) clear() {
 	a.growMu.Lock()
 	a.list.Store(&arenaChunkList[T]{})
 	a.next.Store(0)
+	// Drain stale recycled indices: they point into chunks the reset just dropped,
+	// so a later alloc must not hand them out. clear assumes no concurrent alloc
+	// (same as the list/next reset above).
+	if a.freeList != nil {
+		for {
+			if _, ok := a.freeList.TryDequeue(); !ok {
+				break
+			}
+		}
+		a.freeCount.Store(0)
+	}
 	a.growMu.Unlock()
 }
 
@@ -353,6 +459,11 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n.tips.Store(ts)
 	n.freq.Store(1) // start warm enough to survive one sweep
 	n.lastAccess.Store(monotonic())
+	// Resolve the pin verdict once, here at creation, so the eviction sweep never
+	// calls the decider. evictDecider is installed (SetEvictHooks) before any write
+	// when eviction is enabled; when it is nil, no sweep ever runs, so the default
+	// false is inert. A decider returning false means "do not evict" → pinned.
+	n.pinned = c.evictDecider != nil && !c.evictDecider(key)
 	return n
 }
 
@@ -1275,8 +1386,8 @@ func (c *Critbit[T]) maybeReap() {
 		return
 	}
 	go func() {
-		defer c.reapRunning.Store(false)
-		// Fast path: unlink the leaves we already know are dead, in small batches.
+		// One reaper cycle: unlink the known-dead leaves, then run the overflow
+		// backstop and AIMD adapt exactly once, while we still hold the flag.
 		for c.drainReap() > 0 {
 		}
 		// Backstop: if any pushes were dropped on a full queue, a full BFS pass
@@ -1287,6 +1398,25 @@ func (c *Critbit[T]) maybeReap() {
 			}
 		}
 		c.adaptReapBackoff(overflowed)
+
+		// Handoff: clear the flag, then keep draining the queue for any leaf
+		// enqueued in the gap between our last drain and this clear — its own
+		// maybeReap lost the reapRunning CAS (we were still marked running), so
+		// without the re-check the leaf lingers linked with no worker to unlink it.
+		// Only the queue is re-checked: the race is a queued leaf, and the
+		// expensive BFS backstop is deliberately kept out of this loop — a fresh
+		// overflow drop persists in reapDropped and is handled by the next cycle.
+		for {
+			c.reapRunning.Store(false)
+			if c.closed.Load() || c.drainReap() == 0 {
+				return
+			}
+			if !c.reapRunning.CompareAndSwap(false, true) {
+				return // a fresh reaper took over
+			}
+			for c.drainReap() > 0 {
+			}
+		}
 	}()
 }
 
@@ -1331,16 +1461,19 @@ func (c *Critbit[T]) drainReap() int {
 	if n == 0 {
 		return 0
 	}
-	t := time.Now()
 	c.reapMu.Lock()
+	t := time.Now()
 	for i := range n {
 		c.unlinkLeaf(batch[i])
 	}
+	held := time.Since(t)
 	c.reapMu.Unlock()
 	// Pace only after a full batch: a short batch means the queue is drained, so
-	// there is no next hold to back off from.
+	// there is no next hold to back off from. Time only the locked critical
+	// section (start the clock after acquiring the lock) so the pacing tracks the
+	// reaper's actual lock-hold, not the contended wait to acquire it.
 	if n == reapBatchSize {
-		c.paceReap(time.Since(t))
+		c.paceReap(held)
 	}
 	return n
 }
@@ -1462,16 +1595,19 @@ func (c *Critbit[T]) reap() int {
 	reaped := 0
 	for start := 0; start < len(dead); start += reapBatchSize {
 		end := min(start+reapBatchSize, len(dead))
-		t := time.Now()
 		c.reapMu.Lock()
+		t := time.Now()
 		for _, leaf := range dead[start:end] {
 			if c.unlinkLeaf(leaf) {
 				reaped++
 			}
 		}
+		held := time.Since(t)
 		c.reapMu.Unlock()
 		if end < len(dead) { // back off between batches, but not after the last
-			c.paceReap(time.Since(t))
+			// Time only the locked critical section so pacing tracks the hold, not
+			// the wait to acquire the lock.
+			c.paceReap(held)
 		}
 	}
 	return reaped

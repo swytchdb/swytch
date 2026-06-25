@@ -22,6 +22,7 @@ package keytrie
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -198,11 +199,14 @@ func TestReap_QueueDrainUnlinks(t *testing.T) {
 	}
 }
 
-// TestChunkReclaim_DropsFullyDeadChunk verifies that once every leaf in an arena
-// chunk has been deleted and reaped, the chunk is dropped from the arena (a nil
-// placeholder), while leaves in other chunks survive. Single-threaded, so leaf
-// allocation is sequential: the first chunkSize distinct keys land in leaf chunk 0.
-func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
+// TestChunkReclaim_RecyclesFullyDeadChunk verifies that once every leaf in an
+// arena chunk has been deleted and reaped, the chunk is recycled: its dead array
+// is replaced by a fresh empty one and its slots return to the free list, so the
+// arena's footprint tracks live keys instead of the all-time high-water mark.
+// Leaves in other chunks survive, and the next allocations reuse the recycled
+// slots rather than bumping next. Single-threaded, so leaf allocation is
+// sequential: the first chunkSize distinct keys land in leaf chunk 0.
+func TestChunkReclaim_RecyclesFullyDeadChunk(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	const extra = 500
 	n := defaultCritbitArenaChunkSize + extra
@@ -215,9 +219,11 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 		c.Insert(keys[i], nil, tips[i])
 	}
 
-	if got := len(c.leafArena.list.Load().chunks); got < 2 {
-		t.Fatalf("expected at least 2 leaf chunks after %d inserts, got %d", n, got)
+	chunksBefore := len(c.leafArena.list.Load().chunks)
+	if chunksBefore < 2 {
+		t.Fatalf("expected at least 2 leaf chunks after %d inserts, got %d", n, chunksBefore)
 	}
+	nextBefore := c.leafArena.next.Load()
 
 	// Delete every key whose leaf lives in chunk 0, then reap to completion.
 	for i := range defaultCritbitArenaChunkSize {
@@ -226,19 +232,144 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 	for c.reap() > 0 {
 	}
 
-	if chunks := c.leafArena.list.Load().chunks; chunks[0] != nil {
-		t.Fatalf("leaf chunk 0 should be reclaimed (nil) after all its leaves died; still present")
+	// Chunk 0 is recycled (a fresh, non-nil empty chunk), not nil'd, and its slots
+	// are back on the free list.
+	if chunks := c.leafArena.list.Load().chunks; chunks[0] == nil {
+		t.Fatal("leaf chunk 0 should be recycled to a fresh chunk, not nil")
+	}
+	if fc := c.leafArena.freeCount.Load(); fc < int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("expected >= %d recycled slots on the free list, got %d", defaultCritbitArenaChunkSize, fc)
 	}
 
-	// Survivors (chunk 1+) must remain readable, and the sweep must tolerate the
-	// reclaimed chunk.
+	// Survivors (chunk 1+) must remain readable.
 	for i := defaultCritbitArenaChunkSize; i < n; i++ {
 		if c.Contains(keys[i]) == nil {
-			t.Fatalf("surviving key %s missing after chunk reclaim", keys[i])
+			t.Fatalf("surviving key %s missing after chunk recycle", keys[i])
 		}
 	}
+
+	// Reuse: inserting chunkSize fresh keys must drain the free list instead of
+	// growing the arena — next and the chunk count stay put.
+	for i := range defaultCritbitArenaChunkSize {
+		k := fmt.Sprintf("reuse-%08d", i)
+		c.Insert(k, nil, NewTipSet(tip(uint64(n+i+1))))
+	}
+	if got := c.leafArena.next.Load(); got != nextBefore {
+		t.Fatalf("arena grew via next (%d -> %d) instead of reusing recycled slots", nextBefore, got)
+	}
+	if got := len(c.leafArena.list.Load().chunks); got != chunksBefore {
+		t.Fatalf("chunk count grew (%d -> %d) instead of reusing recycled slots", chunksBefore, got)
+	}
+
+	// Sweep must tolerate the recycled chunk.
 	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
-	c.EvictBounded(64) // must not panic on the nil chunk
+	c.EvictBounded(64) // must not panic
+}
+
+// TestChunkReclaim_ArenaBoundedUnderChurn compresses the weeks-of-churn scenario:
+// it inserts and fully evicts a working set many times over — far exceeding the
+// arena's lifetime allocation count — and asserts the arena high-water mark
+// (next) stays bounded near one working set. Without recycling, next would grow
+// with the cumulative insert count (the unbounded-arena bug that makes the
+// eviction sweep walk an ever-larger field of dead slots).
+func TestChunkReclaim_ArenaBoundedUnderChurn(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	const working = defaultCritbitArenaChunkSize + 256 // spans into a 2nd chunk
+	const rounds = 24
+
+	for round := range rounds {
+		keys := make([]string, working)
+		tips := make([]*TipSet, working)
+		for i := range working {
+			keys[i] = fmt.Sprintf("r%03d-k%08d", round, i)
+			tips[i] = NewTipSet(tip(uint64(round*working + i + 1)))
+			c.Insert(keys[i], nil, tips[i])
+		}
+		for i := range working {
+			c.Delete(keys[i], tips[i])
+		}
+		for c.reap() > 0 {
+		}
+	}
+
+	// Cumulative inserts ≈ rounds*working, but recycling reuses dead slots, so the
+	// high-water mark stays near one working set (plus partial-chunk slack), not
+	// the cumulative count.
+	const bound = 3 * working
+	if got := c.leafArena.next.Load(); got > uint64(bound) {
+		t.Fatalf("leaf arena next=%d after churning %d keys; recycling should bound the high-water mark near %d (<= %d)",
+			got, rounds*working, working, bound)
+	}
+}
+
+// TestChunkReclaim_ConcurrentChurnReuse races the recycle path (dropChunk
+// installing a fresh chunk and enqueuing its slots) against concurrent allocators
+// (alloc dequeuing recycled slots), readers, and the reaper. Each writer slides a
+// small live window across many unique keys, so chunks fully die and recycle
+// while inserts are still flowing. Run under -race to surface any torn read of a
+// recycled slot or a stale free-list index; the post-run Range==Size check
+// asserts the tree stays structurally consistent.
+func TestChunkReclaim_ConcurrentChurnReuse(t *testing.T) {
+	c := NewCritbit[struct{}]()
+
+	const writers = 8
+	const perWriter = 6000 // 8*6000 = 48k churned keys, well past arena capacity
+	const window = 64       // each writer keeps ~window keys live at once
+
+	var writersWg sync.WaitGroup
+	for w := range writers {
+		writersWg.Go(func() {
+			live := make(map[int]*TipSet, window+1)
+			for i := range perWriter {
+				key := fmt.Sprintf("w%02d-k%08d", w, i)
+				ts := NewTipSet(tip(uint64(w)*1_000_000 + uint64(i) + 1))
+				c.Insert(key, nil, ts)
+				live[i] = ts
+				if old := i - window; old >= 0 {
+					c.Delete(fmt.Sprintf("w%02d-k%08d", w, old), live[old])
+					delete(live, old)
+				}
+			}
+		})
+	}
+
+	stop := make(chan struct{})
+	var helpersWg sync.WaitGroup
+	helpersWg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c.reap()
+			}
+		}
+	})
+	helpersWg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				for i := range 200 {
+					c.Contains(fmt.Sprintf("w%02d-k%08d", i%writers, i))
+				}
+			}
+		}
+	})
+
+	writersWg.Wait()
+	close(stop)
+	helpersWg.Wait()
+	for c.reapRunning.Load() {
+		runtime.Gosched()
+	}
+
+	count := int64(0)
+	c.Range(func(string) bool { count++; return true })
+	if count != c.Size() {
+		t.Errorf("Range count %d != Size %d after concurrent churn — recycling corrupted the tree", count, c.Size())
+	}
 }
 
 // TestEvictBounded_GhostNotReaped verifies the reaper leaves ghost leaves in
@@ -296,5 +427,41 @@ func TestReapBackoff_AIMD(t *testing.T) {
 	}
 	if got := c.reapBackoff.Load(); got != reapBackoffMin {
 		t.Fatalf("after many overflows = %d; want min %d", got, reapBackoffMin)
+	}
+}
+
+// TestGraduationGatedByPressure exercises the underPressure gate in bumpAccess:
+// a leaf crossing k into protected status counts toward ReachedProtected only
+// while the consumer is over its eviction target. The other eviction tests pin
+// underPressure to always-true, so this is the only coverage of the gated-off
+// branch — counting graduations while not under pressure would rail adaptive k.
+func TestGraduationGatedByPressure(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	pressure := false
+	c.SetEvictHooks(
+		func(string) bool { return true },
+		func(string, []EffectRef, *struct{}) {},
+		func() bool { return pressure },
+	)
+
+	// Walk a fresh leaf's freq past k (=2) with no pressure: the crossing must
+	// not be counted.
+	c.Insert("cold", nil, NewTipSet(tip(1)))
+	for range 5 {
+		c.LoadOrStoreData("cold", &struct{}{})
+	}
+	if got := c.EvictStats().ReachedProtected; got != 0 {
+		t.Fatalf("ReachedProtected = %d with underPressure=false; want 0 (gated off)", got)
+	}
+
+	// Now under pressure, a different fresh leaf's crossing is counted (the gate
+	// fires once per leaf at f==k, so a new key is required).
+	pressure = true
+	c.Insert("warm", nil, NewTipSet(tip(2)))
+	for range 5 {
+		c.LoadOrStoreData("warm", &struct{}{})
+	}
+	if got := c.EvictStats().ReachedProtected; got == 0 {
+		t.Fatal("ReachedProtected = 0 with underPressure=true; want the crossing counted")
 	}
 }
