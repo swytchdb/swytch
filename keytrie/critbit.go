@@ -27,6 +27,7 @@
 package keytrie
 
 import (
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,6 +80,16 @@ const (
 	reapBackoffInit = 7
 	reapBackoffMin  = 1
 	reapBackoffMax  = 32
+
+	// reapTriggerPermilleBase/...Jitter bound the dead-leaf fraction (per mille of
+	// live+dead) at which a delete schedules a reap. A reap takes reapMu's write
+	// lock and stalls inserts; a fixed threshold would make every replica running
+	// identical state cross it — and stall — at the same instant, collapsing
+	// aggregate throughput. ensureInit picks a per-instance point in
+	// [Base, Base+Jitter) to desynchronize replicas while keeping dead leaves
+	// bounded under ~15%.
+	reapTriggerPermilleBase   = 100 // 10.0%
+	reapTriggerPermilleJitter = 50  // jitter up to +5.0%
 )
 
 // critNode is a flattened node serving as both internal and leaf. Its fields
@@ -161,6 +172,11 @@ type Critbit[T any] struct {
 	// reapOverflows counts reaper cycles where the queue overflowed (production
 	// outran the reaper, forcing the BFS backstop). Lifetime total, for telemetry.
 	reapOverflows atomic.Int64
+
+	// reapTriggerPermille is the per-instance jittered dead-leaf fraction (per
+	// mille) at which a delete schedules a reap. Set once in ensureInit; see
+	// reapTriggerPermilleBase and the trigger in DeleteAndSnapshot.
+	reapTriggerPermille int64
 
 	// Eviction policy (lifted from CloxCache as a single bounded domain;
 	// see evict.go). Sweeps run serialized under evictMu — a cold path —
@@ -432,6 +448,7 @@ func (c *Critbit[T]) ensureInit() {
 		c.internalArena.init(defaultCritbitArenaChunkSize, nil)
 		c.reapQueue = xsync.NewMPMCQueue[*critNode[T]](reapQueueCapacity)
 		c.reapBackoff.Store(reapBackoffInit)
+		c.reapTriggerPermille = reapTriggerPermilleBase + int64(rand.IntN(reapTriggerPermilleJitter))
 		c.evictK.Store(defaultProtectedFreqThreshold)
 		c.rateLow.Store(defaultRateLow)
 		c.rateHigh.Store(defaultRateHigh)
@@ -937,7 +954,7 @@ func (c *Critbit[T]) DeleteAndSnapshot(key string, old *TipSet) *TipSet {
 	deleted := c.deletedCount.Add(1)
 	c.enqueueReap(leaf)
 	live := c.size.Load()
-	if deleted > 0 && deleted > (live+deleted)/10 {
+	if deleted > 0 && deleted*1000 > c.reapTriggerPermille*(live+deleted) {
 		c.maybeReap()
 	}
 
