@@ -56,6 +56,13 @@ type RuntimeConfig struct {
 	// bootstrap. Must match across every node in the cluster.
 	ClusterPassphrase string
 
+	// CloudSecret is the Swytch Cloud connection secret (--cloud). When set it
+	// (a) derives the cluster passphrase, so cluster mode engages without a
+	// separate --cluster-passphrase, (b) opens the durability channel that
+	// uploads this node's effects, and (c) replaces DNS discovery with
+	// cloud-based membership bootstrap. Mutually exclusive with JoinAddr.
+	CloudSecret string
+
 	// JoinAddr is the DNS name the beacon resolves to find peers at
 	// startup. Empty is fine in solo mode; for a real cluster point
 	// it at a name that resolves to every peer's cluster-port IP.
@@ -81,6 +88,7 @@ type Runtime struct {
 	Engine      *effects.Engine
 	PeerManager *cluster.PeerManager
 	Beacon      *Beacon
+	Cloud       *cluster.CloudClient
 
 	cfg RuntimeConfig
 }
@@ -113,9 +121,20 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		Engine: engine,
 		cfg:    cfg,
 	}
+	// Never let the master connection secret outlive construction. It is used
+	// below to derive the cluster passphrase and the cloud client's scoped keys,
+	// then dropped — the retained config must not hold it.
+	rt.cfg.CloudSecret = ""
+
+	// In cloud mode the cluster passphrase is derived from the connection secret,
+	// so cluster mode engages without a separate --cluster-passphrase.
+	passphrase := cfg.ClusterPassphrase
+	if cfg.CloudSecret != "" {
+		passphrase = cluster.DeriveClusterPassphrase(cfg.CloudSecret)
+	}
 
 	// Single-node mode: done.
-	if cfg.ClusterPassphrase == "" {
+	if passphrase == "" {
 		log.Debug("no cluster passphrase, running single-node")
 		return rt, nil
 	}
@@ -150,7 +169,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 				Address: advertise,
 			},
 		},
-		TLSPassphrase: cfg.ClusterPassphrase,
+		TLSPassphrase: passphrase,
 	}
 
 	logReader := cluster.NewEngineLogReader(engine.EffectCache())
@@ -171,6 +190,23 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	}
 	rt.PeerManager = pm
 
+	// Cloud durability channel. Constructed before SetBroadcaster so the
+	// broadcast-path tee sees a stable pm.cloud; it derives its own scoped keys
+	// from the connection secret and does not retain it.
+	if cfg.CloudSecret != "" {
+		cloudClient, err := cluster.NewCloudClient(cfg.CloudSecret, logReader)
+		if err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to create cloud client: %w", err),
+				closeRuntimeOnError(rt),
+			)
+		}
+		pm.SetCloud(cloudClient)
+		pm.SetCDNFetcher(cloudClient)
+		cloudClient.Start(context.Background())
+		rt.Cloud = cloudClient
+	}
+
 	// Engine replicates outbound via the PeerManager.
 	engine.SetBroadcaster(pm)
 
@@ -186,13 +222,14 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 
 	engine.StartAntiEntropy(3 * time.Second)
 
-	// Beacon: DNS discovery + dynamic membership.
+	// Beacon: peer discovery (DNS via --join, or Cloud via --cloud) + membership.
 	b := New(Config{
 		JoinAddr:      cfg.JoinAddr,
 		ClusterPort:   cfg.ClusterPort,
 		AdvertiseAddr: advertise,
 		NodeID:        engine.NodeID(),
-		Passphrase:    cfg.ClusterPassphrase,
+		Passphrase:    passphrase,
+		Cloud:         rt.Cloud,
 	}, engine, pm)
 
 	// Membership is a normal key; the live connection table is just a reactive
@@ -241,6 +278,10 @@ func (r *Runtime) Stop() error {
 		r.Beacon.Stop()
 		r.Beacon = nil
 	}
+	if r.Cloud != nil {
+		r.Cloud.Stop()
+		r.Cloud = nil
+	}
 	if r.PeerManager != nil {
 		r.PeerManager.Stop()
 		r.PeerManager = nil
@@ -275,6 +316,9 @@ func closeRuntimeOnError(r *Runtime) error {
 	var errs []error
 	if r.Beacon != nil {
 		r.Beacon.Stop()
+	}
+	if r.Cloud != nil {
+		r.Cloud.Stop()
 	}
 	if r.PeerManager != nil {
 		r.PeerManager.Stop()

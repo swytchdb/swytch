@@ -490,6 +490,13 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	// responded (e.g. noise sessions not yet established after restart).
 	peerIDs := e.broadcaster.PeerIDs()
 	if len(peerIDs) == 0 {
+		// No peers to bootstrap from — but the subscription is a durable DAG
+		// element our subsequent writes dep-reference, so it must still reach the
+		// cloud durability channel. With no peers this Broadcast reaches nobody on
+		// the wire and only tees to cloud; without it, a lone first node's
+		// subscription never lands in cloud and a peer bootstrapping from cloud
+		// dead-ends walking a membership write back to it.
+		e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		succeeded = true
 		return nil
 	}

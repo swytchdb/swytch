@@ -34,11 +34,16 @@ import (
 
 // Config holds beacon configuration parsed from CLI flags.
 type Config struct {
-	JoinAddr      string    // DNS name to resolve for peer discovery (empty = solo)
+	JoinAddr      string    // DNS name to resolve for peer discovery (empty = solo/cloud)
 	ClusterPort   int       // QUIC listen port for cluster traffic
 	AdvertiseAddr string    // host:port this node advertises (empty = auto-detect)
 	NodeID        pb.NodeID // ephemeral node ID
 	Passphrase    string    // shared mTLS passphrase
+
+	// Cloud, when set, is the durability channel used to discover peers when
+	// there is no --join: the beacon reads the membership key's frontier from
+	// Cloud and reconstructs it instead of resolving DNS. nil = DNS/solo.
+	Cloud *cluster.CloudClient
 }
 
 // Beacon manages cluster discovery and dynamic membership via effects.
@@ -81,16 +86,22 @@ func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
 func (b *Beacon) Start(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 
-	// Phase 1: DNS discovery + temporary topology + peer reachability.
-	// Does not read authoritative membership — that would deadlock when
-	// every node waits for the others before registering itself.
-	if b.cfg.JoinAddr != "" {
+	// Phase 1: peer discovery + temporary topology + reachability. DNS via
+	// --join, or Cloud via --cloud (read the membership frontier and pull it
+	// down). Neither reads authoritative membership yet — that would deadlock
+	// when every node waits for the others before registering itself.
+	switch {
+	case b.cfg.JoinAddr != "":
 		if err := b.bootstrap(b.ctx); err != nil {
+			return err
+		}
+	case b.cfg.Cloud != nil:
+		if err := b.cloudBootstrap(b.ctx); err != nil {
 			return err
 		}
 	}
 
-	if b.cfg.JoinAddr != "" && b.expectedPeers > 0 {
+	if b.expectedPeers > 0 {
 		// Phase 1.5: Wait for at least one peer to become alive+symmetric
 		// via heartbeat exchange. With immediate heartbeats sent on
 		// connection (PeerManager wiring), this completes in <100ms.
@@ -219,7 +230,6 @@ func (b *Beacon) registerSelf() error {
 			}
 		}
 	}
-
 	if err := ctx.Emit(buildMemberInsert(uint64(b.cfg.NodeID), b.cfg.AdvertiseAddr)); err != nil {
 		return err
 	}

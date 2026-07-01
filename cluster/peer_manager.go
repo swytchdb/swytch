@@ -66,6 +66,12 @@ type PeerManager struct {
 	// CDN fetch for racing against peer fetch
 	cdnFetcher CDNFetcher
 
+	// cloud is the durability channel. When set, every effect this node
+	// broadcasts is teed to it for fire-and-forget upload. nil = no cloud sync.
+	// Set once before the engine starts broadcasting, so broadcast-path reads
+	// need no synchronization.
+	cloud *CloudClient
+
 	// Forward handler for adaptive serialization (§5)
 	forwardHandler ForwardHandler
 
@@ -374,6 +380,7 @@ func (pm *PeerManager) Broadcast(notify *pb.OffsetNotify) {
 // BroadcastWithData sends an OffsetNotify to all connected peers.
 // Routes through the replicator (UDP) when available.
 func (pm *PeerManager) BroadcastWithData(notify *pb.OffsetNotify, effectData []byte) {
+	pm.cloud.tee(notify)
 	if pm.replicator != nil {
 		pm.replicator.Replicate(notify, effectData)
 		return
@@ -386,6 +393,7 @@ func (pm *PeerManager) BroadcastWithData(notify *pb.OffsetNotify, effectData []b
 // Returns nil on success, or an error if replication failed (no peers, timeout, etc.).
 // If the replicator is not set up (no UDP transport), falls back to BroadcastWithData.
 func (pm *PeerManager) Replicate(notify *pb.OffsetNotify, wireData []byte) error {
+	pm.cloud.tee(notify)
 	remoteCtx := tracing.ExtractFromBytes(notify.GetTraceContext())
 	_, waitSpan := tracing.Tracer().Start(remoteCtx, "replication.wait_ack",
 		trace.WithAttributes(attribute.String("effect.key", string(notify.GetKey()))))
@@ -450,6 +458,13 @@ func (pm *PeerManager) SetCDNFetcher(f CDNFetcher) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.cdnFetcher = f
+}
+
+// SetCloud attaches the cloud durability channel. It must be called before the
+// engine begins broadcasting (before SetBroadcaster), so the broadcast-path
+// tee reads a stable field with no lock.
+func (pm *PeerManager) SetCloud(c *CloudClient) {
+	pm.cloud = c
 }
 
 // FetchFromAny tries to fetch effect bytes from any connected peer,
@@ -774,6 +789,7 @@ func (pm *PeerManager) HandleNackNotify(peerID NodeId, nack *pb.NackNotify) {
 // ReplicateTo sends a notification to a specific peer and waits for ACK or NACK.
 // Returns NackNotify slice on conflict, nil on ACK.
 func (pm *PeerManager) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, targetNodeID NodeId) ([]*pb.NackNotify, error) {
+	pm.cloud.tee(notify)
 	if pm.replicator != nil {
 		return pm.replicator.ReplicateTo(notify, wireData, targetNodeID)
 	}
@@ -784,6 +800,7 @@ func (pm *PeerManager) ReplicateTo(notify *pb.OffsetNotify, wireData []byte, tar
 // Replicator.ReplicateMarshalled). Used by the bind fan-out so the body is
 // marshalled once for all subscribers.
 func (pm *PeerManager) ReplicateMarshalled(notify *pb.OffsetNotify, notifyBody []byte, targetNodeID NodeId) ([]*pb.NackNotify, error) {
+	pm.cloud.tee(notify)
 	if pm.replicator != nil {
 		return pm.replicator.ReplicateMarshalled(notify, notifyBody, targetNodeID)
 	}

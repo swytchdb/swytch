@@ -56,6 +56,8 @@ func Run(args []string) error {
 	// reuse a single set of deployment envs.
 	clusterPassphrase := fs.String("cluster-passphrase", "",
 		"Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)")
+	cloudSecret := fs.String("cloud", "",
+		"Swytch Cloud connection secret; durability + cloud discovery (swytch gen-passphrase --cloud). Excludes --join/--cluster-passphrase")
 	joinAddr := fs.String("join", "",
 		"DNS name to resolve for cluster peer discovery")
 	clusterPort := fs.Int("cluster-port", 0,
@@ -73,7 +75,16 @@ func Run(args []string) error {
 		return err
 	}
 
-	if *clusterPassphrase == "" && *joinAddr != "" {
+	if *cloudSecret != "" {
+		if *clusterPassphrase != "" {
+			return fmt.Errorf("--cloud and --cluster-passphrase are mutually exclusive (--cloud derives the passphrase)")
+		}
+		if *joinAddr != "" {
+			return fmt.Errorf("--cloud and --join are mutually exclusive (--cloud discovers peers via Cloud)")
+		}
+	}
+	clusterEnabled := *clusterPassphrase != "" || *cloudSecret != ""
+	if !clusterEnabled && *joinAddr != "" {
 		return fmt.Errorf("--join requires --cluster-passphrase")
 	}
 
@@ -111,7 +122,7 @@ func Run(args []string) error {
 	// Derive cluster port from --listen when unset. Parses the port
 	// component only; a listen of ":5433" gives 5433 → cluster 6433.
 	cport := *clusterPort
-	if cport == 0 && *clusterPassphrase != "" {
+	if cport == 0 && clusterEnabled {
 		cport = deriveClusterPort(*listen)
 		if cport == 0 {
 			return fmt.Errorf(
@@ -124,6 +135,7 @@ func Run(args []string) error {
 		MemoryLimit:        maxMemoryBytes,
 		MemoryLimitPercent: maxMemoryPct,
 		ClusterPassphrase:  *clusterPassphrase,
+		CloudSecret:        *cloudSecret,
 		JoinAddr:           *joinAddr,
 		ClusterPort:        cport,
 		AdvertiseAddr:      *clusterAdvertise,
@@ -132,6 +144,8 @@ func Run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("start cluster runtime: %w", err)
 	}
+	// Connection secret consumed by NewRuntime; drop our copy.
+	*cloudSecret = ""
 
 	server, err := NewServer(ServerConfig{
 		Address:           *listen,

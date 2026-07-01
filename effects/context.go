@@ -1235,6 +1235,11 @@ func (c *Context) flushTx() error {
 			// chance to commit it.
 			slog.Debug("flushTx: no subscribers, committing immediately",
 				"bind_offset", bindOffset)
+			// Broadcast the bind so the cloud durability channel receives it. With
+			// no subscribers this reaches nobody on the wire and only tees to
+			// cloud; the data effects were already broadcast in Step 1, but the
+			// bind commit anchor would otherwise never land in cloud on a lone node.
+			c.engine.broadcaster.BroadcastWithData(bindNotify, bindNotify.EffectData)
 			commitPendingTxn(ptxn)
 		} else {
 			// Peers exist — bind stays invisible until we finish processing
