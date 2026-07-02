@@ -38,13 +38,13 @@ import (
 // Both only ever add — a stale entry is a safe false-positive (a needless
 // subscribe, never a wrong miss).
 type peerKeyFilter struct {
-	bulk     cuckooChain
+	bulk     CuckooChain
 	bulkVer  uint64
-	realtime cuckooChain
+	realtime CuckooChain
 }
 
 func (pf *peerKeyFilter) maybeContains(key string) bool {
-	return pf.bulk.maybeContains(key) || pf.realtime.maybeContains(key)
+	return pf.bulk.MaybeContains(key) || pf.realtime.MaybeContains(key)
 }
 
 // ownFilterAdd records that this node now holds data for key. Called from the
@@ -55,7 +55,7 @@ func (e *Engine) ownFilterAdd(key string) {
 		return
 	}
 	e.keyFilterMu.Lock()
-	if e.ownKeyFilter.add(key) {
+	if e.ownKeyFilter.Add(key) {
 		// Only bump the version when the set actually changed, so the
 		// marshaled-bytes cache isn't invalidated by idempotent re-adds.
 		e.ownFilterVer++
@@ -97,7 +97,7 @@ func (e *Engine) peerFilterAdd(peer pb.NodeID, key string) {
 		pf = &peerKeyFilter{}
 		e.peerKeyFilters[peer] = pf
 	}
-	pf.realtime.add(key)
+	pf.realtime.Add(key)
 	e.keyFilterMu.Unlock()
 }
 
@@ -109,7 +109,7 @@ func (e *Engine) cachePeerFilter(peer pb.NodeID, data []byte, version uint64) {
 	if peer == e.nodeID || len(data) == 0 {
 		return
 	}
-	var decoded cuckooChain
+	var decoded CuckooChain
 	if err := decoded.UnmarshalBinary(data); err != nil {
 		slog.Warn("cachePeerFilter: undecodable filter from peer", "peer", peer, "error", err)
 		return

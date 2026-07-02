@@ -20,8 +20,10 @@
 package cluster
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 
@@ -64,7 +66,45 @@ func DeriveCloudSecret(connectionSecret string) string {
 // is the value presented over the network; the cloud verifies it against the
 // hash it stored at onboarding.
 func DeriveAuthKey(cloudSecret string) string {
-	return base64.RawURLEncoding.EncodeToString(deriveCloud([]byte(cloudSecret), "auth"))
+	return base64.RawURLEncoding.EncodeToString(DeriveAuthKeyBytes(cloudSecret))
+}
+
+// DeriveAuthKeyBytes is DeriveAuthKey before its base64 encoding: the raw
+// 32-byte value the dataplane stream handshake carries and the cloud's
+// storage.AuthKey derives on its side.
+func DeriveAuthKeyBytes(cloudSecret string) []byte {
+	return deriveCloud([]byte(cloudSecret), "auth")
+}
+
+// CloudFolder derives a cluster's opaque cloud folder name from its auth key,
+// mirroring the cloud's storage.Prefix byte-for-byte — the path segment under
+// which the CDN serves this cluster's effect blobs.
+func CloudFolder(authKey []byte) string {
+	h := sha256.New()
+	h.Write([]byte("swytch-cloud-folder-v1"))
+	h.Write(authKey)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CloudKeyName maps a key name to the opaque byte string it is known by in the
+// cloud. It is a keyed PRF (HMAC-SHA256 under a connection-secret-derived
+// subkey), not encryption: the cloud only ever groups tips by key equality, and
+// a node querying GetTips always knows the plaintext key it is asking about, so
+// nothing ever needs to reverse the mapping — the real key name travels inside
+// the HPKE-sealed payload. Deterministic by construction, which is load-bearing:
+// every write of one logical key from every node must land in the same cloud
+// tip directory or superseding deps and GetTips both break.
+func CloudKeyName(keyNameKey, key []byte) []byte {
+	mac := hmac.New(sha256.New, keyNameKey)
+	mac.Write(key)
+	return mac.Sum(nil)
+}
+
+// DeriveKeyNameKey derives the PRF subkey for CloudKeyName from the connection
+// secret. Like the encryption key, it lives on a master-only HKDF branch the
+// cloud can never reach.
+func DeriveKeyNameKey(connectionSecret string) []byte {
+	return deriveCloud([]byte(connectionSecret), "key-name")
 }
 
 // DeriveEncryptionKey derives the data encryption key from the connection secret.

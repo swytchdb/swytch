@@ -97,6 +97,7 @@ type Engine struct {
 	// derived read cache.
 	index       *keytrie.Critbit[leafState]
 	broadcaster Broadcaster // nil for standalone
+	cloudReader CloudReader // nil when no cloud is configured (standalone/dev)
 
 	nodeID pb.NodeID
 	clock  *crdt.HLC
@@ -132,7 +133,7 @@ type Engine struct {
 	// SubscriptionEffects (see cuckoo.go and keyfilter.go). Guarded by
 	// keyFilterMu (plain map + mutex, never sync.Map).
 	keyFilterMu       sync.RWMutex
-	ownKeyFilter      cuckooChain
+	ownKeyFilter      CuckooChain
 	ownFilterVer      uint64
 	ownFilterBytes    []byte // cached marshal of ownKeyFilter at ownFilterBytesVer
 	ownFilterBytesVer uint64
@@ -188,6 +189,15 @@ type Engine struct {
 	OnKeyDataAdded func(key string) // wake oldest waiter (data inserted)
 	OnKeyDeleted   func(key string) // wake all waiters (key removed)
 	OnFlushAll     func()           // wake all waiters across all keys
+
+	// OnLocalEffect fires once for every effect this node mints and persists —
+	// data/meta/bind via Context, verdict snapshots, subscriptions,
+	// unsubscribes. This is the originator-uploads-its-own-writes hook for
+	// cloud durability: exactly the locally-authored DAG, never a peer's
+	// effects and never wire-only probes (discovery subscriptions, ephemeral
+	// pub/sub, PUBLISH payloads — those bypass the mint path entirely). Called
+	// synchronously on the emit path; implementations must not block.
+	OnLocalEffect func(offset Tip, eff *pb.Effect)
 
 	// Ephemeral pub/sub callbacks — fired from HandleRemote on
 	// receive of wire-only effects that are never stored or indexed.
@@ -560,6 +570,54 @@ func (e *Engine) SetRTTProvider(p PeerRTTProvider) {
 	e.rttProvider = p
 }
 
+// SetCloudReader installs the Cloud read backstop consulted on a read-miss. Nil
+// leaves the engine free-missing as before (standalone / no cloud).
+func (e *Engine) SetCloudReader(r CloudReader) {
+	e.cloudReader = r
+}
+
+// cloudTipsTimeout bounds a read-miss's Cloud GetTips round-trip so a slow or
+// unreachable Cloud degrades to a free-miss instead of hanging the read. The
+// blob fetches that follow (walkAndInstall → FetchFromAny) carry their own
+// CDN-race timeout.
+const cloudTipsTimeout = 5 * time.Second
+
+// hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
+// for key's tip frontier and installs the reachable tips into the index (pulling
+// blobs via FetchFromAny → CDN), so a subsequent reconstruct finds the key
+// locally and the cluster owns it thereafter. Returns true iff at least one tip
+// was installed. A nil reader, an error, or an empty Cloud return false so the
+// caller free-misses; errors are logged, never surfaced — Cloud being
+// unavailable must not fail an otherwise-valid read.
+func (e *Engine) hydrateFromCloud(key string) bool {
+	if e.cloudReader == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
+	defer cancel()
+	tips, err := e.cloudReader.CloudTips(ctx, key)
+	if err != nil {
+		slog.Warn("cloud read-miss backstop: get tips failed; free-missing", "key", key, "error", err)
+		return false
+	}
+	if len(tips) == 0 {
+		return false // Cloud holds nothing either: a genuine miss.
+	}
+	installed, skipped := e.walkAndInstall(key, tips)
+	if skipped > 0 {
+		slog.Debug("hydrateFromCloud: some cloud tips unreachable",
+			"key", key, "installed", installed, "skipped", skipped)
+	}
+	return installed > 0
+}
+
+// fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.
+func (e *Engine) fireLocalEffect(offset Tip, eff *pb.Effect) {
+	if e.OnLocalEffect != nil {
+		e.OnLocalEffect(offset, eff)
+	}
+}
+
 // UpdateSafetyRules atomically replaces the key-range safety configuration.
 func (e *Engine) UpdateSafetyRules(defaultMode SafetyMode, rules []KeyRangeRule) {
 	e.safety.Store(&safetyMap{
@@ -699,6 +757,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 		e.effectCache.PutSized(offset, eff, len(data))
 	}
 	e.updateIndex(key, currentSet, offset)
+	e.fireLocalEffect(offset, eff)
 
 	if e.broadcaster != nil {
 		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
@@ -2001,6 +2060,7 @@ func (e *Engine) broadcastUnsubscribe(key string, tips []Tip) {
 			}},
 		}
 		if data, err := MarshalEffect(unsub); err == nil {
+			e.fireLocalEffect(offset, unsub)
 			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
 			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		} else {

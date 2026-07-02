@@ -57,6 +57,43 @@ func TestEncryptor_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestNewEncryptorFromIKM_Deterministic(t *testing.T) {
+	ikm := bytes.Repeat([]byte{0x42}, 32)
+
+	a, err := NewEncryptorFromIKM(ikm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewEncryptorFromIKM(ikm)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two independent derivations from the same IKM must interoperate: one
+	// node seals, another node (deriving on its own) opens.
+	plaintext := []byte("cluster-shared cloud payload")
+	sealed, err := a.SealAndCompress(plaintext, []byte("effect"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := b.OpenAndDecompress(sealed, []byte("effect"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recovered, plaintext) {
+		t.Fatalf("cross-derivation round-trip failed: got %q, want %q", recovered, plaintext)
+	}
+
+	// A different IKM must not open the blob.
+	other, err := NewEncryptorFromIKM(bytes.Repeat([]byte{0x43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.OpenAndDecompress(sealed, []byte("effect")); err == nil {
+		t.Fatal("blob sealed under one IKM opened under another")
+	}
+}
+
 func TestEncryptor_DomainSeparation(t *testing.T) {
 	pub, priv, err := GenerateKeyPair()
 	if err != nil {

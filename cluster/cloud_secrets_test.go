@@ -105,6 +105,56 @@ func TestCloudSecretsEncoding(t *testing.T) {
 	}
 }
 
+func TestDeriveAuthKeyBytesMatchesEncoded(t *testing.T) {
+	conn, err := GenerateConnectionSecret()
+	if err != nil {
+		t.Fatalf("GenerateConnectionSecret: %v", err)
+	}
+	cloud := DeriveCloudSecret(conn)
+
+	raw := DeriveAuthKeyBytes(cloud)
+	if len(raw) != 32 {
+		t.Fatalf("expected 32-byte auth key, got %d", len(raw))
+	}
+	if got, want := base64.RawURLEncoding.EncodeToString(raw), DeriveAuthKey(cloud); got != want {
+		t.Fatalf("raw auth key does not encode to DeriveAuthKey: %q != %q", got, want)
+	}
+}
+
+func TestCloudKeyName(t *testing.T) {
+	conn, err := GenerateConnectionSecret()
+	if err != nil {
+		t.Fatalf("GenerateConnectionSecret: %v", err)
+	}
+	knk := DeriveKeyNameKey(conn)
+	key := []byte("__swytch:members")
+
+	// Deterministic: every node's mapping of one logical key must agree, or the
+	// cloud's per-key tip grouping falls apart.
+	a := CloudKeyName(knk, key)
+	b := CloudKeyName(DeriveKeyNameKey(conn), key)
+	if !bytes.Equal(a, b) {
+		t.Fatal("CloudKeyName is not deterministic across derivations")
+	}
+
+	// Distinct keys must not collide, and the mapping must not leak the key.
+	if bytes.Equal(a, CloudKeyName(knk, []byte("__swytch:member"))) {
+		t.Fatal("distinct keys mapped to the same cloud name")
+	}
+	if bytes.Contains(a, key) {
+		t.Fatal("cloud key name contains the plaintext key")
+	}
+
+	// A different connection secret yields an unrelated mapping.
+	other, err := GenerateConnectionSecret()
+	if err != nil {
+		t.Fatalf("GenerateConnectionSecret: %v", err)
+	}
+	if bytes.Equal(a, CloudKeyName(DeriveKeyNameKey(other), key)) {
+		t.Fatal("different secrets produced the same cloud key name")
+	}
+}
+
 func TestDifferentConnectionsDifferentCloudSecrets(t *testing.T) {
 	a, err := GenerateConnectionSecret()
 	if err != nil {

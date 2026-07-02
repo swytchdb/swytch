@@ -56,6 +56,13 @@ type RuntimeConfig struct {
 	// bootstrap. Must match across every node in the cluster.
 	ClusterPassphrase string
 
+	// ConnectionSecret enables Swytch Cloud durability and is self-contained
+	// cluster identity: the mTLS passphrase derives from it (so it is
+	// mutually exclusive with ClusterPassphrase) and peer discovery uses the
+	// cloud membership roster (so JoinAddr must be empty). Used once during
+	// NewRuntime to derive keys, then dropped.
+	ConnectionSecret string
+
 	// JoinAddr is the DNS name the beacon resolves to find peers at
 	// startup. Empty is fine in solo mode; for a real cluster point
 	// it at a name that resolves to every peer's cluster-port IP.
@@ -70,6 +77,19 @@ type RuntimeConfig struct {
 	// peers. Empty triggers auto-detection via DetectAdvertiseAddr.
 	AdvertiseAddr string
 
+	// Embedder durability seams, installed before the beacon starts so no emit
+	// or remote arrival races their wiring. They are how an embedder brings its
+	// own durable store (e.g. the cloud dataplane's internal S3): OnLocalEffect
+	// sees every persisted local mint, CloudReader answers read-misses with a
+	// tip frontier, CDNFetcher joins the blob-fetch race, and OnKeyDataAdded
+	// fires on every key change (NewRuntime chains its own membership handling
+	// on top). Mutually exclusive with ConnectionSecret, which wires Swytch
+	// Cloud through these same seams internally. All optional.
+	OnLocalEffect  func(offset effects.Tip, eff *pb.Effect)
+	OnKeyDataAdded func(key string)
+	CloudReader    effects.CloudReader
+	CDNFetcher     cluster.CDNFetcher
+
 	// Logger — optional, defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -81,6 +101,7 @@ type Runtime struct {
 	Engine      *effects.Engine
 	PeerManager *cluster.PeerManager
 	Beacon      *Beacon
+	CloudSync   *cluster.CloudSync
 
 	cfg RuntimeConfig
 }
@@ -109,13 +130,47 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	})
 	log.Info("effects engine initialized", "node_id", engine.NodeID())
 
+	// The connection secret is derive-and-drop: everything needed later comes
+	// from these two derivations, and no config copy retains the master.
+	passphrase := cfg.ClusterPassphrase
+	cloudEnabled := cfg.ConnectionSecret != ""
+	var cloudSync *cluster.CloudSync
+	if cloudEnabled {
+		if cfg.OnLocalEffect != nil || cfg.CloudReader != nil || cfg.CDNFetcher != nil {
+			return nil, errors.Join(
+				fmt.Errorf("ConnectionSecret is exclusive with the embedder durability seams"),
+				closeEngineOnError(engine),
+			)
+		}
+		passphrase = cluster.DeriveClusterPassphrase(cfg.ConnectionSecret)
+		var err error
+		cloudSync, err = cluster.NewCloudSync(engine, cfg.ConnectionSecret)
+		if err != nil {
+			return nil, errors.Join(err, closeEngineOnError(engine))
+		}
+		cfg.ConnectionSecret = ""
+	}
+
+	// Embedder seams go in before anything can emit or arrive, so their
+	// installation can never race a live goroutine.
+	if cfg.OnLocalEffect != nil {
+		engine.OnLocalEffect = cfg.OnLocalEffect
+	}
+	if cfg.OnKeyDataAdded != nil {
+		engine.OnKeyDataAdded = cfg.OnKeyDataAdded
+	}
+	if cfg.CloudReader != nil {
+		engine.SetCloudReader(cfg.CloudReader)
+	}
+
 	rt := &Runtime{
-		Engine: engine,
-		cfg:    cfg,
+		Engine:    engine,
+		CloudSync: cloudSync,
+		cfg:       cfg,
 	}
 
 	// Single-node mode: done.
-	if cfg.ClusterPassphrase == "" {
+	if passphrase == "" {
 		log.Debug("no cluster passphrase, running single-node")
 		return rt, nil
 	}
@@ -150,7 +205,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 				Address: advertise,
 			},
 		},
-		TLSPassphrase: cfg.ClusterPassphrase,
+		TLSPassphrase: passphrase,
 	}
 
 	logReader := cluster.NewEngineLogReader(engine.EffectCache())
@@ -174,6 +229,22 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	// Engine replicates outbound via the PeerManager.
 	engine.SetBroadcaster(pm)
 
+	if cloudSync != nil {
+		if err := cloudSync.Start(); err != nil {
+			return nil, errors.Join(err, closeRuntimeOnError(rt))
+		}
+		// Recursive dep fetches now race the CDN against peers, so effects no
+		// live peer holds are recoverable from cloud durability.
+		pm.SetCDNFetcher(cloudSync)
+		// Read-miss backstop: a key evicted from every live peer may still live
+		// in Cloud. The engine asks Cloud for its frontier and rehydrates before
+		// treating the read as a miss (tiered storage).
+		engine.SetCloudReader(cloudSync)
+	}
+	if cfg.CDNFetcher != nil {
+		pm.SetCDNFetcher(cfg.CDNFetcher)
+	}
+
 	// When a peer rejoins, all subscribed keys need a fresh bootstrap.
 	// Engine also uses the peer-health RTT data to pick serialization
 	// mode, so wire that alongside.
@@ -186,13 +257,14 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 
 	engine.StartAntiEntropy(3 * time.Second)
 
-	// Beacon: DNS discovery + dynamic membership.
+	// Beacon: peer discovery (DNS or cloud) + dynamic membership.
 	b := New(Config{
 		JoinAddr:      cfg.JoinAddr,
 		ClusterPort:   cfg.ClusterPort,
 		AdvertiseAddr: advertise,
 		NodeID:        engine.NodeID(),
-		Passphrase:    cfg.ClusterPassphrase,
+		Passphrase:    passphrase,
+		Cloud:         cloudSync,
 	}, engine, pm)
 
 	// Membership is a normal key; the live connection table is just a reactive
@@ -231,15 +303,20 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	return rt, nil
 }
 
-// Stop tears down the beacon, peer manager, and engine in the order
-// that avoids use-after-close races (beacon before PM because beacon
-// calls into PM; PM before engine because broadcast close paths
-// reference the engine).
+// Stop tears down the beacon, cloud sync, peer manager, and engine in the
+// order that avoids use-after-close races (beacon before PM because beacon
+// calls into PM; beacon before cloud sync so the departure REMOVE effect can
+// still reach the upload outbox; PM before engine because broadcast close
+// paths reference the engine).
 func (r *Runtime) Stop() error {
 	var errs []error
 	if r.Beacon != nil {
 		r.Beacon.Stop()
 		r.Beacon = nil
+	}
+	if r.CloudSync != nil {
+		r.CloudSync.Stop()
+		r.CloudSync = nil
 	}
 	if r.PeerManager != nil {
 		r.PeerManager.Stop()
@@ -275,6 +352,9 @@ func closeRuntimeOnError(r *Runtime) error {
 	var errs []error
 	if r.Beacon != nil {
 		r.Beacon.Stop()
+	}
+	if r.CloudSync != nil {
+		r.CloudSync.Stop()
 	}
 	if r.PeerManager != nil {
 		r.PeerManager.Stop()

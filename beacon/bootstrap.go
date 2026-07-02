@@ -30,30 +30,36 @@ import (
 	"github.com/swytchdb/swytch/effects"
 )
 
-// bootstrap performs DNS discovery, installs a temporary topology, and
-// waits for at least one peer to become reachable. It does NOT read
-// authoritative membership — that happens in waitForMembershipConverged
-// after self-registration, because every node's bootstrap waits for
-// the others to be visible and nobody is visible until they've
-// registered themselves. Reading membership before registerSelf
-// deadlocks the fleet when nodes start simultaneously.
+// bootstrap performs peer discovery (DNS, or the cloud membership roster when
+// --cloud is set), installs a temporary topology, and waits for at least one
+// peer to become reachable. It does NOT read authoritative membership — that
+// happens in waitForMembershipConverged after self-registration, because
+// every node's bootstrap waits for the others to be visible and nobody is
+// visible until they've registered themselves. Reading membership before
+// registerSelf deadlocks the fleet when nodes start simultaneously.
 //
 // On return: PeerManager is connected to at least one candidate, or
 // we've fallen back to solo mode with a warning.
 func (b *Beacon) bootstrap(ctx context.Context) error {
-	candidates, err := b.resolveJoinAddrWithRetry(ctx)
-	if err != nil {
-		slog.Warn("beacon: DNS resolution failed after retries, starting solo", "error", err)
-		return nil
+	var candidates []string
+	if b.cfg.Cloud != nil {
+		candidates = b.cloudCandidates(ctx)
+	} else {
+		var err error
+		candidates, err = b.resolveJoinAddrWithRetry(ctx)
+		if err != nil {
+			slog.Warn("beacon: DNS resolution failed after retries, starting solo", "error", err)
+			return nil
+		}
 	}
 
 	candidates = b.filterSelf(candidates)
 	if len(candidates) == 0 {
-		slog.Info("beacon: no peers found via DNS, starting solo")
+		slog.Info("beacon: no peers found, starting solo")
 		return nil
 	}
 
-	slog.Info("beacon: discovered candidates via DNS", "candidates", candidates)
+	slog.Info("beacon: discovered candidates", "candidates", candidates)
 	b.setTemporaryTopology(candidates)
 	b.expectedPeers = len(candidates)
 
@@ -66,6 +72,28 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 		return nil
 	}
 	return nil
+}
+
+// cloudCandidates discovers peer addresses from the cloud's membership
+// roster. Discovery failure means solo start, same as a DNS miss — the cloud
+// roster may be stale or empty (fresh cluster) and any one live address is
+// enough to join.
+func (b *Beacon) cloudCandidates(ctx context.Context) []string {
+	reduced, err := b.cfg.Cloud.DiscoverMembers(ctx, MembershipKey)
+	if err != nil {
+		slog.Warn("beacon: cloud member discovery failed, starting solo", "error", err)
+		return nil
+	}
+	members := parseMembership(reduced)
+	selfID := uint64(b.cfg.NodeID)
+	addrs := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.NodeID == selfID {
+			continue
+		}
+		addrs = append(addrs, m.Addr)
+	}
+	return addrs
 }
 
 // resolveJoinAddrWithRetry resolves JoinAddr, retrying on error with capped

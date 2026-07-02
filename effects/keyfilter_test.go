@@ -186,11 +186,11 @@ func TestOwnFilterPopulatedOnWrite(t *testing.T) {
 	if len(data) == 0 || ver == 0 {
 		t.Fatalf("own filter should be populated after a write: bytes=%d ver=%d", len(data), ver)
 	}
-	var chain cuckooChain
+	var chain CuckooChain
 	if err := chain.UnmarshalBinary(data); err != nil {
 		t.Fatalf("own filter did not round-trip: %v", err)
 	}
-	if !chain.maybeContains("written") {
+	if !chain.MaybeContains("written") {
 		t.Fatal("own filter should contain the written key")
 	}
 }
@@ -284,11 +284,11 @@ func TestEnrichedNackCarriesFilter(t *testing.T) {
 		t.Fatalf("system-key NACK should carry the own filter: bytes=%d ver=%d",
 			len(nack.NodeKeyFilter), nack.FilterVersion)
 	}
-	var chain cuckooChain
+	var chain CuckooChain
 	if err := chain.UnmarshalBinary(nack.NodeKeyFilter); err != nil {
 		t.Fatalf("NACK filter did not decode: %v", err)
 	}
-	if !chain.maybeContains("advertised") {
+	if !chain.MaybeContains("advertised") {
 		t.Fatal("NACK filter should contain the advertised key")
 	}
 }

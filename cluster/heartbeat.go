@@ -109,12 +109,12 @@ type HeartbeatManager struct {
 	peerRegions map[NodeId]string
 
 	// Tick emission state, guarded by mu.
-	seq          uint64
-	ownTicks     tickRing                // our recent ticks, for matching peers' echoes
-	pendingObs   map[NodeId]ObservedTick // latest observation per peer, drained each tick
-	lastTickWall int64
-	lastTickTime time.Time // carries a monotonic reading
-	interval     time.Duration
+	seq           uint64
+	ownTicks      tickRing                // our recent ticks, for matching peers' echoes
+	pendingObs    map[NodeId]ObservedTick // latest observation per peer, drained each tick
+	lastTickWall  int64
+	lastTickTime  time.Time // carries a monotonic reading
+	interval      time.Duration
 	ticksToAdjust int
 
 	// sendFunc transmits a tick packet to a peer via the QUIC transport.

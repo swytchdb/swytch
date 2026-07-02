@@ -39,6 +39,10 @@ type Config struct {
 	AdvertiseAddr string    // host:port this node advertises (empty = auto-detect)
 	NodeID        pb.NodeID // ephemeral node ID
 	Passphrase    string    // shared mTLS passphrase
+
+	// Cloud, when set, replaces DNS peer discovery: candidate addresses come
+	// from the cloud's membership roster instead of resolving JoinAddr.
+	Cloud *cluster.CloudSync
 }
 
 // Beacon manages cluster discovery and dynamic membership via effects.
@@ -81,16 +85,16 @@ func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
 func (b *Beacon) Start(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 
-	// Phase 1: DNS discovery + temporary topology + peer reachability.
-	// Does not read authoritative membership — that would deadlock when
-	// every node waits for the others before registering itself.
-	if b.cfg.JoinAddr != "" {
+	// Phase 1: peer discovery (DNS or cloud) + temporary topology + peer
+	// reachability. Does not read authoritative membership — that would
+	// deadlock when every node waits for the others before registering itself.
+	if b.cfg.JoinAddr != "" || b.cfg.Cloud != nil {
 		if err := b.bootstrap(b.ctx); err != nil {
 			return err
 		}
 	}
 
-	if b.cfg.JoinAddr != "" && b.expectedPeers > 0 {
+	if b.expectedPeers > 0 {
 		// Phase 1.5: Wait for at least one peer to become alive+symmetric
 		// via heartbeat exchange. With immediate heartbeats sent on
 		// connection (PeerManager wiring), this completes in <100ms.

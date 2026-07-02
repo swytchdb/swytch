@@ -58,6 +58,22 @@ type Broadcaster interface {
 	ForwardTransaction(ctx context.Context, targetNodeID pb.NodeID, tx *pb.ForwardedTransaction) (*pb.ForwardedResponse, error)
 }
 
+// CloudReader is the tiered-storage backstop: it reports the tip frontier that
+// durable Cloud storage holds for a key. A key evicted from every live peer
+// (e.g. its writer departed) may still live on Cloud, so a read that finds
+// nothing cluster-wide asks Cloud for the frontier, installs it, and lets the
+// cluster take over. Nil (unset) means no Cloud is configured and the read
+// free-misses as before.
+type CloudReader interface {
+	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
+	// error) if Cloud holds nothing for it. The engine installs these tips via
+	// walkAndInstall — the effect blobs themselves are pulled on demand by
+	// FetchFromAny, which already races the CDN — so this only needs to supply
+	// the frontier, not the sub-DAG. Content-blind on the wire: the
+	// implementation maps key to its Cloud PRF image and calls GetTips.
+	CloudTips(ctx context.Context, key string) ([]Tip, error)
+}
+
 // PeerRTTProvider provides RTT measurements to peers for optimal leader selection.
 type PeerRTTProvider interface {
 	// GetRTT returns the estimated round-trip time to the given peer.

@@ -73,6 +73,26 @@ type Encryptor struct {
 	aead    hpke.AEAD
 }
 
+// NewEncryptorFromIKM derives an Encryptor's keypair deterministically from
+// input keying material (RFC 9180 DeriveKeyPair). Every holder of the same IKM
+// arrives at the same keypair independently — this is how a cluster shares one
+// cloud-payload keypair derived from the connection secret, with no key
+// exchange and nothing for the cloud to see.
+func NewEncryptorFromIKM(ikm []byte) (*Encryptor, error) {
+	kem := hpke.MLKEM768X25519()
+	priv, err := kem.DeriveKeyPair(ikm)
+	if err != nil {
+		return nil, fmt.Errorf("derive keypair: %w", err)
+	}
+	return &Encryptor{
+		pubKey:  priv.PublicKey(),
+		privKey: priv,
+		kem:     kem,
+		kdf:     hpke.HKDFSHA256(),
+		aead:    hpke.AES256GCM(),
+	}, nil
+}
+
 // NewEncryptor creates an Encryptor from raw public/private key bytes.
 // privKey may be nil for encrypt-only nodes.
 func NewEncryptor(pubKeyBytes, privKeyBytes []byte) (*Encryptor, error) {

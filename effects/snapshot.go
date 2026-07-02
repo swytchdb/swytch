@@ -282,6 +282,32 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		return nil, nil, 0, err
 	}
 
+	result, tips, chainLen := e.reconstructLocal(key)
+
+	// Tiered storage: a nil result means the cluster — as this node sees it —
+	// holds nothing for the key, but it may have been evicted to durable Cloud.
+	// Ask Cloud for the frontier and install it (the blobs are pulled via
+	// FetchFromAny → CDN); a successful rehydrate puts the key in the index, so
+	// reconstructing again returns its value and the cluster owns it thereafter —
+	// Cloud is not consulted again unless the key is later evicted from this node
+	// too. Gated on the majority partition: a minority node can't trust its
+	// cluster view (ensureSubscribed already errored out above for it).
+	if result == nil && e.cloudReader != nil && e.inMajorityPartition() {
+		if e.hydrateFromCloud(key) {
+			result, tips, chainLen = e.reconstructLocal(key)
+		}
+	}
+
+	return result, tips, chainLen, nil
+}
+
+// reconstructLocal builds a key's materialized state from the tips already in
+// the local index (installed by subscription bootstrap, peer arrivals, or a
+// Cloud rehydrate). It never reaches outside the node for the frontier, so a nil
+// result means the cluster — as this node currently sees it — holds no committed
+// value. Split out of GetSnapshot so the Cloud read-miss backstop can retry it
+// after installing Cloud's frontier.
+func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 	// Read index tips once — these are the tips the returned snapshot
 	// corresponds to.
 	indexTips := e.index.Contains(key)
@@ -293,13 +319,13 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// Check index for tips
 	if len(snapshotTips) == 0 {
 		slog.Debug("GetSnapshot: no tips", "key", key)
-		return nil, nil, 0, nil
+		return nil, nil, 0
 	}
 
 	// Visibility fence: exclude in-progress tx tips, substitute pre-tx deps
 	tipOffsets := e.resolveTipDeps(snapshotTips)
 	if len(tipOffsets) == 0 {
-		return nil, nil, 0, nil
+		return nil, nil, 0
 	}
 
 	// Reduced-result memo: a client read (waitForHorizon=true) always waits out
@@ -334,7 +360,7 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		result, chainLen, err = e.reconstruct(key, tipOffsets, "", true)
 		if err != nil {
 			slog.Debug("GetSnapshot: reconstruction incomplete, returning empty", "key", key, "error", err)
-			return nil, nil, 0, nil
+			return nil, nil, 0
 		}
 		if horizonClear && ls != nil {
 			// The reduced memo is a pure read cache. Its result aliases the value
@@ -367,16 +393,16 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	if result != nil &&
 		result.Scalar == nil && len(result.NetAdds) == 0 && len(result.OrderedElements) == 0 &&
 		(result.Op == pb.EffectOp_UNKNOWN_OP || result.Op == pb.EffectOp_REMOVE_OP) {
-		return nil, snapshotTips, 0, nil
+		return nil, snapshotTips, 0
 	}
 	// reconstruct may return a nil result with a non-zero chainLen when the
 	// walk visits a verdict-only snapshot at the LCA, an all-lost bind set,
 	// or a chain of NoopEffects. The caller's compaction branch keys on
 	// chainLen and dereferences result; zero chainLen here so it doesn't.
 	if result == nil {
-		return nil, snapshotTips, 0, nil
+		return nil, snapshotTips, 0
 	}
-	return result, snapshotTips, chainLen, nil
+	return result, snapshotTips, chainLen
 }
 
 // ensureSubscribed records local subscription and emits a SubscriptionEffect.
@@ -449,6 +475,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 		e.effectCache.PutSized(offset, eff, len(data))
 	}
 	e.updateIndex(key, nil, offset)
+	e.fireLocalEffect(offset, eff)
 
 	if e.broadcaster == nil {
 		succeeded = true

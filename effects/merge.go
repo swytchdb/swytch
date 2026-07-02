@@ -657,4 +657,3 @@ func mergeSerializationLeaderN(branches []*pb.ReducedEffect) *uint64 {
 
 	return leader
 }
-

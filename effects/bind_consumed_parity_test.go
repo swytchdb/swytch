@@ -49,10 +49,11 @@ import (
 // later aborted) became part of committed bind B:527's el-1 ConsumedTips.
 //
 // Models these (timestamp, node, event) triples from ANALYSIS.md:
-//   (18:59:09.382483, .92/A, Emit el-1 append value 31947 -> A:491, tx:true)   = foreign in-flight tx tip
-//   (18:59:09.383360, .217/B, HandleRemote ingests A:491 as a live tip)         = foreign tip live in B's index + pendingTxTips
-//   (18:59:09.410815, .217/B, Emit competing BIND anchor B:527, tx:true)        = the committing txn whose ConsumedTips we inspect
-//   (B:527 el-1 ConsumedTips = [B:522, A:491])                                   = raw initialTips, includes the foreign in-flight tip
+//
+//	(18:59:09.382483, .92/A, Emit el-1 append value 31947 -> A:491, tx:true)   = foreign in-flight tx tip
+//	(18:59:09.383360, .217/B, HandleRemote ingests A:491 as a live tip)         = foreign tip live in B's index + pendingTxTips
+//	(18:59:09.410815, .217/B, Emit competing BIND anchor B:527, tx:true)        = the committing txn whose ConsumedTips we inspect
+//	(B:527 el-1 ConsumedTips = [B:522, A:491])                                   = raw initialTips, includes the foreign in-flight tip
 //
 // Here node 42 plays B (.217, the committing originator). Tip{7,100} plays
 // B's own committed base (B:522). Tip{8,200} plays the FOREIGN in-flight

@@ -266,6 +266,12 @@ func (p *VertexPool) incref(tip Tip) {
 	}
 }
 
+// Incref adds a DAG reference to the vertex at tip.
+func (p *VertexPool) Incref(tip Tip) { p.incref(tip) }
+
+// Decref releases a DAG reference on the vertex at tip.
+func (p *VertexPool) Decref(tip Tip) { p.decref(tip) }
+
 // decref lowers the key-membership refcount of the vertex at tip, if resident.
 // A refcount that goes negative means a decref had no matching incref — a
 // refcount-protocol bug that would let reclaimUnreferenced free a vertex the

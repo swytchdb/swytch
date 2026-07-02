@@ -235,16 +235,19 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.txSnapshot != nil {
 			return c.getSnapshotFromTx(key)
 		}
-		// Read-only fast path: a key we don't already hold and that no peer
-		// has announced has no committed value cluster-wide (when we're in the
-		// majority partition), so the read is a miss. We must NOT skip the
-		// subscription — staying silent means future peer writes never route to
-		// us and the key splits brain. Instead ensureSubscribed takes its
-		// async-announce path (no peer holds the key, so nothing to bootstrap;
-		// it installs locally and fire-and-forgets the SubscriptionEffect) and
-		// we return the miss without blocking. A filter false-positive, or a
-		// key we hold locally, falls through to the normal subscribe + read.
+		// Read-only fast path: a key we don't already hold and that no peer has
+		// announced has no committed value in the cluster (authoritative in the
+		// majority partition). With NO Cloud configured that's a definitive miss,
+		// so we free-miss without a reconstruct — announcing the subscription but
+		// not blocking (never skip the announce, or future peer writes never route
+		// to us and the key splits brain; ensureSubscribed takes its
+		// async-announce path since no peer holds the key). When Cloud IS
+		// configured the key may instead have been evicted to durable storage, so
+		// we fall through to engine.GetSnapshot, which subscribes and rehydrates
+		// the frontier from Cloud before deciding the read is a miss. A filter
+		// false-positive, or a key we hold locally, also falls through.
 		if c.readOnly &&
+			c.engine.cloudReader == nil &&
 			c.engine.index.Contains(key) == nil &&
 			c.engine.inMajorityPartition() &&
 			!c.engine.clusterMaybeHasKey(key) {
@@ -253,7 +256,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			}
 			return nil, nil, nil
 		}
-		// No unflushed effects for this key — delegate to committed state
+		// No unflushed effects for this key — delegate to committed state.
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
 			return nil, nil, err
@@ -734,6 +737,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		if c.engine.effectCache != nil {
 			c.engine.effectCache.Put(offset, eff)
 		}
+		c.engine.fireLocalEffect(offset, eff)
 		return offset, nil, nil
 	}
 
@@ -744,6 +748,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	if c.engine.effectCache != nil {
 		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
+	c.engine.fireLocalEffect(offset, eff)
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
