@@ -844,6 +844,18 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 		atomicallyLost   map[string]struct{}
 	)
 
+	// result aliases a cached snapshot's State whenever the walk adopts one;
+	// it must be cloned exactly once before any mutation, after which the
+	// accumulation below owns it and reduces in place (reduceChainOwned).
+	// Cloning per visited node instead is quadratic in chain length.
+	resultFromSnapshot := false
+	ensureResultOwned := func() {
+		if resultFromSnapshot {
+			result = cloneReduced(result)
+			resultFromSnapshot = false
+		}
+	}
+
 	// Retry loop: every time iterate encounters an in-horizon bind on the
 	// ancestry of tips AND waitForHorizon is true, the wait completes
 	// inline (entry.waiters.RLock blocks until MakeVisible or Abort
@@ -862,6 +874,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 		subRootEffects = nil
 		count = 0
 		crossKeyWalked = 0
+		resultFromSnapshot = false
 
 		expandKeys, bindsByKey, snapshotVerdicts, err = e.bindKeyClosure(key, cutoff)
 		if err != nil {
@@ -967,14 +980,6 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			}
 		}
 
-		resultFromSnapshot := false
-		ensureResultOwned := func() {
-			if resultFromSnapshot {
-				result = cloneReduced(result)
-				resultFromSnapshot = false
-			}
-		}
-
 		err = d.iterate(func(tip Tip, eff *pb.Effect) error {
 			count++
 
@@ -1036,12 +1041,12 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 				if fetchErr != nil {
 					return fetchErr
 				}
-				result = ReduceChain(result, bindEffects)
+				result = reduceChainOwned(result, bindEffects)
 				return nil
 			}
 
 			ensureResultOwned()
-			result = ReduceChain(result, []*pb.Effect{eff})
+			result = reduceChainOwned(result, []*pb.Effect{eff})
 			return nil
 		})
 		if errors.Is(err, errHorizonRetryNeeded) {
@@ -1058,7 +1063,8 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 	}
 
 	if len(subRootEffects) > 0 {
-		result = ReduceChain(result, subRootEffects)
+		ensureResultOwned()
+		result = reduceChainOwned(result, subRootEffects)
 	}
 
 	// Prune stale tips: any input tip that was collected but is an

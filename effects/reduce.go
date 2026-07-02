@@ -41,8 +41,14 @@ func ReduceChain(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect
 	if seed == nil && len(effects) == 0 {
 		return nil
 	}
+	return reduceChainOwned(cloneReduced(seed), effects)
+}
 
-	r := cloneReduced(seed)
+// reduceChainOwned is ReduceChain for a seed the caller exclusively owns: the
+// seed is mutated and returned, never cloned. reconstruct accumulates through
+// here once per visited DAG node — a defensive clone at each step would copy
+// the whole accumulated state, making reconstruct quadratic in chain length.
+func reduceChainOwned(r *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect {
 	hadDel := false
 
 	// A REMOVE_OP seed is a DEL marker — subsequent effects start fresh.
@@ -70,21 +76,23 @@ func ReduceChain(seed *pb.ReducedEffect, effects []*pb.Effect) *pb.ReducedEffect
 			if meta.TypeTag != pb.ValueType_TYPE_UNSPECIFIED {
 				r.TypeTag = meta.TypeTag
 			}
-			if len(meta.ElementId) > 0 && meta.ExpiresAt != nil {
-				// Per-element TTL: apply to the specific element
+			if len(meta.ElementId) > 0 {
+				// Per-element TTL set or persist. Replace the element, never
+				// mutate it: element pointers are shared with cached snapshot
+				// state (see cloneReduced), so an in-place ExpiresAt write
+				// would leak into every observer of the cached copy.
 				if r.NetAdds != nil {
 					if elem, ok := r.NetAdds[string(meta.ElementId)]; ok {
-						elem.ExpiresAt = meta.ExpiresAt
+						r.NetAdds[string(meta.ElementId)] = &pb.ReducedElement{
+							Data:           elem.Data,
+							Hlc:            elem.Hlc,
+							NodeId:         elem.NodeId,
+							ForkChoiceHash: elem.ForkChoiceHash,
+							ExpiresAt:      meta.ExpiresAt,
+						}
 					}
 				}
-			} else if len(meta.ElementId) > 0 && meta.ExpiresAt == nil {
-				// Per-element persist: clear the element's TTL
-				if r.NetAdds != nil {
-					if elem, ok := r.NetAdds[string(meta.ElementId)]; ok {
-						elem.ExpiresAt = nil
-					}
-				}
-			} else if len(meta.ElementId) == 0 && (meta.ExpiresAt != nil || meta.TypeTag == pb.ValueType_TYPE_UNSPECIFIED) {
+			} else if meta.ExpiresAt != nil || meta.TypeTag == pb.ValueType_TYPE_UNSPECIFIED {
 				// Key-level TTL set (ExpiresAt>0) or persist (ExpiresAt=0 with no TypeTag).
 				// Skip when ExpiresAt=0 and TypeTag is set — that's just a type tag update.
 				r.ExpiresAt = meta.ExpiresAt
