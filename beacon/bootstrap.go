@@ -69,6 +69,17 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 	defer waitCancel()
 	if err := b.pm.WaitForAnyPeer(waitCtx); err != nil {
 		slog.Warn("beacon: no candidates reachable, starting solo", "error", err)
+		// Bootstrap candidates are DNS guesses, not members. Conceding solo
+		// ends their relevance: keeping them would dial dead addresses forever
+		// (stale DNS from a rescheduled pod, our own other-address-family
+		// record) and expectedPeers > 0 would stall the symmetric-peer wait
+		// and membership convergence against peers that never come. Joining a
+		// cluster that was merely unreachable here is the same human
+		// adjudication as any membership repair — restart a node. Real members
+		// are never dropped by this: they arrive later through membership
+		// effects, which own the topology from then on.
+		b.setTemporaryTopology(nil)
+		b.expectedPeers = 0
 		return nil
 	}
 	return nil
