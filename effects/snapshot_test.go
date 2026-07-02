@@ -549,15 +549,19 @@ func TestGetSnapshot_SubscriptionBroadcast(t *testing.T) {
 	e := newSnapshotEngine(log)
 	e.broadcaster = bc
 	bc.nackTarget = e // wire up so bootstrap NACKs arrive and don't block
+	// A peer claims the key so the subscribe takes the blocking bootstrap
+	// (a nowhere-key would announce async without probing anyone).
+	e.peerFilterAdd(pb.NodeID(10), "newkey")
 
 	_, _, _, _ = e.GetSnapshot("newkey")
 
-	// ensureSubscribed sends ReplicateTo to each peer
-	if len(bc.replicateToPeers) != 2 {
-		t.Fatalf("expected 2 ReplicateTo calls, got %d", len(bc.replicateToPeers))
+	// ensureSubscribed probes every peer with ReplicateTo (the bootstrap may
+	// run more than one collection round; each must cover both peers).
+	peerSet := map[pb.NodeID]int{}
+	for _, pid := range bc.replicateToPeers {
+		peerSet[pid]++
 	}
-	peerSet := map[pb.NodeID]bool{bc.replicateToPeers[0]: true, bc.replicateToPeers[1]: true}
-	if !peerSet[10] || !peerSet[20] {
+	if peerSet[10] == 0 || peerSet[20] == 0 {
 		t.Fatalf("expected ReplicateTo to peers 10 and 20, got %v", bc.replicateToPeers)
 	}
 }

@@ -155,17 +155,36 @@ func TestReadOnlyHitSubscribes(t *testing.T) {
 	}
 }
 
-// TestReadOnlyMinorityDoesNotFreeMiss: a node not in the majority partition
-// cannot trust a filter-miss; it must attempt a subscribe (which then fails
-// with ErrRegionPartitioned) rather than serve a (possibly stale) nil.
+// TestReadOnlyMinorityDoesNotFreeMiss: a SafeMode node not in the majority
+// partition cannot trust a filter-miss; it must attempt a subscribe (which
+// then fails with ErrRegionPartitioned) rather than serve a (possibly stale)
+// nil.
 func TestReadOnlyMinorityDoesNotFreeMiss(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: false}
 	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
 
 	ctx := e.NewReadOnlyContext()
 	_, _, err := ctx.GetSnapshot("absent")
 	if !errors.Is(err, ErrRegionPartitioned) {
 		t.Fatalf("minority read of absent key must not free-miss; want ErrRegionPartitioned, got %v", err)
+	}
+}
+
+// TestReadOnlyMinorityUnsafeReadsThrough: UnsafeMode has no majority to gate
+// on — a minority node's read of an absent key subscribes without blocking
+// and serves its local view (nil here) instead of erroring.
+func TestReadOnlyMinorityUnsafeReadsThrough(t *testing.T) {
+	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: false}
+	e := newTestEngine(bc)
+
+	ctx := e.NewReadOnlyContext()
+	r, _, err := ctx.GetSnapshot("absent")
+	if err != nil {
+		t.Fatalf("unsafe minority read must not error, got %v", err)
+	}
+	if r != nil {
+		t.Fatalf("expected nil for an absent key, got %v", r)
 	}
 }
 

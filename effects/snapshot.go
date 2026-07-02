@@ -291,8 +291,10 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// reconstructing again returns its value and the cluster owns it thereafter —
 	// Cloud is not consulted again unless the key is later evicted from this node
 	// too. Gated on the majority partition: a minority node can't trust its
-	// cluster view (ensureSubscribed already errored out above for it).
-	if result == nil && e.cloudReader != nil && e.inMajorityPartition() {
+	// cluster view (ensureSubscribed already errored out above for it). UnsafeMode
+	// has no majority to trust — it rehydrates on whatever view it has.
+	if result == nil && e.cloudReader != nil &&
+		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
 		if e.hydrateFromCloud(key) {
 			result, tips, chainLen = e.reconstructLocal(key)
 		}
@@ -415,6 +417,10 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 // Returns ErrRegionPartitioned if the node is in a minority partition and
 // cannot announce the subscription cluster-wide. Per the whitepaper (§3.3),
 // a node must be subscribed to a key before any read or write.
+//
+// In UnsafeMode neither error is possible: there is no majority to gate on.
+// Unreachable peers are skipped without retry, the bootstrap proceeds with
+// whatever peers respond, and the branches merge later via anti-entropy.
 func (e *Engine) ensureSubscribed(key string) error {
 	return e.ensureSubscribedMode(key, true)
 }
@@ -428,9 +434,15 @@ func (e *Engine) ensureSubscribedBlocking(key string) error {
 }
 
 func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
+	unsafe := e.modeForKey(key) == UnsafeMode
 	state := &subscriptionState{ready: make(chan struct{})}
 	if existing, loaded := e.subscriptions.LoadOrStore(key, state); loaded {
 		if existing.incomplete.Load() {
+			// UnsafeMode proceeds on whatever state is local; the background
+			// retry keeps healing the unreachable tips.
+			if unsafe {
+				return nil
+			}
 			return ErrBootstrapIncomplete
 		}
 		<-existing.ready
@@ -439,6 +451,9 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 		// closeOnce + Store-before-close in markFailed ensures this
 		// load sees the up-to-date value.
 		if existing.incomplete.Load() {
+			if unsafe {
+				return nil
+			}
 			return ErrBootstrapIncomplete
 		}
 		return nil
@@ -500,7 +515,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	// (so clusterMaybeHasKey is always false for them) and are how a node
 	// bootstraps cluster state — they must always do the blocking bootstrap.
 	if allowAsync && !isSystemKey([]byte(key)) &&
-		e.inMajorityPartition() && !e.clusterMaybeHasKey(key) {
+		(e.inMajorityPartition() || unsafe) && !e.clusterMaybeHasKey(key) {
 		go e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		succeeded = true
 		return nil
@@ -561,6 +576,13 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 
 		expected := int(ackCount.Load())
 		if expected == 0 {
+			// UnsafeMode: unreachable peers never block. Proceed with local
+			// state; the subscription announce reaches recovering peers via
+			// the peer-recovery re-announce, and branches merge later.
+			if unsafe {
+				succeeded = true
+				return nil
+			}
 			// No peers responded — noise sessions likely not ready yet. Retry.
 			select {
 			case <-bootstrapDeadline:
@@ -582,8 +604,9 @@ done:
 	// this key must not proceed. Delete the state so a later call
 	// re-bootstraps once the partition resolves; mark failed so any
 	// concurrent waiters re-check incomplete after their <-ready and
-	// also surface ErrBootstrapIncomplete.
-	if !e.broadcaster.InMajorityPartition() {
+	// also surface ErrBootstrapIncomplete. UnsafeMode skips the gate:
+	// there is no majority to protect, only branches to merge.
+	if !unsafe && !e.broadcaster.InMajorityPartition() {
 		e.subscriptions.Delete(key)
 		state.markFailed()
 		return ErrRegionPartitioned
@@ -664,6 +687,9 @@ done:
 		"key", key, "unreachable_tips", skipped)
 	state.incomplete.Store(true)
 	go e.retryBootstrap(key, state, unique)
+	if unsafe {
+		return nil
+	}
 	return ErrBootstrapIncomplete
 }
 
