@@ -147,6 +147,61 @@ func TestPendingTipsIndex(t *testing.T) {
 	}
 }
 
+// TestSubscriptionMintDoesNotOpenGate: ensureSubscribed mints a
+// SubscriptionEffect on every read of an absent key, moments before that read
+// reaches the cloudMayHold gate. The mint must upload (the DAG needs the blob
+// for dep-references) but must NOT enter filterOwn — otherwise every
+// first-touch read opens its own gate and consults the cloud for a stateless
+// chain.
+func TestSubscriptionMintDoesNotOpenGate(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	keyNameKey := DeriveKeyNameKey("sub-gate-test-secret")
+	cs := &CloudSync{
+		engine:      engine,
+		keyNameKey:  keyNameKey,
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		wake:        make(chan struct{}, 1),
+	}
+	// The cloud has pushed an (empty) filter — the gate is armed.
+	cs.handleFilter(&dp.KeyFilter{Filter: filterFrame(t)})
+
+	sub := &pb.Effect{
+		Key:  []byte("k"),
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{SubscriberNodeId: 1}},
+	}
+	tip := effects.Tip{1, 10}
+	engine.EffectCache().PutSized(tip, sub, 64)
+	cs.handleLocalEffect(tip, sub)
+
+	if cs.cloudMayHold(CloudKeyName(keyNameKey, []byte("k"))) {
+		t.Fatal("a subscription mint must not open the read-miss gate for its key")
+	}
+	if got := cs.pendingTipsFor("k"); len(got) != 1 || got[0] != tip {
+		t.Fatalf("the subscription must still upload, got outbox tips %v", got)
+	}
+
+	data := &pb.Effect{
+		Key: []byte("k"),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:    pb.EffectOp_INSERT_OP,
+			Value: &pb.DataEffect_Raw{Raw: []byte("v")},
+		}},
+	}
+	dataTip := effects.Tip{1, 11}
+	engine.EffectCache().PutSized(dataTip, data, 64)
+	cs.handleLocalEffect(dataTip, data)
+
+	if !cs.cloudMayHold(CloudKeyName(keyNameKey, []byte("k"))) {
+		t.Fatal("a data mint must open the gate for its key")
+	}
+}
+
 // TestCloudTipsGatedSkipsRPC: a filter-negative CloudTips returns nil without
 // touching the network — the nil client proves it, since any RPC attempt
 // would panic.

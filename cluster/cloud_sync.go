@@ -219,10 +219,17 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 
 	// Anything cloud-bound is filter-positive from the moment it's enqueued,
 	// even if it's later evicted locally before the cloud's push reflects it.
-	name := CloudKeyName(cs.keyNameKey, eff.Key)
-	cs.filterMu.Lock()
-	cs.filterOwn.Add(string(name))
-	cs.filterMu.Unlock()
+	// Except subscriptions: ensureSubscribed mints one on every read of an
+	// absent key, moments before that same read reaches the cloudMayHold gate
+	// — letting it into the filter would open the gate for the very key being
+	// missed, turning every first-touch read into a wasted consult of a
+	// stateless chain.
+	if eff.GetSubscription() == nil {
+		name := CloudKeyName(cs.keyNameKey, eff.Key)
+		cs.filterMu.Lock()
+		cs.filterOwn.Add(string(name))
+		cs.filterMu.Unlock()
+	}
 
 	cs.engine.EffectCache().Incref(offset)
 	cs.mu.Lock()
