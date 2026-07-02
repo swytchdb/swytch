@@ -23,6 +23,7 @@ import (
 	"context"
 	"testing"
 
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	dp "github.com/swytchdb/swytch/cluster/proto/dataplane"
 	"github.com/swytchdb/swytch/effects"
 )
@@ -99,6 +100,50 @@ func TestHandleFilterUndecodableKeepsPrevious(t *testing.T) {
 	}
 	if cs.cloudMayHold(CloudKeyName(keyNameKey, []byte("absent"))) {
 		t.Fatal("undecodable frame must not open the gate")
+	}
+}
+
+// TestPendingTipsIndex covers the outbox's per-key tip index: enqueue makes a
+// key's un-acked tips visible to the read-miss path, retire removes them, and
+// the last retire clears the key entirely.
+func TestPendingTipsIndex(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs := &CloudSync{
+		engine:      engine,
+		keyNameKey:  DeriveKeyNameKey("outbox-test-secret"),
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		wake:        make(chan struct{}, 1),
+	}
+
+	effA := &pb.Effect{Key: []byte("k")}
+	effB := &pb.Effect{Key: []byte("k")}
+	tipA := effects.Tip{1, 10}
+	tipB := effects.Tip{1, 11}
+	engine.EffectCache().PutSized(tipA, effA, 64)
+	engine.EffectCache().PutSized(tipB, effB, 64)
+
+	cs.handleLocalEffect(tipA, effA)
+	cs.handleLocalEffect(tipB, effB)
+	if got := cs.pendingTipsFor("k"); len(got) != 2 {
+		t.Fatalf("expected both un-acked tips on k, got %v", got)
+	}
+
+	cs.retire(tipA)
+	if got := cs.pendingTipsFor("k"); len(got) != 1 || got[0] != tipB {
+		t.Fatalf("expected only %v after retiring %v, got %v", tipB, tipA, got)
+	}
+	cs.retire(tipB)
+	if got := cs.pendingTipsFor("k"); got != nil {
+		t.Fatalf("expected no pending tips after full retire, got %v", got)
+	}
+	if len(cs.pendingKeys) != 0 {
+		t.Fatal("pendingKeys entry should be removed with its last tip")
 	}
 }
 

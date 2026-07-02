@@ -90,8 +90,14 @@ type CloudSync struct {
 
 	mu      sync.Mutex
 	pending map[effects.Tip]*pb.Effect // un-acked mints; the held pointer keeps the effect reachable even if its pool ref is consumed
-	sendQ   []effects.Tip
-	relayQ  []*dp.Effect // fetch-request replies, already enveloped
+	// pendingKeys indexes pending by plaintext key, so CloudTips can answer a
+	// read-miss from the outbox: an evicted-before-ack key has no index tips
+	// and no cloud tips, but its effects sit refcount-pinned in the pool — the
+	// outbox tips are the frontier the cloud will eventually hold, and the
+	// walk fetches their bytes locally.
+	pendingKeys map[string]map[effects.Tip]struct{}
+	sendQ       []effects.Tip
+	relayQ      []*dp.Effect // fetch-request replies, already enveloped
 
 	// Cloud-pushed key-name filter gating the read-miss consult (CloudTips).
 	// filterBulk is replaced wholesale per KeyFilter frame; filterOwn is
@@ -121,15 +127,16 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 	}
 	authKey := DeriveAuthKeyBytes(DeriveCloudSecret(connectionSecret))
 	cs := &CloudSync{
-		engine:     engine,
-		enc:        enc,
-		keyNameKey: DeriveKeyNameKey(connectionSecret),
-		authKey:    authKey,
-		target:     CloudEndpoint,
-		folder:     CloudFolder(authKey),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		pending:    make(map[effects.Tip]*pb.Effect),
-		wake:       make(chan struct{}, 1),
+		engine:      engine,
+		enc:         enc,
+		keyNameKey:  DeriveKeyNameKey(connectionSecret),
+		authKey:     authKey,
+		target:      CloudEndpoint,
+		folder:      CloudFolder(authKey),
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		wake:        make(chan struct{}, 1),
 	}
 	conn, err := grpc.NewClient(cs.target,
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13})))
@@ -153,9 +160,11 @@ func (cs *CloudSync) Start() error {
 // Stop drains the outbox, then halts the upload loop. Graceful shutdown must
 // not look like a crash to the cloud — the beacon's departure REMOVE is
 // typically the last thing enqueued and peers may already be gone, so cloud is
-// its only way out. The drain is bounded; whatever the cloud hasn't acked by
-// the deadline (cloud down, backlog too deep) is abandoned exactly as a crash
-// would, recoverable via cluster replication.
+// its only way out. The drain is bounded on STALL, not total time: a deep
+// backlog on a live cloud flushes fully; only a cloud that stops acking gets
+// abandoned, exactly as a crash would (a solo node has no peers to re-replicate
+// from, so an abandoned tail is lost — run 2841213 abandoned 217 effects this
+// way and every key in them missed forever).
 func (cs *CloudSync) Stop() {
 	cs.waitDrained(cloudDrainTimeout)
 	if cs.cancel != nil {
@@ -169,9 +178,12 @@ func (cs *CloudSync) Stop() {
 	}
 }
 
-// waitDrained polls until the outbox is empty or the deadline passes.
+// waitDrained polls until the outbox is empty, abandoning only when the count
+// stops changing for a full timeout window — acks in flight keep resetting the
+// stall clock.
 func (cs *CloudSync) waitDrained(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
+	last := -1
 	for {
 		cs.mu.Lock()
 		n := len(cs.pending)
@@ -179,8 +191,12 @@ func (cs *CloudSync) waitDrained(timeout time.Duration) {
 		if n == 0 {
 			return
 		}
+		if n != last {
+			deadline = time.Now().Add(timeout)
+			last = n
+		}
 		if time.Now().After(deadline) {
-			slog.Warn("cloud sync: shutdown drain timed out, abandoning outbox", "pending", n)
+			slog.Warn("cloud sync: shutdown drain stalled, abandoning outbox", "pending", n)
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -211,6 +227,13 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	cs.engine.EffectCache().Incref(offset)
 	cs.mu.Lock()
 	cs.pending[offset] = eff
+	k := string(eff.Key)
+	set := cs.pendingKeys[k]
+	if set == nil {
+		set = make(map[effects.Tip]struct{})
+		cs.pendingKeys[k] = set
+	}
+	set[offset] = struct{}{}
 	cs.sendQ = append(cs.sendQ, offset)
 	backlog := len(cs.pending)
 	cs.mu.Unlock()
@@ -231,12 +254,38 @@ func (cs *CloudSync) wakeSender() {
 // retire removes an outbox entry and releases its pool reference.
 func (cs *CloudSync) retire(tip effects.Tip) {
 	cs.mu.Lock()
-	_, held := cs.pending[tip]
+	eff, held := cs.pending[tip]
 	delete(cs.pending, tip)
+	if held {
+		k := string(eff.Key)
+		if set := cs.pendingKeys[k]; set != nil {
+			delete(set, tip)
+			if len(set) == 0 {
+				delete(cs.pendingKeys, k)
+			}
+		}
+	}
 	cs.mu.Unlock()
 	if held {
 		cs.engine.EffectCache().Decref(tip)
 	}
+}
+
+// pendingTipsFor returns the outbox's un-acked tips on key — the frontier the
+// cloud will eventually hold. Their bytes are refcount-pinned in the pool, so
+// a walk over them resolves locally.
+func (cs *CloudSync) pendingTipsFor(key string) []effects.Tip {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	set := cs.pendingKeys[key]
+	if len(set) == 0 {
+		return nil
+	}
+	tips := make([]effects.Tip, 0, len(set))
+	for tip := range set {
+		tips = append(tips, tip)
+	}
+	return tips
 }
 
 func (cs *CloudSync) run() {
@@ -552,28 +601,45 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 
 // CloudTips implements effects.CloudReader: it returns the tip frontier Cloud
 // holds for key, mapping key to its Cloud PRF image (CloudKeyName) and calling
-// GetTips. A nil slice means Cloud holds nothing for the key. This is the
-// read-miss backstop — the engine installs these tips (walkAndInstall) and pulls
-// the effect blobs on demand via the CDN, rehydrating an evicted key so the
-// cluster owns it again. Unlike DiscoverMembers this does no reduction: it hands
-// the frontier to the engine, whose own reconstruct path does the rest.
+// GetTips — merged with the outbox's un-acked tips on the key, which are the
+// frontier the cloud hasn't seen yet. Without the merge, a key evicted before
+// its upload acked would free-miss even though its bytes sit refcount-pinned
+// in our own pool. A nil slice means neither holds anything. This is the
+// read-miss backstop — the engine installs these tips (walkAndInstall) and
+// pulls the effect blobs on demand (pool first, then CDN), rehydrating an
+// evicted key so the cluster owns it again. Unlike DiscoverMembers this does
+// no reduction: it hands the frontier to the engine, whose own reconstruct
+// path does the rest.
 func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {
 		return nil, nil
 	}
+	tips := cs.pendingTipsFor(key)
 
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
 		Keys:    [][]byte{name},
 	})
 	if err != nil {
+		if len(tips) > 0 {
+			// Cloud unreachable, but the outbox holds the key's un-acked
+			// frontier locally — serve it rather than failing the read.
+			return tips, nil
+		}
 		return nil, fmt.Errorf("cloud get tips: %w", err)
 	}
-	var tips []effects.Tip
+	seen := make(map[effects.Tip]struct{}, len(tips))
+	for _, t := range tips {
+		seen[t] = struct{}{}
+	}
 	for _, kt := range resp.GetKeys() {
 		for _, ref := range kt.GetTips() {
-			tips = append(tips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+			t := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
+			if _, ok := seen[t]; !ok {
+				seen[t] = struct{}{}
+				tips = append(tips, t)
+			}
 		}
 	}
 	return tips, nil
