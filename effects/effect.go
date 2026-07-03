@@ -585,33 +585,36 @@ const cloudTipsTimeout = 5 * time.Second
 // hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
 // for key's tip frontier and installs the reachable tips into the index (pulling
 // blobs via FetchFromAny → CDN), so a subsequent reconstruct finds the key
-// locally and the cluster owns it thereafter. Returns true iff at least one tip
-// was installed. A nil reader, an error, or an empty Cloud return false so the
-// caller free-misses; errors are logged, never surfaced — Cloud being
-// unavailable must not fail an otherwise-valid read.
-func (e *Engine) hydrateFromCloud(key string) bool {
+// locally and the cluster owns it thereafter. installed reports whether at least
+// one tip landed in the index; consulted reports whether Cloud gave a complete
+// answer — including "holds nothing" — so GetSnapshot can mark the leaf as
+// authoritative and stop re-consulting for a key whose state reduces to nil. A
+// transport error or a partially-unreachable frontier is NOT consulted: the next
+// read retries. Errors are logged, never surfaced — Cloud being unavailable must
+// not fail an otherwise-valid read.
+func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool) {
 	if e.cloudReader == nil {
-		return false
+		return false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
 	defer cancel()
 	tips, closure, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
 		slog.Warn("cloud read-miss backstop: get tips failed; free-missing", "key", key, "error", err)
-		return false
+		return false, false
 	}
 	if len(tips) == 0 {
-		return false // Cloud holds nothing either: a genuine miss.
+		return false, true // Cloud holds nothing either: an authoritative miss.
 	}
 	// Warm the cache with Cloud's advisory closure in one parallel fan-out so
 	// the walk below runs locally instead of one WAN fetch per dep (n+1).
 	e.prefetchEffects(closure)
-	installed, skipped := e.walkAndInstall(key, tips)
+	n, skipped := e.walkAndInstall(key, tips)
 	if skipped > 0 {
 		slog.Debug("hydrateFromCloud: some cloud tips unreachable",
-			"key", key, "installed", installed, "skipped", skipped)
+			"key", key, "installed", n, "skipped", skipped)
 	}
-	return installed > 0
+	return n > 0, skipped == 0
 }
 
 // fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.

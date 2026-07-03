@@ -59,6 +59,14 @@ type leafState struct {
 	// and misses; see GetSnapshot for the store/serve invariant.
 	reduced atomic.Pointer[reducedResult]
 
+	// cloudConsulted marks that the Cloud read-miss backstop has received one
+	// complete answer for this key during this leaf's residency. It turns a
+	// nil reduction from "not known — ask Cloud" into "authoritatively
+	// nothing": while the leaf lives we are subscribed and replication keeps
+	// the local view current, so one consult per residency is enough. Eviction
+	// reclaims the leaf and the marker with it, re-arming the rehydrate.
+	cloudConsulted atomic.Bool
+
 	// subscribers is the set of peer node IDs subscribed to this key, used by
 	// flushTx to address bind broadcast without re-deriving it from the DAG
 	// (reconstruct's Subscribers accumulator can return empty for legitimate
@@ -284,19 +292,38 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 
 	result, tips, chainLen := e.reconstructLocal(key)
 
-	// Tiered storage: a nil result means the cluster — as this node sees it —
-	// holds nothing for the key, but it may have been evicted to durable Cloud.
-	// Ask Cloud for the frontier and install it (the blobs are pulled via
-	// FetchFromAny → CDN); a successful rehydrate puts the key in the index, so
-	// reconstructing again returns its value and the cluster owns it thereafter —
-	// Cloud is not consulted again unless the key is later evicted from this node
-	// too. Gated on the majority partition: a minority node can't trust its
-	// cluster view (ensureSubscribed already errored out above for it). UnsafeMode
-	// has no majority to trust — it rehydrates on whatever view it has.
+	// Tiered storage: a nil result can mean two things and only one warrants a
+	// Cloud consult. "Not-known nil" — no local history, or the key was evicted
+	// — is the rehydrate case: ask Cloud for the frontier and install it (blobs
+	// pulled via FetchFromAny → CDN), so reconstructing again returns the value
+	// and the cluster owns the key thereafter. "Authoritative nil" — we hold
+	// the chain and it reduces to nothing (DEL tombstone, emptied collection,
+	// subscription-only chain) — must not re-consult: such keys stay
+	// filter-positive in Cloud forever, and without the distinction every GET
+	// of them pays a WAN GetTips round-trip. The leaf's cloudConsulted marker
+	// draws the line: nil becomes authoritative once Cloud has given one
+	// complete answer, and eviction reclaims the marker with the leaf, re-arming
+	// the rehydrate. Gated on the majority partition: a minority node can't
+	// trust its cluster view (ensureSubscribed already errored out above for
+	// it). UnsafeMode has no majority to trust — it rehydrates on whatever view
+	// it has.
 	if result == nil && e.cloudReader != nil &&
 		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
-		if e.hydrateFromCloud(key) {
-			result, tips, chainLen = e.reconstructLocal(key)
+		ls, _ := e.index.LoadOrStoreData(key, &leafState{})
+		if ls == nil || !ls.cloudConsulted.Load() {
+			installed, consulted := e.hydrateFromCloud(key)
+			if installed {
+				result, tips, chainLen = e.reconstructLocal(key)
+			}
+			if consulted {
+				if ls == nil {
+					// The hydrate may have just created the leaf.
+					ls, _ = e.index.LoadOrStoreData(key, &leafState{})
+				}
+				if ls != nil {
+					ls.cloudConsulted.Store(true)
+				}
+			}
 		}
 	}
 

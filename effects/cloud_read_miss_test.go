@@ -105,7 +105,11 @@ func TestReadMissRehydratesFromCloud(t *testing.T) {
 
 // TestReadMissCloudEmptyStillMisses: when Cloud also holds nothing for the key,
 // the read is a genuine miss — the backstop returns nil and does not fabricate a
-// value.
+// value. The complete "holds nothing" answer makes the nil authoritative:
+// repeated reads of the (still-nil) key must not consult Cloud again — the
+// chain is subscription-only from here and reduces to nil on every read, and
+// without the consult-once marker each of those reads would pay a WAN
+// round-trip.
 func TestReadMissCloudEmptyStillMisses(t *testing.T) {
 	bc := &selectiveBroadcaster{
 		mockBroadcaster: mockBroadcaster{allRegionPeersReachable: true},
@@ -124,6 +128,38 @@ func TestReadMissCloudEmptyStillMisses(t *testing.T) {
 	}
 	if fake.calls != 1 {
 		t.Fatalf("expected one Cloud consult on the miss, got %d", fake.calls)
+	}
+
+	for range 3 {
+		if _, _, err := ctx.GetSnapshot("never-written"); err != nil {
+			t.Fatalf("repeat read errored: %v", err)
+		}
+	}
+	if fake.calls != 1 {
+		t.Fatalf("authoritative nil was re-consulted (%d calls); one complete Cloud answer must stick for the leaf's residency", fake.calls)
+	}
+}
+
+// TestReadMissCloudErrorRetriesNextRead: a transport failure is not an answer —
+// the leaf must not be marked consulted, so the next read retries the backstop
+// (Cloud coming back mid-outage must still rehydrate the key).
+func TestReadMissCloudErrorRetriesNextRead(t *testing.T) {
+	bc := &selectiveBroadcaster{
+		mockBroadcaster: mockBroadcaster{allRegionPeersReachable: true},
+	}
+	e := newTestEngine(bc)
+	fake := &fakeCloudReader{err: context.DeadlineExceeded}
+	e.SetCloudReader(fake)
+
+	ctx := e.NewReadOnlyContext()
+	if _, _, err := ctx.GetSnapshot("unreachable"); err != nil {
+		t.Fatalf("read must free-miss on Cloud error, got: %v", err)
+	}
+	if _, _, err := ctx.GetSnapshot("unreachable"); err != nil {
+		t.Fatalf("second read errored: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Fatalf("expected the failed consult to retry on the next read, got %d calls", fake.calls)
 	}
 }
 
