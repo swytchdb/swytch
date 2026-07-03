@@ -66,12 +66,15 @@ type Broadcaster interface {
 // free-misses as before.
 type CloudReader interface {
 	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
-	// error) if Cloud holds nothing for it. The engine installs these tips via
-	// walkAndInstall — the effect blobs themselves are pulled on demand by
-	// FetchFromAny, which already races the CDN — so this only needs to supply
-	// the frontier, not the sub-DAG. Content-blind on the wire: the
-	// implementation maps key to its Cloud PRF image and calls GetTips.
-	CloudTips(ctx context.Context, key string) ([]Tip, error)
+	// error) if Cloud holds nothing for it. closure is Cloud's advisory list of
+	// every ref reachable from those tips down to the LCA snapshot: the engine
+	// prefetches those blobs in one parallel fan-out before walkAndInstall so
+	// the walk runs against warm cache instead of a sequential per-dep WAN
+	// fetch. closure may be nil, partial, or a superset — the walk stays the
+	// authority and pulls anything missing on demand (FetchFromAny, which
+	// already races the CDN). Content-blind on the wire: the implementation
+	// maps key to its Cloud PRF image and calls GetTips.
+	CloudTips(ctx context.Context, key string) (tips []Tip, closure []Tip, err error)
 }
 
 // PeerRTTProvider provides RTT measurements to peers for optimal leader selection.

@@ -616,11 +616,12 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 // pulls the effect blobs on demand (pool first, then CDN), rehydrating an
 // evicted key so the cluster owns it again. Unlike DiscoverMembers this does
 // no reduction: it hands the frontier to the engine, whose own reconstruct
-// path does the rest.
-func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, error) {
+// path does the rest. The closure passes through Cloud's advisory prefetch
+// list verbatim; outbox tips need no closure — their bytes are already local.
+func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.Tip, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	tips := cs.pendingTipsFor(key)
 
@@ -632,14 +633,15 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 		if len(tips) > 0 {
 			// Cloud unreachable, but the outbox holds the key's un-acked
 			// frontier locally — serve it rather than failing the read.
-			return tips, nil
+			return tips, nil, nil
 		}
-		return nil, fmt.Errorf("cloud get tips: %w", err)
+		return nil, nil, fmt.Errorf("cloud get tips: %w", err)
 	}
 	seen := make(map[effects.Tip]struct{}, len(tips))
 	for _, t := range tips {
 		seen[t] = struct{}{}
 	}
+	var closure []effects.Tip
 	for _, kt := range resp.GetKeys() {
 		for _, ref := range kt.GetTips() {
 			t := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -648,8 +650,11 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 				tips = append(tips, t)
 			}
 		}
+		for _, ref := range kt.GetClosure() {
+			closure = append(closure, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
 	}
-	return tips, nil
+	return tips, closure, nil
 }
 
 // topoOrder sorts a fetched sub-DAG deps-before-dependents (Kahn). The walk's

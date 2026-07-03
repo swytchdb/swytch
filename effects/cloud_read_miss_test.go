@@ -26,21 +26,23 @@ import (
 	pb "github.com/swytchdb/swytch/cluster/proto"
 )
 
-// fakeCloudReader is a CloudReader stub: it returns a fixed tip frontier per key
-// and counts how many times it was consulted, so a test can assert that once a
-// key is rehydrated the cluster takes over and Cloud is not asked again.
+// fakeCloudReader is a CloudReader stub: it returns a fixed tip frontier (and
+// advisory closure) per key and counts how many times it was consulted, so a
+// test can assert that once a key is rehydrated the cluster takes over and
+// Cloud is not asked again.
 type fakeCloudReader struct {
-	tips  map[string][]Tip
-	err   error
-	calls int
+	tips    map[string][]Tip
+	closure map[string][]Tip
+	err     error
+	calls   int
 }
 
-func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, error) {
+func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []Tip, error) {
 	f.calls++
 	if f.err != nil {
-		return nil, f.err
+		return nil, nil, f.err
 	}
-	return f.tips[key], nil
+	return f.tips[key], f.closure[key], nil
 }
 
 // TestReadMissRehydratesFromCloud is the tiered-storage core: a read of a key
@@ -61,7 +63,12 @@ func TestReadMissRehydratesFromCloud(t *testing.T) {
 		fetchable: map[Tip][]byte{tip: wire}, // the CDN/peer serves the blob
 	}
 	e := newTestEngine(bc)
-	fake := &fakeCloudReader{tips: map[string][]Tip{key: {tip}}}
+	// The closure names the same ref, exercising the parallel prefetch ahead of
+	// the walk (the walk then finds the blob already cached).
+	fake := &fakeCloudReader{
+		tips:    map[string][]Tip{key: {tip}},
+		closure: map[string][]Tip{key: {tip}},
+	}
 	e.SetCloudReader(fake)
 
 	// No peer announces the key and we hold nothing: without the Cloud backstop

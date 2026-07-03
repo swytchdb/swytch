@@ -210,11 +210,11 @@ func TestCloudTipsGatedSkipsRPC(t *testing.T) {
 	cs := &CloudSync{keyNameKey: keyNameKey}
 	cs.handleFilter(&dp.KeyFilter{Filter: filterFrame(t, CloudKeyName(keyNameKey, []byte("held")))})
 
-	tips, err := cs.CloudTips(context.Background(), "absent")
+	tips, closure, err := cs.CloudTips(context.Background(), "absent")
 	if err != nil {
 		t.Fatalf("gated CloudTips errored: %v", err)
 	}
-	if tips != nil {
-		t.Fatalf("gated CloudTips returned tips: %v", tips)
+	if tips != nil || closure != nil {
+		t.Fatalf("gated CloudTips returned tips: %v (closure %v)", tips, closure)
 	}
 }

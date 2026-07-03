@@ -595,7 +595,7 @@ func (e *Engine) hydrateFromCloud(key string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
 	defer cancel()
-	tips, err := e.cloudReader.CloudTips(ctx, key)
+	tips, closure, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
 		slog.Warn("cloud read-miss backstop: get tips failed; free-missing", "key", key, "error", err)
 		return false
@@ -603,6 +603,9 @@ func (e *Engine) hydrateFromCloud(key string) bool {
 	if len(tips) == 0 {
 		return false // Cloud holds nothing either: a genuine miss.
 	}
+	// Warm the cache with Cloud's advisory closure in one parallel fan-out so
+	// the walk below runs locally instead of one WAN fetch per dep (n+1).
+	e.prefetchEffects(closure)
 	installed, skipped := e.walkAndInstall(key, tips)
 	if skipped > 0 {
 		slog.Debug("hydrateFromCloud: some cloud tips unreachable",
@@ -1879,10 +1882,18 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 // ingestCausalChain bulk-fetches every ref in the NACK's pre-computed
 // causal chain in parallel and caches the deserialized effects. Does
 // NOT install tips — the synchronous ingestNackTips / walkAndInstall
-// path handles that. This just warms the cache so dag.bfs finds
-// everything locally instead of doing sequential FetchFromAny calls.
+// path handles that.
 func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
-	if e.effectCache == nil {
+	e.prefetchEffects(fromPbRefs(nack.CausalChain))
+}
+
+// prefetchEffects fetches every listed ref not already resident in parallel
+// and caches the deserialized effects, so a subsequent dag.bfs finds
+// everything locally instead of doing sequential FetchFromAny calls. Purely a
+// cache warmer: it installs no tips, and a failed fetch is skipped — the walk
+// that follows fetches stragglers itself.
+func (e *Engine) prefetchEffects(refs []Tip) {
+	if e.effectCache == nil || len(refs) == 0 {
 		return
 	}
 
@@ -1891,10 +1902,9 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 		ref  Tip
 		data []byte
 	}
-	results := make(chan fetchResult, len(nack.CausalChain))
+	results := make(chan fetchResult, len(refs))
 
-	for _, ref := range nack.CausalChain {
-		off := r(ref)
+	for _, off := range refs {
 		if _, ok := e.effectCache.Get(off); ok {
 			continue
 		}
@@ -1906,7 +1916,7 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 				return
 			}
 			results <- fetchResult{ref: r(ref), data: data}
-		}(ref)
+		}(toPbRef(off))
 	}
 
 	for range pending {
