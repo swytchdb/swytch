@@ -265,7 +265,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
 		// when result is nil, but the check is defensive against future
 		// regressions in that contract.
-		compactThreshold := 20 + rand.IntN(31)
+		compactThreshold := 5 + rand.IntN(10)
 		if c.engine.broadcaster == nil {
 			compactThreshold = 5
 		}

@@ -297,17 +297,20 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// — is the rehydrate case: ask Cloud for the frontier and install it (blobs
 	// pulled via FetchFromAny → CDN), so reconstructing again returns the value
 	// and the cluster owns the key thereafter. "Authoritative nil" — we hold
-	// the chain and it reduces to nothing (DEL tombstone, emptied collection,
-	// subscription-only chain) — must not re-consult: such keys stay
-	// filter-positive in Cloud forever, and without the distinction every GET
-	// of them pays a WAN GetTips round-trip. The leaf's cloudConsulted marker
-	// draws the line: nil becomes authoritative once Cloud has given one
-	// complete answer, and eviction reclaims the marker with the leaf, re-arming
-	// the rehydrate. Gated on the majority partition: a minority node can't
-	// trust its cluster view (ensureSubscribed already errored out above for
-	// it). UnsafeMode has no majority to trust — it rehydrates on whatever view
-	// it has.
-	if result == nil && e.cloudReader != nil &&
+	// the chain and it reduces to nothing (DEL tombstone, emptied collection)
+	// — must not re-consult: such keys stay filter-positive in Cloud forever,
+	// and without the distinction every GET of them pays a WAN GetTips
+	// round-trip. A data-bearing tip marks the nil authoritative; subscription
+	// tips don't count, because ensureSubscribed installs the reader's own
+	// SubscriptionEffect as a tip before reconstruction, so the first read of
+	// an absent key always sees one. The leaf's cloudConsulted marker
+	// additionally caps consults: nil becomes authoritative once Cloud has
+	// given one complete answer, and eviction reclaims the marker with the
+	// leaf, re-arming the rehydrate. Gated on the majority partition: a
+	// minority node can't trust its cluster view (ensureSubscribed already
+	// errored out above for it). UnsafeMode has no majority to trust — it
+	// rehydrates on whatever view it has.
+	if result == nil && e.cloudReader != nil && e.subscriptionOnlyTips(tips) &&
 		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
 		ls, _ := e.index.LoadOrStoreData(key, &leafState{})
 		if ls == nil || !ls.cloudConsulted.Load() {
@@ -328,6 +331,21 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	}
 
 	return result, tips, chainLen, nil
+}
+
+// subscriptionOnlyTips reports whether tips carry no data history: every tip
+// resolves to a SubscriptionEffect (vacuously true for an empty set). A tip
+// whose effect is not cached is treated as data — reconstruction just walked
+// these tips, so a cache miss here means the leaf is being torn down and the
+// next read re-evaluates from scratch anyway.
+func (e *Engine) subscriptionOnlyTips(tips []Tip) bool {
+	for _, t := range tips {
+		eff, ok := e.effectCache.Get(t)
+		if !ok || eff.GetSubscription() == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // reconstructLocal builds a key's materialized state from the tips already in

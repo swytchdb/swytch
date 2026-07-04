@@ -91,7 +91,7 @@ func CloudFolder(authKey []byte) string {
 // subkey), not encryption: the cloud only ever groups tips by key equality, and
 // a node querying GetTips always knows the plaintext key it is asking about, so
 // nothing ever needs to reverse the mapping — the real key name travels inside
-// the HPKE-sealed payload. Deterministic by construction, which is load-bearing:
+// the sealed payload. Deterministic by construction, which is load-bearing:
 // every write of one logical key from every node must land in the same cloud
 // tip directory or superseding deps and GetTips both break.
 func CloudKeyName(keyNameKey, key []byte) []byte {

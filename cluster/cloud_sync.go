@@ -45,7 +45,7 @@ const (
 	CloudCDNEndpoint = "https://next.swytch.earth"
 )
 
-// cloudEffectInfo is the HPKE domain-separation info for sealed effect payloads.
+// cloudEffectInfo is the domain-separation info for sealed effect payloads.
 var cloudEffectInfo = []byte("effect")
 
 const (
@@ -119,7 +119,7 @@ type CloudSync struct {
 
 // NewCloudSync derives the cloud key material from the connection secret and
 // drops the secret: only the auth key (wire identity), the key-name PRF key,
-// and the HPKE keypair (payload encryption) are retained.
+// and the payload encryption key are retained.
 func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, error) {
 	enc, err := effects.NewEncryptorFromIKM(DeriveEncryptionKey(connectionSecret))
 	if err != nil {
@@ -507,7 +507,7 @@ func (cs *CloudSync) handleFilter(kf *dp.KeyFilter) {
 // buildEnvelope maps a swytch effect to the cloud's structural envelope: the
 // (NodeID, Offset) identity, deps, kind, and time stay readable (the cloud's
 // retention scan walks them); the key name becomes its PRF image and the whole
-// serialized effect is HPKE-sealed into raw_effect.
+// serialized effect is sealed into raw_effect.
 func (cs *CloudSync) buildEnvelope(tip effects.Tip, eff *pb.Effect) (*dp.Effect, error) {
 	raw, err := effects.MarshalEffect(eff)
 	if err != nil {
@@ -707,7 +707,7 @@ func topoOrder(fetched map[effects.Tip]*pb.Effect) []*pb.Effect {
 }
 
 // fetchEffect pulls one effect blob from the CDN and peels it: envelope →
-// HPKE-open → inner effect.
+// open → inner effect.
 func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effect, error) {
 	url := fmt.Sprintf("%s/%s/%016x-%016x", CloudCDNEndpoint, cs.folder, tip[0], tip[1])
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
