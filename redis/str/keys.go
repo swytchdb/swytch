@@ -21,7 +21,6 @@ package str
 
 import (
 	"bytes"
-	"log/slog"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
@@ -220,7 +219,10 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			}
 			// Always attempt stream sub-key cleanup — the key might have been
 			// overwritten (e.g. SET) but stream sub-keys could still exist.
-			cleanupStreamGroups(cmd, key)
+			if err := cleanupStreamGroups(cmd, key); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 			deleted++
 		}
 
@@ -232,37 +234,58 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	return
 }
 
-// cleanupStreamGroups deletes all consumer group and producer sub-keys for a stream.
-// Stream sub-keys use \x01-delimited key naming.
-func cleanupStreamGroups(cmd *shared.Command, key string) {
+// cleanupStreamGroups deletes all consumer group and producer sub-keys for a
+// stream. Stream sub-keys use \x01-delimited key naming. A read or emit
+// failure aborts the cleanup: treating an unanswerable read as "no groups"
+// would leak sub-keys behind the deleted stream.
+func cleanupStreamGroups(cmd *shared.Command, key string) error {
 	// Clean up consumer groups
 	groupRegistryKey := key + "\x01g\x01__registry__"
-	registrySnap, _, _ := cmd.Context.GetSnapshot(groupRegistryKey)
+	registrySnap, _, err := cmd.Context.GetSnapshot(groupRegistryKey)
+	if err != nil {
+		return err
+	}
 	if registrySnap != nil && registrySnap.NetAdds != nil {
 		for groupName := range registrySnap.NetAdds {
 			// Delete per-group sub-keys: group metadata and PEL
 			groupKeyName := key + "\x01g\x01" + groupName
 			pelKeyName := key + "\x01pel\x01" + groupName
-			_ = emitDeleteKey(cmd, groupKeyName)
-			_ = emitDeleteKey(cmd, pelKeyName)
+			if err := emitDeleteKey(cmd, groupKeyName); err != nil {
+				return err
+			}
+			if err := emitDeleteKey(cmd, pelKeyName); err != nil {
+				return err
+			}
 		}
 	}
-	_ = emitDeleteKey(cmd, groupRegistryKey)
+	if err := emitDeleteKey(cmd, groupRegistryKey); err != nil {
+		return err
+	}
 
 	// Clean up producer dedup keys
 	producerRegistryKey := key + "\x01p\x01__registry__"
-	producerSnap, _, _ := cmd.Context.GetSnapshot(producerRegistryKey)
+	producerSnap, _, err := cmd.Context.GetSnapshot(producerRegistryKey)
+	if err != nil {
+		return err
+	}
 	if producerSnap != nil && producerSnap.NetAdds != nil {
 		for producerName := range producerSnap.NetAdds {
 			producerKeyName := key + "\x01p\x01" + producerName
-			_ = emitDeleteKey(cmd, producerKeyName)
+			if err := emitDeleteKey(cmd, producerKeyName); err != nil {
+				return err
+			}
 		}
 	}
-	_ = emitDeleteKey(cmd, producerRegistryKey)
+	if err := emitDeleteKey(cmd, producerRegistryKey); err != nil {
+		return err
+	}
 
 	// Clean up IDMP config key (KEYED collection — remove each element)
 	cfgKeyName := key + "\x01cfg"
-	cfgSnap, _, _ := cmd.Context.GetSnapshot(cfgKeyName)
+	cfgSnap, _, err := cmd.Context.GetSnapshot(cfgKeyName)
+	if err != nil {
+		return err
+	}
 	if cfgSnap != nil && cfgSnap.NetAdds != nil {
 		for elemID := range cfgSnap.NetAdds {
 			if err := cmd.Context.Emit(&pb.Effect{
@@ -273,22 +296,30 @@ func cleanupStreamGroups(cmd *shared.Command, key string) {
 					Id:         []byte(elemID),
 				}},
 			}); err != nil {
-				slog.Error("stream cleanup: cfg REMOVE_OP emit failed", "key", cfgKeyName, "error", err)
+				return err
 			}
 		}
 	}
+	return nil
 }
 
 // copyStreamGroups copies all consumer group sub-keys from srcKey to dstKey.
-func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) {
+// A read or emit failure aborts the copy: treating an unanswerable read as
+// "no groups" would silently drop the groups from the destination.
+func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) error {
 	srcRegistryKey := srcKey + "\x01g\x01__registry__"
 	dstRegistryKey := dstKey + "\x01g\x01__registry__"
-	registrySnap, _, _ := cmd.Context.GetSnapshot(srcRegistryKey)
+	registrySnap, _, err := cmd.Context.GetSnapshot(srcRegistryKey)
+	if err != nil {
+		return err
+	}
 	if registrySnap == nil || registrySnap.NetAdds == nil {
-		return
+		return nil
 	}
 	// Copy the groups registry
-	_ = emitSnapshotAtKey(cmd, dstRegistryKey, registrySnap)
+	if err := emitSnapshotAtKey(cmd, dstRegistryKey, registrySnap); err != nil {
+		return err
+	}
 	// Copy per-group sub-keys
 	for groupName := range registrySnap.NetAdds {
 		srcGroupKey := srcKey + "\x01g\x01" + groupName
@@ -296,13 +327,26 @@ func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) {
 		srcPelKey := srcKey + "\x01pel\x01" + groupName
 		dstPelKey := dstKey + "\x01pel\x01" + groupName
 
-		if snap, _, _ := cmd.Context.GetSnapshot(srcGroupKey); snap != nil {
-			_ = emitSnapshotAtKey(cmd, dstGroupKey, snap)
+		snap, _, err := cmd.Context.GetSnapshot(srcGroupKey)
+		if err != nil {
+			return err
 		}
-		if snap, _, _ := cmd.Context.GetSnapshot(srcPelKey); snap != nil {
-			_ = emitSnapshotAtKey(cmd, dstPelKey, snap)
+		if snap != nil {
+			if err := emitSnapshotAtKey(cmd, dstGroupKey, snap); err != nil {
+				return err
+			}
+		}
+		pelSnap, _, err := cmd.Context.GetSnapshot(srcPelKey)
+		if err != nil {
+			return err
+		}
+		if pelSnap != nil {
+			if err := emitSnapshotAtKey(cmd, dstPelKey, pelSnap); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
@@ -508,13 +552,25 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
 			// Clean up dest groups (in case newKey was also a stream)
 			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
-				cleanupStreamGroups(cmd, newKey)
+				if err := cleanupStreamGroups(cmd, newKey); err != nil {
+					w.WriteError(err.Error())
+					return
+				}
 			}
-			copyStreamGroups(cmd, key, newKey)
-			cleanupStreamGroups(cmd, key)
+			if err := copyStreamGroups(cmd, key, newKey); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if err := cleanupStreamGroups(cmd, key); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 		} else if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
 			// Dest was a stream but source isn't — clean up dest's groups
-			cleanupStreamGroups(cmd, newKey)
+			if err := cleanupStreamGroups(cmd, newKey); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 		}
 
 		w.WriteOK()
@@ -587,8 +643,14 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		}
 		// Move stream consumer group sub-keys from old key to new key
 		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
-			copyStreamGroups(cmd, key, newKey)
-			cleanupStreamGroups(cmd, key)
+			if err := copyStreamGroups(cmd, key, newKey); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if err := cleanupStreamGroups(cmd, key); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 		}
 
 		w.WriteOne()
@@ -670,13 +732,20 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		if replace {
 			// Check dest type before deleting so we can clean up stream groups
-			destSnap, _, _ := getAnySnapshotWithTips(cmd, dstKey)
+			destSnap, _, err := getAnySnapshotWithTips(cmd, dstKey)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 			if err := emitDeleteKey(cmd, dstKey); err != nil {
 				w.WriteError(err.Error())
 				return
 			}
 			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
-				cleanupStreamGroups(cmd, dstKey)
+				if err := cleanupStreamGroups(cmd, dstKey); err != nil {
+					w.WriteError(err.Error())
+					return
+				}
 			}
 		}
 
@@ -686,7 +755,10 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 		// Copy stream consumer group sub-keys to dest
 		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
-			copyStreamGroups(cmd, srcKey, dstKey)
+			if err := copyStreamGroups(cmd, srcKey, dstKey); err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 		}
 		w.WriteOne()
 	}

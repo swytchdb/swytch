@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -577,44 +578,81 @@ func (e *Engine) SetCloudReader(r CloudReader) {
 }
 
 // cloudTipsTimeout bounds a read-miss's Cloud GetTips round-trip so a slow or
-// unreachable Cloud degrades to a free-miss instead of hanging the read. The
-// blob fetches that follow (walkAndInstall → FetchFromAny) carry their own
-// CDN-race timeout.
+// unreachable Cloud fails the read promptly (ErrCloudUnavailable) instead of
+// hanging it. The blob fetches that follow carry their own CDN-race timeout.
 const cloudTipsTimeout = 5 * time.Second
 
+// ErrCloudUnavailable marks a read that could not be answered because the
+// Cloud consult failed or returned a frontier we could not fully fetch. It
+// must surface to the client as an error, never as a miss: Cloud provably
+// holds data for the key, so answering "no such key" would be
+// indistinguishable from data loss.
+var ErrCloudUnavailable = errors.New("cloud unavailable")
+
 // hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
-// for key's tip frontier and installs the reachable tips into the index (pulling
-// blobs via FetchFromAny → CDN), so a subsequent reconstruct finds the key
-// locally and the cluster owns it thereafter. installed reports whether at least
-// one tip landed in the index; consulted reports whether Cloud gave a complete
+// for key's tip frontier and installs it into the index (pulling blobs via
+// FetchFromAny → CDN), so a subsequent reconstruct finds the key locally and
+// the cluster owns it thereafter. installed reports whether the frontier
+// landed in the index; consulted reports whether Cloud gave a complete
 // answer — including "holds nothing" — so GetSnapshot can mark the leaf as
-// authoritative and stop re-consulting for a key whose state reduces to nil. A
-// transport error or a partially-unreachable frontier is NOT consulted: the next
-// read retries. Errors are logged, never surfaced — Cloud being unavailable must
-// not fail an otherwise-valid read.
-func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool) {
+// authoritative and stop re-consulting for a key whose state reduces to nil.
+//
+// A transport error, a timeout, or a partially-unreachable frontier returns
+// ErrCloudUnavailable — the read fails rather than fabricating a miss (or,
+// worse, a subset of the frontier posing as the whole state). The install is
+// all-or-nothing for the same reason: installing the reachable subset would
+// let the NEXT read reconstruct partial state locally and skip the consult
+// entirely. The leaf stays unconsulted on failure, so a later read retries.
+func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err error) {
 	if e.cloudReader == nil {
-		return false, false
+		return false, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
 	defer cancel()
 	tips, closure, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
-		slog.Warn("cloud read-miss backstop: get tips failed; free-missing", "key", key, "error", err)
-		return false, false
+		slog.Warn("cloud read-miss backstop: get tips failed; failing read", "key", key, "error", err)
+		return false, false, fmt.Errorf("%w: get tips for %q: %w", ErrCloudUnavailable, key, err)
 	}
 	if len(tips) == 0 {
-		return false, true // Cloud holds nothing either: an authoritative miss.
+		return false, true, nil // Cloud holds nothing either: an authoritative miss.
 	}
+	if err := e.InstallCloudTips(key, tips, closure); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+// InstallCloudTips validates and installs a Cloud-provided tip frontier for
+// key, merging it with whatever the index already holds (the DAG reduces the
+// union; a tip that is an ancestor of an existing tip is redundant but
+// harmless — the next write consumes and collapses it). Besides the read-miss
+// rehydrate it serves the cloud-sync reconcile path: a read served from the
+// outbox during a Cloud outage installs the missed Cloud frontier here once
+// Cloud answers again.
+//
+// The install is all-or-nothing: the whole frontier is walk-validated (blobs
+// pulled via FetchFromAny → CDN) before any tip lands in the index. Installing
+// the reachable subset would let a subsequent read reconstruct partial state
+// as if it were the whole answer. Unlike retryBootstrap's walkAndInstall,
+// which is deliberately progressive.
+func (e *Engine) InstallCloudTips(key string, tips, closure []Tip) error {
 	// Warm the cache with Cloud's advisory closure in one parallel fan-out so
 	// the walk below runs locally instead of one WAN fetch per dep (n+1).
 	e.prefetchEffects(closure)
-	n, skipped := e.walkAndInstall(key, tips)
-	if skipped > 0 {
-		slog.Debug("hydrateFromCloud: some cloud tips unreachable",
-			"key", key, "installed", n, "skipped", skipped)
+	for _, tip := range tips {
+		rd := newDag(e, key, "")
+		if walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil }); walkErr != nil {
+			slog.Warn("cloud tip install: tip unreachable; installing nothing",
+				"key", key, "tip", tip, "error", walkErr)
+			return fmt.Errorf("%w: tip %v unreachable for %q: %w",
+				ErrCloudUnavailable, tip, key, walkErr)
+		}
 	}
-	return n > 0, skipped == 0
+	for _, tip := range tips {
+		e.updateIndex(key, nil, tip)
+	}
+	return nil
 }
 
 // fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.

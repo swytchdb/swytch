@@ -22,6 +22,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,6 +58,16 @@ const (
 	// cloudDrainTimeout bounds how long a graceful Stop waits for the outbox
 	// to be acked before abandoning it.
 	cloudDrainTimeout = 5 * time.Second
+	// cloudReconcileRetry paces the retry loop that re-consults GetTips for
+	// keys whose read was served from the outbox during a cloud outage.
+	cloudReconcileRetry = 15 * time.Second
+	// cloudReconcileBatch bounds keys per reconcile GetTips call. One RPC per
+	// key melted down for real: a proxy request-per-connection budget was
+	// spent on reconcile churn, GOAWAYing everything else on the connection.
+	cloudReconcileBatch = 256
+	// cloudReconcileTipsTimeout bounds one reconcile GetTips round-trip. Per
+	// batch, so it's generous: the server walks a closure per key.
+	cloudReconcileTipsTimeout = 30 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
 )
@@ -82,11 +93,18 @@ type CloudSync struct {
 	keyNameKey []byte
 	authKey    []byte
 
-	target     string
-	conn       *grpc.ClientConn
-	client     dp.DataPlaneClient
-	folder     string // opaque CDN path segment, CloudFolder(authKey)
-	httpClient *http.Client
+	target string
+	conn   *grpc.ClientConn
+	client dp.DataPlaneClient
+	// streamConn carries ONLY the WriteEffects stream. Unary traffic (GetTips)
+	// stays on cs.conn: a proxy that budgets requests per connection (nginx
+	// answers the ~1000th HTTP/2 request with GOAWAY) must never count unary
+	// churn against the connection holding the long-lived upload stream —
+	// that coupling killed the stream every ~30s and the outbox never drained.
+	streamConn   *grpc.ClientConn
+	streamClient dp.DataPlaneClient
+	folder       string // opaque CDN path segment, CloudFolder(authKey)
+	httpClient   *http.Client
 
 	mu      sync.Mutex
 	pending map[effects.Tip]*pb.Effect // un-acked mints; the held pointer keeps the effect reachable even if its pool ref is consumed
@@ -98,6 +116,11 @@ type CloudSync struct {
 	pendingKeys map[string]map[effects.Tip]struct{}
 	sendQ       []effects.Tip
 	relayQ      []*dp.Effect // fetch-request replies, already enveloped
+	// reconcile holds keys whose read was answered from the outbox while
+	// GetTips was failing. The cloud may hold tips for them we've never seen
+	// (another node's uploads); reconcileLoop re-consults until the cloud
+	// answers and the missed frontier is merged into the DAG.
+	reconcile map[string]struct{}
 
 	// Cloud-pushed key-name filter gating the read-miss consult (CloudTips).
 	// filterBulk is replaced wholesale per KeyFilter frame; filterOwn is
@@ -136,15 +159,23 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		pending:     make(map[effects.Tip]*pb.Effect),
 		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		reconcile:   make(map[string]struct{}),
 		wake:        make(chan struct{}, 1),
 	}
-	conn, err := grpc.NewClient(cs.target,
-		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13})))
+	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13})
+	conn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, fmt.Errorf("cloud sync: dial %s: %w", cs.target, err)
 	}
+	streamConn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		err = errors.Join(err, conn.Close())
+		return nil, fmt.Errorf("cloud sync: dial %s (stream): %w", cs.target, err)
+	}
 	cs.conn = conn
 	cs.client = dp.NewDataPlaneClient(conn)
+	cs.streamConn = streamConn
+	cs.streamClient = dp.NewDataPlaneClient(streamConn)
 	return cs, nil
 }
 
@@ -152,8 +183,9 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 func (cs *CloudSync) Start() error {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	cs.engine.OnLocalEffect = cs.handleLocalEffect
-	cs.wg.Add(1)
+	cs.wg.Add(2)
 	go cs.run()
+	go cs.reconcileLoop()
 	return nil
 }
 
@@ -171,9 +203,11 @@ func (cs *CloudSync) Stop() {
 		cs.cancel()
 	}
 	cs.wg.Wait()
-	if cs.conn != nil {
-		if err := cs.conn.Close(); err != nil {
-			slog.Warn("cloud sync: close connection", "error", err)
+	for _, conn := range []*grpc.ClientConn{cs.conn, cs.streamConn} {
+		if conn != nil {
+			if err := conn.Close(); err != nil {
+				slog.Warn("cloud sync: close connection", "error", err)
+			}
 		}
 	}
 }
@@ -324,7 +358,7 @@ func (cs *CloudSync) run() {
 // retired some), then interleave sends with the reader's acks and
 // fetch-requests until the stream breaks or we shut down.
 func (cs *CloudSync) runStream() error {
-	stream, err := cs.client.WriteEffects(cs.ctx)
+	stream, err := cs.streamClient.WriteEffects(cs.ctx)
 	if err != nil {
 		return err
 	}
@@ -632,7 +666,13 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 	if err != nil {
 		if len(tips) > 0 {
 			// Cloud unreachable, but the outbox holds the key's un-acked
-			// frontier locally — serve it rather than failing the read.
+			// frontier locally — serve our own writes rather than failing
+			// the read. The answer is incomplete (the cloud may hold tips
+			// we've never seen), so the key is marked for reconcile:
+			// reconcileLoop re-consults until the cloud answers and merges
+			// the missed frontier into the DAG.
+			slog.Warn("cloud sync: get tips failed, serving outbox frontier", "key", key, "error", err)
+			cs.markReconcile(key)
 			return tips, nil, nil
 		}
 		return nil, nil, fmt.Errorf("cloud get tips: %w", err)
@@ -655,6 +695,108 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 		}
 	}
 	return tips, closure, nil
+}
+
+// markReconcile records a key whose read was served outbox-only during a
+// cloud outage, pending a re-consult once the cloud answers again. The
+// caller logs the failure; this just tracks it.
+func (cs *CloudSync) markReconcile(key string) {
+	cs.mu.Lock()
+	cs.reconcile[key] = struct{}{}
+	cs.mu.Unlock()
+}
+
+// reconcileKeys snapshots the pending reconcile set.
+func (cs *CloudSync) reconcileKeys() []string {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if len(cs.reconcile) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(cs.reconcile))
+	for k := range cs.reconcile {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func (cs *CloudSync) clearReconcile(key string) {
+	cs.mu.Lock()
+	delete(cs.reconcile, key)
+	cs.mu.Unlock()
+}
+
+// reconcileLoop drives eventual convergence for keys whose reads were served
+// from the outbox while GetTips was failing: once you've answered a read from
+// your own un-acked writes, you owe the DAG whatever the cloud held that you
+// couldn't see. Each tick re-consults every pending key in GetTips batches; a
+// key stays pending until the cloud gives a complete answer and its frontier
+// installs cleanly.
+func (cs *CloudSync) reconcileLoop() {
+	defer cs.wg.Done()
+	ticker := time.NewTicker(cloudReconcileRetry)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cs.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		keys := cs.reconcileKeys()
+		for start := 0; start < len(keys); start += cloudReconcileBatch {
+			if cs.ctx.Err() != nil {
+				return
+			}
+			end := min(start+cloudReconcileBatch, len(keys))
+			cs.reconcileBatch(keys[start:end])
+		}
+	}
+}
+
+// reconcileBatch re-consults GetTips for a batch of keys in one RPC and merges
+// each returned frontier into the DAG. A key is cleared from the pending set
+// only when the cloud gave a complete answer for it and any frontier installed
+// cleanly; anything else leaves it pending for the next tick. The whole RPC
+// failing (cloud still unreachable) clears nothing.
+func (cs *CloudSync) reconcileBatch(keys []string) {
+	names := make([][]byte, len(keys))
+	byName := make(map[string]string, len(keys))
+	for i, key := range keys {
+		name := CloudKeyName(cs.keyNameKey, []byte(key))
+		names[i] = name
+		byName[string(name)] = key
+	}
+
+	ctx, cancel := context.WithTimeout(cs.ctx, cloudReconcileTipsTimeout)
+	defer cancel()
+	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{AuthKey: cs.authKey, Keys: names})
+	if err != nil {
+		return // cloud still down; keep every key pending
+	}
+
+	for _, kt := range resp.GetKeys() {
+		key, ok := byName[string(kt.GetKey())]
+		if !ok {
+			continue
+		}
+		var tips, closure []effects.Tip
+		for _, ref := range kt.GetTips() {
+			tips = append(tips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+		for _, ref := range kt.GetClosure() {
+			closure = append(closure, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+		if len(tips) == 0 {
+			cs.clearReconcile(key) // the cloud holds nothing we haven't already served
+			continue
+		}
+		if err := cs.engine.InstallCloudTips(key, tips, closure); err != nil {
+			slog.Warn("cloud reconcile: install failed; will retry", "key", key, "error", err)
+			continue
+		}
+		slog.Info("cloud reconcile: merged cloud frontier", "key", key, "tips", len(tips))
+		cs.clearReconcile(key)
+	}
 }
 
 // topoOrder sorts a fetched sub-DAG deps-before-dependents (Kahn). The walk's

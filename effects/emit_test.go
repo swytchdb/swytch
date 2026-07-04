@@ -488,8 +488,11 @@ func TestAbortClearsWatchedKeys(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k1")
-	ctx.Watch("k2")
+	for _, k := range []string{"k1", "k2"} {
+		if err := ctx.Watch(k); err != nil {
+			t.Fatalf("Watch(%q): %v", k, err)
+		}
+	}
 
 	if len(ctx.watchedKeys) != 2 {
 		t.Fatalf("expected 2 watchedKeys before Abort, got %d", len(ctx.watchedKeys))
@@ -507,7 +510,9 @@ func TestAbortClearsWatchedKeysWithoutTx(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k")
+	if err := ctx.Watch("k"); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
 
 	if len(ctx.watchedKeys) != 1 {
 		t.Fatalf("expected 1 watchedKey before Abort, got %d", len(ctx.watchedKeys))
@@ -525,7 +530,9 @@ func TestAbortAllowsCleanReuse(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k")
+	if err := ctx.Watch("k"); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
 	ctx.BeginTx()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
 		t.Fatal(err)

@@ -398,7 +398,11 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 // pairwise fork-choice on the key. Without the TxnId, the noop is an
 // anonymous committed effect that other writers can chain off,
 // producing false sequential relationships (the run-25890153673 G1a).
-func (c *Context) Watch(key string) {
+//
+// Errors fail the WATCH: a read that can't be answered (e.g. the Cloud
+// consult failed for an evicted key) must not silently record hadData=false —
+// the EXEC verdict would then rest on a fabricated observation.
+func (c *Context) Watch(key string) error {
 	if c.watchedKeys == nil {
 		c.watchedKeys = make(map[string]*watchedKeyState)
 	}
@@ -410,7 +414,10 @@ func (c *Context) Watch(key string) {
 	}
 
 	// Check if key has actual data BEFORE emitting the NOOP
-	snap, _, _, _ := c.engine.GetSnapshot(key)
+	snap, _, _, err := c.engine.GetSnapshot(key)
+	if err != nil {
+		return err
+	}
 	hadData := snap != nil
 
 	// Emit NOOP to record the observation in the causal log. We set
@@ -423,7 +430,7 @@ func (c *Context) Watch(key string) {
 		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 	}); err != nil {
 		slog.Error("Watch: NOOP emit failed", "key", key, "error", err)
-		return
+		return err
 	}
 
 	// Capture the NOOP offset before Flush clears c.keys
@@ -431,7 +438,9 @@ func (c *Context) Watch(key string) {
 
 	// Flush immediately so the NOOP is durable and in the index.
 	// ExecuteInto's post-handler Flush will be a no-op (c.keys empty).
-	c.Flush()
+	if err := c.Flush(); err != nil {
+		return err
+	}
 
 	// Capture the post-flush TipSet pointer (immutable — pointer identity = equality)
 	tips := c.engine.index.Contains(key)
@@ -441,6 +450,7 @@ func (c *Context) Watch(key string) {
 		hadData:    hadData,
 		flushGen:   c.engine.flushGeneration.Load(),
 	}
+	return nil
 }
 
 // ClearWatches removes all watched keys. Called from UNWATCH, DISCARD,

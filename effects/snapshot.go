@@ -314,7 +314,13 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
 		ls, _ := e.index.LoadOrStoreData(key, &leafState{})
 		if ls == nil || !ls.cloudConsulted.Load() {
-			installed, consulted := e.hydrateFromCloud(key)
+			installed, consulted, hydrateErr := e.hydrateFromCloud(key)
+			if hydrateErr != nil {
+				// Cloud may hold this key and we couldn't get a complete
+				// answer: the read fails (client retries) rather than
+				// fabricating a miss for data that exists.
+				return nil, nil, 0, hydrateErr
+			}
 			if installed {
 				result, tips, chainLen = e.reconstructLocal(key)
 			}

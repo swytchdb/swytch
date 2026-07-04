@@ -2387,7 +2387,11 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		}
 
 		// Verify the stream ID exists in the stream
-		snap, _, _ := cmd.Context.GetSnapshot(key)
+		snap, _, err := cmd.Context.GetSnapshot(key)
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
 		entries := snapshotToEntries(snap)
 		found := false
 		for _, e := range entries {

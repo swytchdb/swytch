@@ -930,7 +930,12 @@ func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *share
 	// Register each key on the effects context for optimistic locking.
 	// BeginTx (called at EXEC time) will emit NOOPs to establish causal deps.
 	for _, keyArg := range cmd.Args {
-		cmd.Context.Watch(string(keyArg))
+		if err := cmd.Context.Watch(string(keyArg)); err != nil {
+			// A half-watched key set is unusable for EXEC's verdict.
+			cmd.Context.ClearWatches()
+			w.WriteError(err.Error())
+			return
+		}
 	}
 
 	w.WriteOK()
@@ -1201,7 +1206,13 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 		// Set up WATCH keys if present
 		if conn.EffectsCtx != nil {
 			for _, wk := range tx.WatchedKeys {
-				conn.EffectsCtx.Watch(string(wk))
+				if err := conn.EffectsCtx.Watch(string(wk)); err != nil {
+					// A half-watched key set is unusable for EXEC's verdict —
+					// fail the forwarded transaction back to the origin node.
+					conn.ResetTransaction()
+					conn.EffectsCtx.ClearWatches()
+					return &pb.ForwardedResponse{Error: true, ErrorMessage: err.Error()}
+				}
 			}
 		}
 
