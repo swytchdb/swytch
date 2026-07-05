@@ -509,7 +509,13 @@ func (c *Critbit[T]) sweepLeaves(base int, fn func(*critNode[T])) {
 		idx := (hand + i) % total
 		chunk := chunks[idx/chunkSize]
 		if chunk == nil {
-			continue // chunk was reclaimed (all its leaves died)
+			// Chunk was reclaimed and not recycled. Jump the hand to the next
+			// chunk boundary in one step — paying one iteration per dead slot
+			// made the sweep O(high-water mark) on a churned arena, and the
+			// sweep runs under the reap read-lock with evictMu held, so every
+			// wasted iteration is serialized against writers.
+			i += chunkSize - 1 - idx%chunkSize
+			continue
 		}
 		n := &chunk[idx%chunkSize]
 		if n.deleted.Load() {

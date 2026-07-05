@@ -758,7 +758,7 @@ func (c *Context) Flush() error {
 	// already pooled during Emit, so a command that wrote N effects (e.g. value +
 	// type-tag, or a read that also compacted) pays a single bounded eviction
 	// slice here instead of N. The drain itself is cheap — it drops victim tips and
-	// defers their ref-release walk to the governor (see Engine.releaseQueue).
+	// defers their ref-release walk to the governor (see Engine.releaseItems).
 	var err error
 	if !c.inTx {
 		err = c.flushNonTx()

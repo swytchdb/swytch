@@ -369,7 +369,7 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 		case <-ticker.C:
 			// 1. Drain any budget the write path didn't (idle / low write rate), so
 			//    a quiet node still converges to target. Each eviction only drops the
-			//    victim's tip and queues its ref-release walk (releaseQueue) — the
+			//    victim's tip and queues its ref-release walk (releaseItems) — the
 			//    walk runs in step 2, off the latency path.
 			e.drainEvictBudget(maxDrainPerTick)
 			// 2. Reclaim: first run the deferred ref-release walks for every key
@@ -455,22 +455,40 @@ func (e *Engine) drainEvictBudget(maxKeys int) {
 	// write-path drain.
 }
 
+// ReleaseQueueDepth returns the number of cold-evicted keys whose deferred
+// ref-release walk has not yet run. Each pending entry pins its key's cached
+// subdag and resident effect chain, so a persistently deep queue means the
+// governor's reclaim pass is falling behind eviction and live heap will read
+// high for memory eviction can't actually free yet.
+func (e *Engine) ReleaseQueueDepth() int {
+	e.releaseMu.Lock()
+	n := len(e.releaseItems)
+	e.releaseMu.Unlock()
+	return n
+}
+
 // drainPendingReleases runs the deferred creation-ref chain walks
 // (releaseChainRefs) for keys cold-evicted since the last call. Single-consumer:
-// only reclaimUnreferenced (on the governor goroutine) calls it. It dequeues
-// exactly releasePending entries — the count enqueued so far — so the blocking
-// UMPSCQueue.Dequeue never waits on an empty queue; entries enqueued concurrently
-// after the Swap are counted into the next drain.
+// only reclaimUnreferenced (on the governor goroutine) calls it. It swaps the
+// buffer out under the lock (entries enqueued during the walks land in the
+// spare and are drained next call), then zeroes every processed slot before
+// reusing the buffer — an evictedKey's leafState pins the key's whole cached
+// subdag → effect → payload chain, so a drained-but-unzeroed slot would keep
+// gigabytes of evicted state GC-reachable.
 func (e *Engine) drainPendingReleases() {
-	n := e.releasePending.Swap(0)
-	if n == 0 {
+	e.releaseMu.Lock()
+	batch := e.releaseItems
+	e.releaseItems = e.releaseSpare[:0]
+	e.releaseMu.Unlock()
+	if len(batch) == 0 {
+		e.releaseSpare = batch
 		return
 	}
-	q := e.releaseQueue.Load() // non-nil: pending>0 means onLeafEvicted ran releaseQ
-	for ; n > 0; n-- {
-		ek := q.Dequeue()
+	for _, ek := range batch {
 		e.releaseChainRefs(ek.key, ek.tips, ek.ls)
 	}
+	clear(batch)
+	e.releaseSpare = batch[:0]
 }
 
 // reclaimUnreferenced drops every pool vertex whose refcount is zero: it is held
@@ -480,7 +498,7 @@ func (e *Engine) drainPendingReleases() {
 // re-fetches on the rare miss). The maintained refcount is the membership oracle,
 // so reclamation needs no per-key DAG walk.
 //
-// It first drains releaseQueue — the deferred creation-ref chain walks for keys
+// It first drains releaseItems — the deferred creation-ref chain walks for keys
 // cold-evicted since the last call — so an evicted key's chain drops to refs==0
 // in this same pass and frees here, the work having moved off the eviction
 // latency path. System-key effects are pinned defensively.

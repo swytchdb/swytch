@@ -151,9 +151,11 @@ type Critbit[T any] struct {
 	// between roles (isLeaf is set at alloc and never flipped), so a node born in
 	// one arena dies there. Splitting them lets the eviction sweep scan only the
 	// leaf arena (dense, no internal-node skipping) and lets the sweep reclaim a
-	// whole leaf chunk once every slot in it is dead. Append-only: individual
-	// slots are not reused (that would require synchronizing every lock-free
-	// reader against reinitialization); reclamation is at chunk granularity.
+	// whole leaf chunk once every slot in it is dead. Individual slots are never
+	// reused in place (that would require synchronizing every lock-free reader
+	// against reinitialization); reclamation is at chunk granularity, and a
+	// reclaimed chunk's slot range is recycled through a fresh, never-published
+	// array via the arena free list (see dropChunk).
 	leafArena     critbitArena[critNode[T]]
 	internalArena critbitArena[critNode[T]]
 
@@ -171,15 +173,25 @@ func NewCritbit[T any]() *Critbit[T] {
 	return c
 }
 
+// freeSlotCapacity bounds the per-arena recycled-slot free list. Recycling that
+// would overflow it falls back to dropping the dead chunk to nil (the old
+// behavior), so this only caps how much eviction churn the allocator can buffer,
+// never correctness. 64Ki slots ≈ 32 chunks.
+const freeSlotCapacity = 1 << 16
+
 // arenaChunkList holds an immutable snapshot of the chunk slice plus, per chunk,
-// a count of how many of its nodes have been unlinked (reaped). Swapped
-// atomically so readers never see a partially-grown slice. A dropped chunk is
-// left as a nil entry (indices stay stable; the monotonic next never revisits
-// it), so GC reclaims it once no stale reader still points into it. reaped
-// entries are *atomic.Int64 so the copy-on-write swap shares the live counters.
+// a count of how many of its nodes have been unlinked (reaped) and how many of
+// its slots are still waiting in the free list (outstanding). Swapped atomically
+// so readers never see a partially-grown slice. A fully-reaped chunk is either
+// recycled — replaced with a fresh empty chunk whose slots return to the free
+// list — or, if the free list is saturated, dropped to a nil entry (indices stay
+// stable; GC reclaims the old array once no stale reader still points into it).
+// reaped/outstanding entries are *atomic.Int64 so the copy-on-write swap shares
+// the live counters.
 type arenaChunkList[T any] struct {
-	chunks [][]T
-	reaped []*atomic.Int64
+	chunks      [][]T
+	reaped      []*atomic.Int64
+	outstanding []*atomic.Int64
 }
 
 type critbitArena[T any] struct {
@@ -187,6 +199,19 @@ type critbitArena[T any] struct {
 	chunkSize uint64
 	growMu    sync.Mutex // only held when allocating a new chunk (every chunkSize allocs)
 	list      atomic.Pointer[arenaChunkList[T]]
+	// freeList recycles the slots of fully-reaped chunks so the arena's footprint
+	// tracks the live working set instead of the all-time high-water mark — without
+	// it, monotonic next climbs forever under key churn and the eviction sweep
+	// walks an ever-larger arena of dead slots. It holds reusable slot indices;
+	// alloc drains it before bumping next. freeCount mirrors its occupancy (it has
+	// no Size) so dropChunk can pre-check room for a whole chunk before committing
+	// a recycle. MPMC: many allocators dequeue, dropChunk enqueues under growMu.
+	// Reuse is safe because recycling installs a brand-new chunk array — its slots
+	// have never been published, so no lock-free reader can hold a pointer into
+	// them, while the dead array goes to GC exactly as the nil path does.
+	freeList  *xsync.MPMCQueue[uint64]
+	freeCount atomic.Int64
+	freeCap   uint64
 	// initNode, if set, runs on every node of a freshly-grown chunk before that
 	// chunk is published in list. The leaf arena uses it to stamp deleted=true on
 	// every slot, so the eviction sweep (which scans the arena directly) skips a
@@ -200,6 +225,8 @@ func (a *critbitArena[T]) init(chunkSize int, initNode func(*T)) {
 	}
 	a.chunkSize = uint64(chunkSize)
 	a.initNode = initNode
+	a.freeCap = freeSlotCapacity
+	a.freeList = xsync.NewMPMCQueue[uint64](freeSlotCapacity)
 	a.list.Store(&arenaChunkList[T]{})
 }
 
@@ -211,7 +238,22 @@ func (a *critbitArena[T]) chunkSnapshot() ([][]T, uint64) {
 }
 
 func (a *critbitArena[T]) alloc() (*T, uint32) {
-	// Fast path: atomically claim a slot index. No lock needed.
+	// Reuse a recycled slot first, so the arena's footprint tracks live keys
+	// rather than the all-time high-water mark. A recycled index points into a
+	// fresh chunk dropChunk installed (and published in list before enqueuing the
+	// index), so the load below sees it. Every allocator holds the trie's reap
+	// lock (read or write) from claim through publish, so a compaction pass —
+	// which skips chunks with outstanding recycled slots — can never evacuate the
+	// chunk out from under a half-initialized slot.
+	if idx, ok := a.freeList.TryDequeue(); ok {
+		a.freeCount.Add(-1)
+		chunkIdx := idx / a.chunkSize
+		list := a.list.Load()
+		list.outstanding[chunkIdx].Add(-1)
+		return &list.chunks[chunkIdx][idx%a.chunkSize], uint32(chunkIdx)
+	}
+
+	// Fast path: atomically claim a fresh slot index. No lock needed.
 	idx := a.next.Add(1) - 1
 	chunkIdx := idx / a.chunkSize
 	offset := idx % a.chunkSize
@@ -246,11 +288,25 @@ func (a *critbitArena[T]) recordReaped(chunkIdx uint32) {
 	}
 }
 
-// dropChunk removes a fully-unlinked chunk from the arena (a nil placeholder
-// keeps later indices stable). No node in it is reachable, so dropping the
-// arena's reference lets GC reclaim it once any stale lock-free reader releases
-// its own node pointer. next never revisits the chunk (it is monotonic and the
-// chunk was fully allocated before it could be fully reaped).
+// dropChunk handles a fully-unlinked chunk. The dead array is always released to
+// GC (it is no longer referenced by list once we swap), so a stale lock-free
+// reader still pointing into it stays valid until it drops its own pointer.
+//
+// When the free list has room for a whole chunk, it RECYCLES: a fresh empty chunk
+// takes the slot's place and its pristine slots return to the free list for
+// reuse, so the arena stops growing under churn. The fresh array's slots have
+// never been published, so no reader can be mid-read on them — reuse is safe. The
+// reaped counter is reset for the new generation, and outstanding is armed so
+// compaction skips the chunk until every recycled slot has been re-allocated.
+// Otherwise it falls back to the old behavior: a nil placeholder (indices stay
+// stable; monotonic next never revisits a nil'd chunk).
+//
+// Its sole caller is recordReaped's counter hitting chunkSize — every drop is
+// counter-driven, and per-slot at-most-once accounting means it fires exactly
+// once per chunk generation. growMu serializes concurrent drops of different
+// chunks, so the free list has a single logical enqueuer and the room pre-check
+// below guarantees every TryEnqueue succeeds (freeCount is decremented by
+// allocators only after removal, so it never understates occupancy).
 func (a *critbitArena[T]) dropChunk(chunkIdx uint32) {
 	a.growMu.Lock()
 	defer a.growMu.Unlock()
@@ -260,8 +316,30 @@ func (a *critbitArena[T]) dropChunk(chunkIdx uint32) {
 	}
 	newChunks := make([][]T, len(list.chunks))
 	copy(newChunks, list.chunks)
+
+	if a.freeCount.Load()+int64(a.chunkSize) <= int64(a.freeCap) {
+		fresh := make([]T, a.chunkSize)
+		if a.initNode != nil {
+			for i := range fresh {
+				a.initNode(&fresh[i])
+			}
+		}
+		newChunks[chunkIdx] = fresh
+		list.reaped[chunkIdx].Store(0) // fresh generation: nothing reaped yet
+		list.outstanding[chunkIdx].Store(int64(a.chunkSize))
+		// Publish the fresh chunk before its slots become reachable via the free
+		// list, so a concurrent alloc that dequeues an index sees the new array.
+		a.list.Store(&arenaChunkList[T]{chunks: newChunks, reaped: list.reaped, outstanding: list.outstanding})
+		base := uint64(chunkIdx) * a.chunkSize
+		for i := uint64(0); i < a.chunkSize; i++ {
+			a.freeList.TryEnqueue(base + i) // room pre-checked: cannot fail
+		}
+		a.freeCount.Add(int64(a.chunkSize))
+		return
+	}
+
 	newChunks[chunkIdx] = nil
-	a.list.Store(&arenaChunkList[T]{chunks: newChunks, reaped: list.reaped})
+	a.list.Store(&arenaChunkList[T]{chunks: newChunks, reaped: list.reaped, outstanding: list.outstanding})
 }
 
 func (a *critbitArena[T]) grow(needed uint64) {
@@ -282,7 +360,10 @@ func (a *critbitArena[T]) grow(needed uint64) {
 		newReaped := make([]*atomic.Int64, len(list.reaped)+1)
 		copy(newReaped, list.reaped)
 		newReaped[len(list.reaped)] = &atomic.Int64{}
-		list = &arenaChunkList[T]{chunks: newChunks, reaped: newReaped}
+		newOutstanding := make([]*atomic.Int64, len(list.outstanding)+1)
+		copy(newOutstanding, list.outstanding)
+		newOutstanding[len(list.outstanding)] = &atomic.Int64{}
+		list = &arenaChunkList[T]{chunks: newChunks, reaped: newReaped, outstanding: newOutstanding}
 		a.list.Store(list)
 	}
 }
@@ -291,6 +372,17 @@ func (a *critbitArena[T]) clear() {
 	a.growMu.Lock()
 	a.list.Store(&arenaChunkList[T]{})
 	a.next.Store(0)
+	// Drain stale recycled indices: they point into chunks the reset just dropped,
+	// so a later alloc must not hand them out. clear assumes no concurrent alloc
+	// (same as the list/next reset above).
+	if a.freeList != nil {
+		for {
+			if _, ok := a.freeList.TryDequeue(); !ok {
+				break
+			}
+		}
+		a.freeCount.Store(0)
+	}
 	a.growMu.Unlock()
 }
 

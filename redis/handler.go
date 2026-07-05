@@ -261,12 +261,14 @@ func (h *Handler) GetCacheBytes() int64 {
 	return h.engine.EffectCache().Bytes()
 }
 
-// GetItemCount returns the number of effects resident in the vertex pool.
+// GetItemCount returns the number of keys resident in the index — the set
+// eviction operates on. Distinct from GetVertexCount: a key's chain holds one
+// or more effects in the vertex pool.
 func (h *Handler) GetItemCount() int {
 	if h.engine == nil {
 		return 0
 	}
-	return h.engine.EffectCache().EntryCount()
+	return int(h.engine.KeyCount())
 }
 
 // GetArenaBytes returns the critbit index's slot-array footprint (trie
@@ -284,6 +286,15 @@ func (h *Handler) GetVertexCount() int {
 		return 0
 	}
 	return h.engine.VertexCount()
+}
+
+// GetReleaseQueueDepth returns the number of cold-evicted keys whose deferred
+// ref-release walk has not yet run.
+func (h *Handler) GetReleaseQueueDepth() int {
+	if h.engine == nil {
+		return 0
+	}
+	return h.engine.ReleaseQueueDepth()
 }
 
 // GetCacheEvictions returns the number of keys evicted under memory pressure by

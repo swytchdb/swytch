@@ -198,9 +198,11 @@ func TestReap_QueueDrainUnlinks(t *testing.T) {
 }
 
 // TestChunkReclaim_DropsFullyDeadChunk verifies that once every leaf in an arena
-// chunk has been deleted and reaped, the chunk is dropped from the arena (a nil
-// placeholder), while leaves in other chunks survive. Single-threaded, so leaf
-// allocation is sequential: the first chunkSize distinct keys land in leaf chunk 0.
+// chunk has been deleted and reaped, the chunk is reclaimed: a fresh array takes
+// its place and its slot range goes to the free list, so a subsequent insert
+// reuses a recycled slot instead of growing the arena. Leaves in other chunks
+// survive. Single-threaded, so leaf allocation is sequential: the first
+// chunkSize distinct keys land in leaf chunk 0.
 func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	const extra = 500
@@ -225,19 +227,39 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 	for c.reap() > 0 {
 	}
 
-	if chunks := c.leafArena.list.Load().chunks; chunks[0] != nil {
-		t.Fatalf("leaf chunk 0 should be reclaimed (nil) after all its leaves died; still present")
+	// Chunk 0 was recycled: a fresh array is in place and every one of its slots
+	// waits on the free list.
+	list := c.leafArena.list.Load()
+	if list.chunks[0] == nil {
+		t.Fatal("leaf chunk 0 was nil-dropped; the free list had room, so it should have been recycled")
+	}
+	if got := list.outstanding[0].Load(); got != int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("chunk 0 outstanding = %d; want %d (all recycled slots unallocated)",
+			got, defaultCritbitArenaChunkSize)
+	}
+	if got := c.leafArena.freeCount.Load(); got != int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("leaf free list holds %d slots; want %d", got, defaultCritbitArenaChunkSize)
+	}
+
+	// A new insert must reuse a recycled slot, not grow the monotonic tail.
+	nextBefore := c.leafArena.next.Load()
+	c.Insert("fresh-after-reclaim", nil, NewTipSet(tip(9999)))
+	if got := c.leafArena.next.Load(); got != nextBefore {
+		t.Fatalf("insert after reclaim grew the arena tail (%d -> %d); want a recycled slot", nextBefore, got)
+	}
+	if c.Contains("fresh-after-reclaim") == nil {
+		t.Fatal("key inserted into a recycled slot is unreadable")
 	}
 
 	// Survivors (chunk 1+) must remain readable, and the sweep must tolerate the
-	// reclaimed chunk.
+	// recycled chunk.
 	for i := defaultCritbitArenaChunkSize; i < n; i++ {
 		if c.Contains(keys[i]) == nil {
 			t.Fatalf("surviving key %s missing after chunk reclaim", keys[i])
 		}
 	}
 	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
-	c.EvictBounded(64) // must not panic on the nil chunk
+	c.EvictBounded(64) // must not panic on the recycled chunk
 }
 
 // TestEvictBounded_GhostNotReaped verifies the reaper leaves ghost leaves in

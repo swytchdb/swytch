@@ -160,19 +160,25 @@ type Engine struct {
 	// idle/low-write case. Zero means at/under target: writes evict nothing.
 	evictBudget atomic.Int64
 
-	// releaseQueue defers cold-evicted keys' creation-ref chain walk
+	// releaseItems defers cold-evicted keys' creation-ref chain walk
 	// (releaseChainRefs) off the eviction hot path. EvictBatch drops the victim's
 	// tip synchronously (the act that bounds memory) and enqueues the key here;
 	// the expensive resident-chain walk that releases its refs is bookkeeping the
 	// governor drains at the top of each reclaimUnreferenced, then frees the
 	// now-refs-0 vertices in the same pass — so memory frees on the same tick it
-	// would have, with the walk off the write/read latency path. Unbounded MPSC:
-	// many write-path drains enqueue, the single governor consumes. releasePending
-	// counts enqueued-but-undrained entries so the consumer dequeues exactly the
-	// available set (UMPSCQueue.Dequeue blocks on empty, has no Len). Allocated
-	// lazily (releaseQ) on first eviction so every construction site gets it.
-	releaseQueue   atomic.Pointer[xsync.UMPSCQueue[evictedKey]]
-	releasePending atomic.Int64
+	// would have, with the walk off the write/read latency path. Many write-path
+	// drains enqueue, the single governor consumes.
+	//
+	// This is deliberately a mutex+slice pair and NOT xsync's UMPSCQueue: that
+	// queue never zeroes a dequeued slot and pools consumed segments fully
+	// populated, so every evictedKey it ever carried — and the leafState → subdag
+	// → effect-payload chain each one pins — stayed reachable for GC cycles after
+	// being "drained". Under an eviction storm that phantom live set reached
+	// gigabytes and locked the governor permanently over target. The buffers here
+	// are explicitly cleared after every drain (see drainPendingReleases).
+	releaseMu    sync.Mutex
+	releaseItems []evictedKey
+	releaseSpare []evictedKey
 
 	closed atomic.Bool
 
@@ -1991,26 +1997,11 @@ func (e *Engine) prefetchEffects(refs []Tip) {
 // peers reduce us out of the subscriber set. Future reads re-subscribe and
 // bootstrap fresh. The leaf is already soft-deleted by the sweep.
 // evictedKey is a cold-evicted key queued for deferred creation-ref release; see
-// Engine.releaseQueue.
+// Engine.releaseItems.
 type evictedKey struct {
 	key  string
 	tips []Tip
 	ls   *leafState
-}
-
-// releaseQ returns the deferred-release queue, allocating it on first use. The CAS
-// lets concurrent first-evictors converge on a single queue; the loser's queue is
-// dropped (GC'd) and it reloads the winner's. Lazy so no construction site needs
-// to wire it.
-func (e *Engine) releaseQ() *xsync.UMPSCQueue[evictedKey] {
-	if q := e.releaseQueue.Load(); q != nil {
-		return q
-	}
-	q := xsync.NewUMPSCQueue[evictedKey]()
-	if e.releaseQueue.CompareAndSwap(nil, q) {
-		return q
-	}
-	return e.releaseQueue.Load()
 }
 
 func (e *Engine) onLeafEvicted(key string, tips []Tip, ls *leafState) {
@@ -2021,10 +2012,11 @@ func (e *Engine) onLeafEvicted(key string, tips []Tip, ls *leafState) {
 	// Defer the creation-ref chain walk to the governor: EvictBatch already
 	// dropped the tip (the act that frees space), and the walk is bookkeeping that
 	// must not sit on the write/read latency path that triggered this eviction.
-	// The governor drains releaseQueue at the top of reclaimUnreferenced, so the
+	// The governor drains releaseItems at the top of reclaimUnreferenced, so the
 	// vertices still free on the same tick.
-	e.releaseQ().Enqueue(evictedKey{key: key, tips: tips, ls: ls})
-	e.releasePending.Add(1)
+	e.releaseMu.Lock()
+	e.releaseItems = append(e.releaseItems, evictedKey{key: key, tips: tips, ls: ls})
+	e.releaseMu.Unlock()
 
 	// Count the real cold-key eviction here (once per victim) — the bounded
 	// sweep chose this key under memory pressure. Distinct from the vertex

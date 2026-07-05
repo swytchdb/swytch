@@ -120,6 +120,13 @@ func (m *mockBroadcaster) broadcastCount() int {
 	return len(m.broadcasts)
 }
 
+// replicateCount is broadcastCount's counterpart for Replicate/ReplicateTo.
+func (m *mockBroadcaster) replicateCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.replicates)
+}
+
 // waitForBroadcast blocks until at least one async broadcast lands or the
 // deadline passes. The subscription announce is fire-and-forget (go), so its
 // effect is observable only after the goroutine runs.
@@ -326,11 +333,11 @@ func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(bc.replicates) != 0 {
-		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", len(bc.replicates))
-	}
-	if len(bc.broadcasts) == 0 {
-		t.Fatal("key held nowhere: SafeMode should downgrade to async BroadcastWithData")
+	// The downgrade path is fire-and-forget, so observe it through the locked
+	// accessors after the announce goroutine has had a chance to land.
+	waitForBroadcast(t, bc)
+	if got := bc.replicateCount(); got != 0 {
+		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", got)
 	}
 }
 
@@ -411,6 +418,7 @@ func TestFlushTx_SafeMode_RejectsWhenPeersUnreachable(t *testing.T) {
 func TestFlushUnsafeMode(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "k") // pin the broadcast count to the data effect alone
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {

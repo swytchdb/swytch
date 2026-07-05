@@ -46,6 +46,10 @@ type StatsProvider interface {
 	Evictions() uint64
 	Reclaimed() uint64
 	ItemCount() int
+	// ReleaseQueueDepth is the number of cold-evicted keys whose deferred
+	// ref-release walk has not yet run — pending entries pin their key's
+	// resident chain, so depth is memory eviction can't free yet.
+	ReleaseQueueDepth() int
 	MemoryBytes() int64
 	MaxMemoryBytes() int64
 	// ArenaBytes is the critbit index slot-array footprint (trie skeleton);
@@ -99,6 +103,7 @@ type Collector struct {
 	evictionsTotal     *prometheus.Desc
 	reclaimedTotal     *prometheus.Desc
 	itemsCount         *prometheus.Desc
+	releaseQueueDepth  *prometheus.Desc
 	memoryBytes        *prometheus.Desc
 	memoryMaxBytes     *prometheus.Desc
 	arenaBytes         *prometheus.Desc
@@ -178,7 +183,12 @@ func NewCollector(provider StatsProvider) *Collector {
 		),
 		itemsCount: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "items_count"),
-			"Current number of items in cache",
+			"Keys resident in the index (the set eviction operates on; distinct from vertex_count)",
+			nil, nil,
+		),
+		releaseQueueDepth: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "release_queue_depth"),
+			"Cold-evicted keys whose deferred ref-release walk has not yet run; persistently deep means reclaim is falling behind eviction",
 			nil, nil,
 		),
 		memoryBytes: prometheus.NewDesc(
@@ -316,6 +326,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.evictionsTotal
 	ch <- c.reclaimedTotal
 	ch <- c.itemsCount
+	ch <- c.releaseQueueDepth
 	ch <- c.memoryBytes
 	ch <- c.memoryMaxBytes
 	ch <- c.arenaBytes
@@ -368,6 +379,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.evictionsTotal, prometheus.CounterValue, float64(c.provider.Evictions()))
 	ch <- prometheus.MustNewConstMetric(c.reclaimedTotal, prometheus.CounterValue, float64(c.provider.Reclaimed()))
 	ch <- prometheus.MustNewConstMetric(c.itemsCount, prometheus.GaugeValue, float64(c.provider.ItemCount()))
+	ch <- prometheus.MustNewConstMetric(c.releaseQueueDepth, prometheus.GaugeValue, float64(c.provider.ReleaseQueueDepth()))
 	ch <- prometheus.MustNewConstMetric(c.memoryBytes, prometheus.GaugeValue, float64(c.provider.MemoryBytes()))
 	ch <- prometheus.MustNewConstMetric(c.memoryMaxBytes, prometheus.GaugeValue, float64(c.provider.MaxMemoryBytes()))
 	ch <- prometheus.MustNewConstMetric(c.arenaBytes, prometheus.GaugeValue, float64(c.provider.ArenaBytes()))

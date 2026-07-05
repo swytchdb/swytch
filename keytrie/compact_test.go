@@ -38,8 +38,9 @@ func drainAllReaps[T any](c *Critbit[T]) {
 }
 
 // TestCompact_EvacuatesSparseLeafChunk: a chunk pinned by a handful of live
-// leaves is evacuated — survivors relocate with tips and payload intact, the
-// chunk drops, and ArenaBytes shrinks.
+// leaves is evacuated — survivors relocate with tips and payload intact, and
+// the emptied chunk is reclaimed through the counter (recycled: its slot range
+// lands on the free list for reuse).
 func TestCompact_EvacuatesSparseLeafChunk(t *testing.T) {
 	c := NewCritbit[int]()
 	n := defaultCritbitArenaChunkSize + 100 // fill chunk 0, spill into chunk 1
@@ -63,12 +64,19 @@ func TestCompact_EvacuatesSparseLeafChunk(t *testing.T) {
 	}
 	drainAllReaps(c)
 
-	before := c.ArenaBytes()
 	if got := c.compactLeafChunks(16); got < 1 {
-		t.Fatalf("compactLeafChunks dropped %d chunks; want >= 1", got)
+		t.Fatalf("compactLeafChunks evacuated %d chunks; want >= 1", got)
 	}
-	if after := c.ArenaBytes(); after >= before {
-		t.Fatalf("ArenaBytes did not shrink: %d -> %d", before, after)
+	// Evacuation accounted every chunk-0 slot, so the counter fired the drop and
+	// the chunk recycled: its whole slot range is available for reuse.
+	if got := c.leafArena.freeCount.Load(); got != int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("leaf free list holds %d slots after evacuation; want %d", got, defaultCritbitArenaChunkSize)
+	}
+	// New inserts consume recycled slots instead of growing the arena.
+	nextBefore := c.leafArena.next.Load()
+	c.Insert("fresh-after-compact", nil, NewTipSet(tip(8888)))
+	if got := c.leafArena.next.Load(); got != nextBefore {
+		t.Fatalf("insert after compaction grew the arena tail (%d -> %d); want a recycled slot", nextBefore, got)
 	}
 
 	for i, k := range survivors {
@@ -104,7 +112,8 @@ func TestCompact_EvacuatesSparseLeafChunk(t *testing.T) {
 
 // TestCompact_InternalChunksFollowLeaves: after a mass delete the internal
 // arena is as sparse as the leaf arena; the internal pass relocates the few
-// linked internals and drops the chunk, leaving the tree fully readable.
+// linked internals, the emptied chunk recycles through the counter, and the
+// tree stays fully readable.
 func TestCompact_InternalChunksFollowLeaves(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	n := defaultCritbitArenaChunkSize + 100
@@ -120,12 +129,13 @@ func TestCompact_InternalChunksFollowLeaves(t *testing.T) {
 	}
 	drainAllReaps(c)
 
-	before := c.internalArena.bytes()
 	if got := c.compactInternalChunks(16); got < 1 {
-		t.Fatalf("compactInternalChunks dropped %d chunks; want >= 1", got)
+		t.Fatalf("compactInternalChunks evacuated %d chunks; want >= 1", got)
 	}
-	if after := c.internalArena.bytes(); after >= before {
-		t.Fatalf("internal arena did not shrink: %d -> %d", before, after)
+	// The victim's relocated husks were the last unaccounted slots; the counter
+	// fired and the chunk's slot range recycled to the free list.
+	if got := c.internalArena.freeCount.Load(); got < int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("internal free list holds %d slots after evacuation; want >= %d", got, defaultCritbitArenaChunkSize)
 	}
 
 	live := 0
@@ -218,12 +228,26 @@ func TestOrphanSlots_DontPinChunks(t *testing.T) {
 	drainAllReaps(c)
 
 	// Every chunk below the tail is fully dead (unlinked or orphaned) and must
-	// have dropped. The tail chunk of each arena may survive.
+	// have been reclaimed. Reclaimed chunks recycle into the free list until it
+	// saturates (freeSlotCapacity per arena) and are nil-dropped beyond that, so
+	// the floor is the free-list capacity plus one tail chunk per arena — not
+	// the tens of megabytes the run allocated.
 	var node critNode[struct{}]
 	nodeSize := int64(unsafe.Sizeof(node))
-	maxLeft := 2 * int64(defaultCritbitArenaChunkSize) * nodeSize // one tail chunk per arena
+	maxLeft := 2 * int64(freeSlotCapacity+defaultCritbitArenaChunkSize) * nodeSize
 	if got := c.ArenaBytes(); got > maxLeft {
 		t.Fatalf("ArenaBytes = %d after full delete+reap; want <= %d (chunks pinned — orphan accounting broken?)", got, maxLeft)
+	}
+
+	// The recycled capacity must actually be reusable: re-inserting a full
+	// worker's keyspace must not grow the arenas at all.
+	arenaBefore := c.ArenaBytes()
+	for i := range perWorker {
+		k := fmt.Sprintf("again-%05d", i)
+		c.Insert(k, nil, NewTipSet(tip(uint64(i+1))))
+	}
+	if got := c.ArenaBytes(); got > arenaBefore {
+		t.Fatalf("re-insert grew ArenaBytes %d -> %d; want recycled slots reused", arenaBefore, got)
 	}
 }
 

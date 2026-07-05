@@ -252,6 +252,61 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 	}
 }
 
+// TestReleaseQueue_ZeroesDrainedEntries pins the release buffer's retention
+// contract: after drainPendingReleases, no drained evictedKey may remain
+// reachable through either buffer's backing array. A retained entry pins its
+// leafState → cached subdag → effect payloads, so a queue that holds drained
+// items (the failure mode of xsync's UMPSCQueue, which never zeroes dequeued
+// slots and pools consumed segments fully populated) keeps gigabytes of
+// evicted state live and the memory governor permanently over target.
+func TestReleaseQueue_ZeroesDrainedEntries(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+	)
+
+	const keys = 50
+	for k := range keys {
+		key := fmt.Sprintf("user:k%d", k)
+		off := log.putEffect(&pb.Effect{
+			Key: []byte(key), Hlc: sTs(int64(k + 1)), NodeId: 1,
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d", k))},
+		})
+		e.updateIndex(key, nil, off)
+		if _, _, _, err := e.GetSnapshot(key); err != nil {
+			t.Fatalf("GetSnapshot(%s): %v", key, err)
+		}
+	}
+	for e.index.Size() > 0 {
+		if e.index.EvictBatch(256) == 0 {
+			break
+		}
+	}
+	if got := e.ReleaseQueueDepth(); got == 0 {
+		t.Fatal("expected pending releases after evict-all")
+	}
+
+	e.drainPendingReleases()
+
+	if got := e.ReleaseQueueDepth(); got != 0 {
+		t.Fatalf("ReleaseQueueDepth = %d after drain; want 0", got)
+	}
+	var zero evictedKey
+	for _, buf := range [][]evictedKey{
+		e.releaseItems[:cap(e.releaseItems)],
+		e.releaseSpare[:cap(e.releaseSpare)],
+	} {
+		for i, ek := range buf {
+			if ek.key != zero.key || ek.tips != nil || ek.ls != nil {
+				t.Fatalf("drained entry %d still populated (key=%q tips=%v ls=%p); "+
+					"the buffer must be cleared or it pins the evicted chain", i, ek.key, ek.tips, ek.ls)
+			}
+		}
+	}
+}
+
 // TestRefcount_EvictAllReclaimsPool is the load-bearing invariant test for the
 // vertex-pool refcount protocol. Every per-key structure that pins a vertex —
 // the index tip, the cached subdag (publishSubdag), and the reduced-result memo
