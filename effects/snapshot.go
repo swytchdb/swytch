@@ -94,17 +94,31 @@ type reducedResult struct {
 }
 
 // cachedDag is the reusable output of dag.prepare for a specific tip set: the
-// collected node map, the fork-choice-sorted topological order, and the LCA.
-// It is immutable once published; a tip change produces a new one. Fork-choice
-// adjudication (losersOnKey / bindKeyClosure) and ReduceChain still run fresh
-// on every read against this structure — only the BFS+topo build is cached, so
-// the answer remains derived from the DAG.
+// fork-choice-sorted topological order and the LCA. It is immutable once
+// published; a tip change produces a new one. Fork-choice adjudication
+// (losersOnKey / bindKeyClosure) and ReduceChain still run fresh on every read
+// against this structure — only the BFS+topo build is cached, so the answer
+// remains derived from the DAG.
+//
+// It deliberately holds no *pb.Effect pointers: the vertex pool is the only
+// owner of effect objects, and topoOrder doubles as the pin set — publishSubdag
+// increfs every tip before the structure becomes reachable, so a cache hit can
+// always re-materialize the node map from the pool. Holding pointers here
+// instead used to let a subdag outlive its nodes' pool residency (an incref
+// that raced reclaim silently no-op'd), accumulating gigabytes of heap-live
+// effects invisible to vertex_count and unreachable by eviction.
 type cachedDag struct {
 	tips      []Tip
-	nodes     map[Tip]*pb.Effect
 	topoOrder []Tip
 	lcaTip    Tip
 }
+
+// evictedSubdag is the terminal sentinel releaseChainRefs installs on a
+// leafState whose refs it has released. A dropped leaf can never accept
+// another subdag: a racing read's publish would pin vertices on a leaf no
+// release walk will ever visit again — an unevictable leak. publishSubdag
+// refuses to displace it.
+var evictedSubdag = &cachedDag{}
 
 // tipsEqual reports whether two tip sets are equal as sets. Tip sets are
 // small (usually one tip), so the quadratic membership check is cheap and
@@ -126,6 +140,13 @@ func tipsEqual(a, b []Tip) bool {
 // leaf's cached subdag when it matches tips and rebuilding + publishing it
 // otherwise. Falls back to a transient build when the key has no leaf (not in
 // the index) — nothing to cache against.
+//
+// A cache hit re-materializes d.nodes from the vertex pool: the subdag's pin
+// (one ref per topoOrder tip, taken in publishSubdag) guarantees residency, so
+// a miss means the pin was released underneath us — a concurrent eviction of
+// this key between our subdag.Load and the pool read. That read races the same
+// window a fresh walk does, so fall through to the full build and let it
+// resolve (or surface the eviction) the same way.
 func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
 	if e.index == nil {
 		return d.prepare(tips)
@@ -134,11 +155,13 @@ func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
 	if ls == nil {
 		return d.prepare(tips)
 	}
-	if cs := ls.subdag.Load(); cs != nil && tipsEqual(cs.tips, tips) {
-		d.nodes = cs.nodes
-		d.topoOrder = cs.topoOrder
-		d.lcaTip = cs.lcaTip
-		return nil
+	if cs := ls.subdag.Load(); cs != nil && cs != evictedSubdag && tipsEqual(cs.tips, tips) {
+		if nodes, ok := e.materializeSubdag(cs); ok {
+			d.nodes = nodes
+			d.topoOrder = cs.topoOrder
+			d.lcaTip = cs.lcaTip
+			return nil
+		}
 	}
 	if err := d.prepare(tips); err != nil {
 		return err
@@ -147,42 +170,73 @@ func (e *Engine) prepareDag(d *dag, key string, tips []Tip) error {
 	return nil
 }
 
-// publishSubdag installs d's prepared structure as the leaf's cached subdag and
-// maintains the DAG-adoption refcount: every node a read materializes into the
-// cached subdag holds one reference, so reconstruct's inputs stay resident for as
-// long as the subdag caches them. On a CAS-win the node-set delta is applied —
-// incref each node the new subdag adds (new \ old), decref each the old subdag
-// drops (old \ new), nodes in both unchanged. A first publish (no prior subdag)
-// increfs every node; a node that falls below a freshly-converged snapshot LCA
-// is dropped from the window and decref'd here, releasing its read claim while
-// its creation ref (held to eviction) keeps it resident for unconverged forks. A
-// losing CAS builder applied no refs, so it simply discards its copy.
+// materializeSubdag rebuilds the node map for a cached subdag from the vertex
+// pool. Every tip is pool-resident by the pin invariant; ok=false means the
+// pin was concurrently released (racing eviction) and the caller must rebuild.
+func (e *Engine) materializeSubdag(cs *cachedDag) (map[Tip]*pb.Effect, bool) {
+	if e.effectCache == nil {
+		return nil, false
+	}
+	nodes := make(map[Tip]*pb.Effect, len(cs.topoOrder))
+	for _, tip := range cs.topoOrder {
+		eff, ok := e.effectCache.Get(tip)
+		if !ok {
+			return nil, false
+		}
+		nodes[tip] = eff
+	}
+	return nodes, true
+}
+
+// publishSubdag installs d's prepared structure as the leaf's cached subdag.
+// The subdag's pin is what keeps the key's readable window resident: one
+// pool reference per topoOrder tip, taken BEFORE the structure becomes
+// reachable. Order matters — pin, publish, then release the displaced pin:
+//
+//   - An incref that fails (vertex missing or claimed by reclaim) means an
+//     eviction of this key raced the build. Roll back and don't publish;
+//     serving the transient d is still correct for this read, and the next
+//     read rebuilds against the post-eviction index. Publishing anyway would
+//     retain pool-dead effects off the pool's books — the exact off-books
+//     residency the pin protocol exists to prevent.
+//   - A losing CAS builder rolls back its own pin; the winner owns the leaf's
+//     refs. The winner releases the displaced subdag's pin after the swap
+//     (nodes present in both hold two refs for that instant, never zero).
+//
+// A tip that falls below a freshly-converged snapshot LCA simply isn't in the
+// new topoOrder: releasing the old pin drops its read claim while its creation
+// ref (held to eviction) keeps it resident for unconverged forks.
 func (e *Engine) publishSubdag(ls *leafState, d *dag, tips []Tip) {
+	if e.effectCache != nil {
+		for i, tip := range d.topoOrder {
+			if !e.effectCache.incref(tip) {
+				for _, taken := range d.topoOrder[:i] {
+					e.effectCache.decref(taken)
+				}
+				return
+			}
+		}
+	}
 	cs := &cachedDag{
 		tips:      append([]Tip(nil), tips...),
-		nodes:     d.nodes,
 		topoOrder: d.topoOrder,
 		lcaTip:    d.lcaTip,
 	}
 	old := ls.subdag.Load()
-	if !ls.subdag.CompareAndSwap(old, cs) {
-		return // lost the race; another builder owns the refs for these nodes
-	}
-	if e.effectCache == nil {
+	if old == evictedSubdag || !ls.subdag.CompareAndSwap(old, cs) {
+		// Leaf evicted, or another builder won: roll back our pin. In the
+		// eviction case releaseChainRefs already swept this leafState — a
+		// publish here would pin vertices no release walk will ever visit.
+		if e.effectCache != nil {
+			for _, tip := range d.topoOrder {
+				e.effectCache.decref(tip)
+			}
+		}
 		return
 	}
-	var oldNodes map[Tip]*pb.Effect
-	if old != nil {
-		oldNodes = old.nodes
-	}
-	for tip := range cs.nodes {
-		if _, kept := oldNodes[tip]; !kept {
-			e.effectCache.incref(tip) // adopted into the cached subdag
-		}
-	}
-	for tip := range oldNodes {
-		if _, kept := cs.nodes[tip]; !kept {
-			e.effectCache.decref(tip) // dropped from the cached subdag
+	if e.effectCache != nil && old != nil {
+		for _, tip := range old.topoOrder {
+			e.effectCache.decref(tip)
 		}
 	}
 }

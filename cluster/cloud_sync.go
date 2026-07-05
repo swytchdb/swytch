@@ -265,7 +265,15 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 		cs.filterMu.Unlock()
 	}
 
-	cs.engine.EffectCache().Incref(offset)
+	// OnLocalEffect fires synchronously in emit, after PutSized installed the
+	// vertex with its creation ref — the incref cannot find it missing or
+	// claimed. If it ever does, the ref protocol is broken and retire's Decref
+	// would steal another holder's reference (premature reclaim of a vertex
+	// someone still reads); fail at the violation, same policy as decref's
+	// underflow panic.
+	if !cs.engine.EffectCache().Incref(offset) {
+		panic(fmt.Sprintf("cloud sync: outbox incref failed for just-emitted %v — vertex missing or claimed at emit time", offset))
+	}
 	cs.mu.Lock()
 	cs.pending[offset] = eff
 	k := string(eff.Key)

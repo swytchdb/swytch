@@ -317,34 +317,35 @@ func (p *VertexPool) drainReclaim() int64 {
 // to resurrect it. Reclaim CAS-claims 0 -> vertexTombstone, then deletes.
 const vertexTombstone = math.MinInt32 / 2
 
-// incref bumps the key-membership refcount of the vertex at tip, if resident.
-// A no-op for a non-resident tip (e.g. an effect served from the wire-parse
-// fallback that never entered the pool) — refcounting only governs pooled
-// vertices.
+// incref bumps the key-membership refcount of the vertex at tip and reports
+// whether the reference was taken. It fails (false) for a non-resident tip and
+// for a vertex reclaimUnreferenced has already claimed for deletion (refs < 0):
+// the claim-then-delete is atomic with this CAS, so resurrecting a claimed
+// vertex would let the pool free a vertex the caller still references.
 //
-// It must not resurrect a vertex reclaimUnreferenced has already claimed for
-// deletion (refs < 0): the claim-then-delete is atomic with this CAS, so a
-// concurrent reader that walks a just-claimed tip simply treats it as absent
-// (the effect is still reachable via getEffect / a re-fetch). Without this
-// guard, a read could incref between reclaim's refs==0 check and its delete,
-// leaving the pool to free a vertex the read still references — a vertex that
-// stays resident off the pool's books (Bytes() drifts below true memory).
-func (p *VertexPool) incref(tip Tip) {
+// Callers that retain the effect beyond the current operation (subdag pins,
+// the cloud outbox) MUST honor a false return — retaining a pointer without
+// the ref recreates exactly the off-books residency this protocol exists to
+// prevent: memory that is heap-live but invisible to the pool's accounting
+// and unreachable by eviction.
+func (p *VertexPool) incref(tip Tip) bool {
 	if v, ok := p.m.Load(tip); ok {
 		for {
 			r := v.refs.Load()
 			if r < 0 {
-				return // claimed for reclamation; do not resurrect
+				return false // claimed for reclamation; do not resurrect
 			}
 			if v.refs.CompareAndSwap(r, r+1) {
-				return
+				return true
 			}
 		}
 	}
+	return false
 }
 
-// Incref adds a DAG reference to the vertex at tip.
-func (p *VertexPool) Incref(tip Tip) { p.incref(tip) }
+// Incref adds a DAG reference to the vertex at tip and reports whether the
+// reference was taken. See incref for the failure contract.
+func (p *VertexPool) Incref(tip Tip) bool { return p.incref(tip) }
 
 // Decref releases a DAG reference on the vertex at tip.
 func (p *VertexPool) Decref(tip Tip) { p.decref(tip) }

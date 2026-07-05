@@ -417,6 +417,63 @@ func TestDrainReclaim_QueueDrivenReclaim(t *testing.T) {
 	}
 }
 
+// TestPublishSubdag_PinFailureAbortsPublish pins the pin-first protocol: if any
+// topoOrder tip cannot be increfed (missing or claimed by reclaim — a racing
+// eviction), the publish must be abandoned and the refs already taken rolled
+// back. Publishing anyway would retain a pool-dead node off the pool's books —
+// heap-live, invisible to vertex_count, unreachable by eviction.
+func TestPublishSubdag_PinFailureAbortsPublish(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	resident := Tip{1, 1}
+	p.PutSized(resident, &pb.Effect{Key: []byte("user:k")}, 10) // refs=1 (creation)
+	missing := Tip{1, 2}                                        // never pooled
+
+	ls := &leafState{}
+	d := &dag{topoOrder: []Tip{resident, missing}, lcaTip: resident}
+	e.publishSubdag(ls, d, []Tip{missing})
+
+	if ls.subdag.Load() != nil {
+		t.Fatal("subdag published despite a failed pin; it would serve a node the pool no longer owns")
+	}
+	// The rollback must leave the resident vertex at its creation ref alone:
+	// releasing that one ref must make it reclaimable. A leaked pin keeps it
+	// resident; a double rollback panics decref's underflow check.
+	p.decref(resident)
+	p.drainReclaim()
+	if _, ok := p.Get(resident); ok {
+		t.Fatal("pin rollback left an extra ref on the resident vertex")
+	}
+}
+
+// TestPublishSubdag_EvictedLeafRefusesPublish pins the terminal sentinel: once
+// releaseChainRefs has swept a leafState, a racing read's publish must not
+// install a subdag there — no release walk will ever visit that leaf again, so
+// its pin would strand the vertices at refs>0 forever.
+func TestPublishSubdag_EvictedLeafRefusesPublish(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	tip := Tip{1, 1}
+	p.PutSized(tip, &pb.Effect{Key: []byte("user:k")}, 10) // refs=1 (creation)
+
+	ls := &leafState{}
+	e.releaseChainRefs("user:k", nil, ls) // eviction already swept this leaf
+
+	d := &dag{topoOrder: []Tip{tip}, lcaTip: tip}
+	e.publishSubdag(ls, d, []Tip{tip})
+
+	if ls.subdag.Load() != evictedSubdag {
+		t.Fatal("publish displaced the evicted-leaf sentinel")
+	}
+	p.decref(tip) // creation ref; if the publish leaked its pin, refs never reach 0
+	p.drainReclaim()
+	if _, ok := p.Get(tip); ok {
+		t.Fatal("racing publish pinned a vertex on an evicted leaf (ref leaked)")
+	}
+}
+
 // TestEvictBounded_PinsSystemKey asserts the eviction sweep never selects a
 // "__swytch:" key as a victim (the registered decider pins it), while a
 // user key with the same frequency is evicted.

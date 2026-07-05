@@ -2044,9 +2044,13 @@ func (e *Engine) releaseChainRefs(key string, tips []Tip, ls *leafState) {
 	if e.effectCache == nil {
 		return
 	}
+	// Terminal swap: after this, publishSubdag refuses to install into this
+	// leafState, so no racing read can pin vertices on a leaf whose release
+	// walk has already run. The sentinel also makes a double release (evict +
+	// flush) a no-op.
 	if ls != nil {
-		if cs := ls.subdag.Load(); cs != nil {
-			for tip := range cs.nodes {
+		if cs := ls.subdag.Swap(evictedSubdag); cs != nil && cs != evictedSubdag {
+			for _, tip := range cs.topoOrder {
 				e.effectCache.decref(tip)
 			}
 		}
