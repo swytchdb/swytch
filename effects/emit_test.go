@@ -155,6 +155,18 @@ func newTestEngine(bc Broadcaster) *Engine {
 	return e
 }
 
+// preSubscribe marks keys as already subscribed (bootstrap complete) so a
+// test can exercise emit/flush mechanics without Emit's subscribe-on-write
+// minting a SubscriptionEffect that perturbs index, dep, and broadcast
+// expectations.
+func preSubscribe(e *Engine, keys ...string) {
+	for _, k := range keys {
+		st := &subscriptionState{ready: make(chan struct{})}
+		st.markReady()
+		e.subscriptions.Store(k, st)
+	}
+}
+
 func dataEffect(key string) *pb.Effect {
 	return &pb.Effect{
 		Key: []byte(key),
@@ -178,6 +190,7 @@ func metaEffect(key string) *pb.Effect {
 
 func TestEmitSingle(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "foo")
 	ctx := e.NewContext()
 
 	eff := dataEffect("foo")
@@ -203,6 +216,7 @@ func TestEmitSingle(t *testing.T) {
 
 func TestEmitTwoSameKey(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 	ctx := e.NewContext()
 
 	// First effect: data
@@ -237,6 +251,7 @@ func TestEmitTwoSameKey(t *testing.T) {
 
 func TestEmitForkResolution(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	// Pre-populate index with 2 tips (simulating fork)
 	e.index.Insert("k", nil, keytrie.NewTipSet(Tip{0, 10}, Tip{0, 20}))
@@ -464,6 +479,7 @@ func TestBeginTxSetsFlag(t *testing.T) {
 
 func TestAbort(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	ctx.BeginTx()
@@ -560,6 +576,7 @@ func TestAbortAllowsCleanReuse(t *testing.T) {
 
 func TestCASRetry(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -589,6 +606,7 @@ func TestCASRetry(t *testing.T) {
 func TestNotifyEffectData(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -627,6 +645,7 @@ func TestNotifyEffectData(t *testing.T) {
 func TestMultipleKeys(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "a", "b")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("a")); err != nil {
@@ -656,6 +675,7 @@ func TestMultipleKeys(t *testing.T) {
 
 func TestIndexInvisibleBeforeFlush(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -1057,6 +1077,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 
 func TestEmit_ExcludesInProgressTxTips(t *testing.T) {
 	e := newTxnTestEngine(nil)
+	preSubscribe(e, "k")
 
 	// Simulate an in-progress tx tip at offset 500 with pre-tx deps [200]
 	e.pendingTxTips.Store(Tip{42, 500}, []Tip{{42, 200}})
@@ -1098,6 +1119,7 @@ func TestFlushNonTx_Unchanged(t *testing.T) {
 	// Regression: non-tx flush should work identically to before
 	bc := &mockBroadcaster{}
 	e := newTxnTestEngine(bc)
+	preSubscribe(e, "a", "b")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("a")); err != nil {

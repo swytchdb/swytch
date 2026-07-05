@@ -227,10 +227,15 @@ func (a *critbitArena[T]) alloc() (*T, uint32) {
 	return &list.chunks[chunkIdx][offset], uint32(chunkIdx)
 }
 
-// recordReaped notes that one node in chunkIdx has been unlinked from the tree.
-// When every slot in the chunk is unlinked, the chunk is dropped so GC can
-// reclaim it. Called only under the reap write lock, which excludes alloc/grow
-// and the eviction sweep — so the list read and the drop can't race them.
+// recordReaped notes that one node in chunkIdx is permanently dead — unlinked
+// from the tree by the reaper (write lock) or orphaned by a lost insert race
+// (read lock). Each slot is accounted at most once: unlink is identity-checked
+// and an orphan is counted exactly where it is abandoned. When every slot in
+// the chunk is accounted, the chunk is dropped so GC can reclaim it. The drop
+// is safe from either lock: the counter is shared across list snapshots, grow
+// and drop serialize on growMu, and a concurrent sweep iterating a dropped
+// chunk's memory sees only deleted slots (a droppable chunk holds no ghosts —
+// ghosts are never accounted).
 func (a *critbitArena[T]) recordReaped(chunkIdx uint32) {
 	list := a.list.Load()
 	if int(chunkIdx) >= len(list.reaped) || list.reaped[chunkIdx] == nil {
@@ -403,10 +408,17 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 			return nil, false
 		}
 
+		rt := c.reapMu.RLock()
+
+		// The root MUST be loaded under the read lock: the reaper and the
+		// compactor (write lock) detach nodes whose child pointers remain
+		// valid-looking and writable. A root captured before the lock can name
+		// a path through a detached node, and a structural CAS landing on such
+		// a node succeeds — silently linking the new leaf into an unreachable
+		// subtree. Under the lock, every node reachable from root is linked.
 		rootNode := c.root.Load()
 
 		if rootNode == nil {
-			rt := c.reapMu.RLock()
 			newNode := c.allocLeafNode(key, new) // deleted=true, pop under the read lock
 			if c.root.CompareAndSwap(nil, newNode) {
 				newNode.deleted.Store(false) // publish only after linking
@@ -417,12 +429,12 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 			}
 			c.reapMu.RUnlock(rt)
 			// Lost the CAS: newNode is an unlinked orphan, still deleted=true, so
-			// the sweep skips it. It is leaked from reuse (as before the free list)
-			// — acceptable on this rare contended-retry path.
+			// the sweep skips it. Its slot is never reused; account it reaped now,
+			// or its chunk could never reach a full count and would be pinned from
+			// reclamation forever by this one dead slot.
+			c.leafArena.recordReaped(newNode.chunkIdx)
 			continue
 		}
-
-		rt := c.reapMu.RLock()
 
 		bestLeaf := c.findBestMatch(rootNode, key)
 		if bestLeaf == nil {
@@ -501,7 +513,10 @@ func (c *Critbit[T]) Insert(key string, old *TipSet, new *TipSet) (*TipSet, bool
 		}
 		c.reapMu.RUnlock(rt)
 		// Lost: newLeafNode/newInternal are unlinked orphans (leaf still
-		// deleted=true, so the sweep skips it); leaked from reuse, retry.
+		// deleted=true, so the sweep skips it). Account both slots reaped so
+		// they don't pin their chunks from reclamation, then retry.
+		c.leafArena.recordReaped(newLeafNode.chunkIdx)
+		c.internalArena.recordReaped(newInternal.chunkIdx)
 	}
 }
 
@@ -654,10 +669,16 @@ func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
 // Locating the payload counts as an access: it bumps the leaf's frequency and
 // last-access stamp, which is the signal the eviction policy learns from. The
 // read path (reconstruct) calls this on every read, hit or miss.
+//
+// The install CAS runs under the reap read-lock like every other leaf-field
+// mutation: compaction (write lock) relocates leaves, and a CAS landing on a
+// relocated husk would be silently lost.
 func (c *Critbit[T]) LoadOrStoreData(key string, def *T) (*T, bool) {
 	if c.closed.Load() {
 		return nil, false
 	}
+	rt := c.reapMu.RLock()
+	defer c.reapMu.RUnlock(rt)
 	rootNode := c.root.Load()
 	if rootNode == nil {
 		return nil, false
@@ -708,16 +729,12 @@ func (c *Critbit[T]) fireTipDelta(old, new *TipSet, droppedData *T) {
 	}
 }
 
+// RemoveTips drops refs from key's tip set (CAS retry). The CAS runs under the
+// reap read-lock like every other leaf-field mutation: compaction (write lock)
+// relocates leaves, and a CAS landing on a relocated husk would be silently
+// lost. The delta fires outside the lock (the hook may re-enter the trie).
 func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 	if c.closed.Load() || len(refs) == 0 {
-		return
-	}
-	rootNode := c.root.Load()
-	if rootNode == nil {
-		return
-	}
-	leaf := c.findBestMatch(rootNode, key)
-	if leaf == nil || leaf.key != key || leaf.isDeleted() {
 		return
 	}
 
@@ -726,9 +743,22 @@ func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 		removeSet[r] = true
 	}
 
+	rt := c.reapMu.RLock()
+	rootNode := c.root.Load()
+	if rootNode == nil {
+		c.reapMu.RUnlock(rt)
+		return
+	}
+	leaf := c.findBestMatch(rootNode, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		c.reapMu.RUnlock(rt)
+		return
+	}
+
 	for {
 		current := leaf.tips.Load()
 		if current == nil {
+			c.reapMu.RUnlock(rt)
 			return
 		}
 		var kept []EffectRef
@@ -738,10 +768,12 @@ func (c *Critbit[T]) RemoveTips(key string, refs []EffectRef) {
 			}
 		}
 		if len(kept) == len(current.Tips()) {
+			c.reapMu.RUnlock(rt)
 			return // nothing to remove
 		}
 		newTips := NewTipSet(kept...)
 		if leaf.tips.CompareAndSwap(current, newTips) {
+			c.reapMu.RUnlock(rt)
 			c.fireTipDelta(current, newTips, nil)
 			return
 		}
@@ -1254,6 +1286,10 @@ func (c *Critbit[T]) maybeReap() {
 			for c.reap() > 0 {
 			}
 		}
+		// Unlinking alone frees a chunk only when every one of its slots died;
+		// under churn, survivors fragment across chunks and the arenas ratchet.
+		// Compaction evacuates sparse chunks so they can drop (see compact.go).
+		c.maybeCompact()
 	}()
 }
 

@@ -65,6 +65,12 @@ type Broadcaster interface {
 // cluster take over. Nil (unset) means no Cloud is configured and the read
 // free-misses as before.
 type CloudReader interface {
+	// MayHold reports whether Cloud may hold key, answered from the pushed
+	// key-name filter — free, no RPC. False is the filter's definite no and
+	// lets a read free-miss without subscribing or consulting; true routes
+	// the read through the subscribe + consult path, whose per-leaf
+	// cloudConsulted marker caps the WAN round-trips.
+	MayHold(key string) bool
 	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
 	// error) if Cloud holds nothing for it. closure is Cloud's advisory list of
 	// every ref reachable from those tips down to the LCA snapshot: the engine

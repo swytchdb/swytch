@@ -286,8 +286,19 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 // Cache hit returns immediately. On miss, walks the causal DAG from
 // the index tip set and reconstructs via ReduceBranch + canonical merge.
 func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) {
-	if err := e.ensureSubscribed(key); err != nil {
-		return nil, nil, 0, err
+	// Free miss: nothing local (no tips, no subscription record) and no peer
+	// filter admits the key — there is no state to bootstrap and no writer to
+	// hear from, so announcing a subscription would be pure DAG noise (on
+	// miss-heavy workloads the mint + self-install churn dominated memory).
+	// The read is answered from the filters; a stale filter costs one
+	// premature miss, the documented filter contract, and every read
+	// re-evaluates. Authority is claimed exactly when it is exercised: a
+	// write subscribes in Emit, and the Cloud backstop below subscribes when
+	// a hydrate installs state.
+	if !e.freeMissEligible(key) {
+		if err := e.ensureSubscribed(key); err != nil {
+			return nil, nil, 0, err
+		}
 	}
 
 	result, tips, chainLen := e.reconstructLocal(key)
@@ -301,9 +312,9 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// — must not re-consult: such keys stay filter-positive in Cloud forever,
 	// and without the distinction every GET of them pays a WAN GetTips
 	// round-trip. A data-bearing tip marks the nil authoritative; subscription
-	// tips don't count, because ensureSubscribed installs the reader's own
-	// SubscriptionEffect as a tip before reconstruction, so the first read of
-	// an absent key always sees one. The leaf's cloudConsulted marker
+	// tips don't count (a subscribed reader's own SubscriptionEffect sits in
+	// the index as a tip), and a free-missed key has no tips at all —
+	// vacuously subscription-only. The leaf's cloudConsulted marker
 	// additionally caps consults: nil becomes authoritative once Cloud has
 	// given one complete answer, and eviction reclaims the marker with the
 	// leaf, re-arming the rehydrate. Gated on the majority partition: a
@@ -322,6 +333,13 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 				return nil, nil, 0, hydrateErr
 			}
 			if installed {
+				// The hydrate made this node a holder of the key: subscribe
+				// (idempotent when the read already did) so peer writes route
+				// to us and the returned tips include our SubscriptionEffect
+				// for RMW deps.
+				if err := e.ensureSubscribed(key); err != nil {
+					return nil, nil, 0, err
+				}
 				result, tips, chainLen = e.reconstructLocal(key)
 			}
 			if consulted {
@@ -337,6 +355,57 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	}
 
 	return result, tips, chainLen, nil
+}
+
+// awaitSubscription resolves an ensureSubscribed call that found an existing
+// subscription record. UnsafeMode proceeds on whatever state is local (the
+// background retry keeps healing unreachable tips); SafeMode waits for the
+// bootstrap and re-checks after the wait, because ready may have been closed
+// by a failure path (markFailed) rather than a successful bootstrap — the
+// closeOnce + Store-before-close in markFailed ensures the re-load sees the
+// up-to-date value.
+func (e *Engine) awaitSubscription(existing *subscriptionState, unsafe bool) error {
+	if existing.incomplete.Load() {
+		if unsafe {
+			return nil
+		}
+		return ErrBootstrapIncomplete
+	}
+	<-existing.ready
+	if existing.incomplete.Load() {
+		if unsafe {
+			return nil
+		}
+		return ErrBootstrapIncomplete
+	}
+	return nil
+}
+
+// freeMissEligible reports whether a read of key can be answered "absent"
+// without announcing a subscription: this node holds nothing (no subscription
+// record, no index tips), no peer's key filter admits the key, and the
+// cluster view is trustworthy (majority, or UnsafeMode where there is no
+// majority to trust — a SafeMode minority falls through so ensureSubscribed
+// surfaces ErrRegionPartitioned instead of fabricating a miss). No key is
+// special-cased: whatever a key is for, holding nothing of it and hearing no
+// claim on it means there is nothing to announce — a later write (or a peer's
+// claim) puts it on the subscribe path like any other key.
+func (e *Engine) freeMissEligible(key string) bool {
+	if _, ok := e.subscriptions.Load(key); ok {
+		return false // already subscribed; ensureSubscribed is a cheap no-op
+	}
+	if e.index.Contains(key) != nil {
+		return false // we hold state (peer arrivals, backfill): formalize authority
+	}
+	if e.clusterMaybeHasKey(key) {
+		return false // a peer may hold it: bootstrap required
+	}
+	if e.cloudReader != nil && e.cloudReader.MayHold(key) {
+		// Cloud may hold it: the consult path below needs the subscription's
+		// leaf to anchor the cloudConsulted marker that caps WAN round-trips.
+		return false
+	}
+	return e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode
 }
 
 // subscriptionOnlyTips reports whether tips carry no data history: every tip
@@ -486,28 +555,15 @@ func (e *Engine) ensureSubscribedBlocking(key string) error {
 
 func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	unsafe := e.modeForKey(key) == UnsafeMode
+	// Allocation-free fast path: Emit calls this on every effect, so the
+	// already-subscribed case must not pay the state+channel allocation the
+	// LoadOrStore below needs.
+	if existing, ok := e.subscriptions.Load(key); ok {
+		return e.awaitSubscription(existing, unsafe)
+	}
 	state := &subscriptionState{ready: make(chan struct{})}
 	if existing, loaded := e.subscriptions.LoadOrStore(key, state); loaded {
-		if existing.incomplete.Load() {
-			// UnsafeMode proceeds on whatever state is local; the background
-			// retry keeps healing the unreachable tips.
-			if unsafe {
-				return nil
-			}
-			return ErrBootstrapIncomplete
-		}
-		<-existing.ready
-		// Re-check after wait: ready may have been closed by a failure
-		// path (markFailed) rather than a successful bootstrap. The
-		// closeOnce + Store-before-close in markFailed ensures this
-		// load sees the up-to-date value.
-		if existing.incomplete.Load() {
-			if unsafe {
-				return nil
-			}
-			return ErrBootstrapIncomplete
-		}
-		return nil
+		return e.awaitSubscription(existing, unsafe)
 	}
 	slog.Debug("ensureSubscribed: bootstrapping", "key", key)
 	succeeded := false

@@ -652,6 +652,14 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 // no reduction: it hands the frontier to the engine, whose own reconstruct
 // path does the rest. The closure passes through Cloud's advisory prefetch
 // list verbatim; outbox tips need no closure — their bytes are already local.
+// MayHold implements effects.CloudReader: the free, no-RPC filter gate the
+// engine consults before deciding a read-miss can skip the subscribe +
+// CloudTips path entirely. Own un-acked uploads are covered: filterOwn is fed
+// at outbox enqueue.
+func (cs *CloudSync) MayHold(key string) bool {
+	return cs.cloudMayHold(CloudKeyName(cs.keyNameKey, []byte(key)))
+}
+
 func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.Tip, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {

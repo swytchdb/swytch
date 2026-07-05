@@ -235,28 +235,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.txSnapshot != nil {
 			return c.getSnapshotFromTx(key)
 		}
-		// Read-only fast path: a key we don't already hold and that no peer has
-		// announced has no committed value in the cluster (authoritative in the
-		// majority partition). With NO Cloud configured that's a definitive miss,
-		// so we free-miss without a reconstruct — announcing the subscription but
-		// not blocking (never skip the announce, or future peer writes never route
-		// to us and the key splits brain; ensureSubscribed takes its
-		// async-announce path since no peer holds the key). When Cloud IS
-		// configured the key may instead have been evicted to durable storage, so
-		// we fall through to engine.GetSnapshot, which subscribes and rehydrates
-		// the frontier from Cloud before deciding the read is a miss. A filter
-		// false-positive, or a key we hold locally, also falls through.
-		if c.readOnly &&
-			c.engine.cloudReader == nil &&
-			c.engine.index.Contains(key) == nil &&
-			c.engine.inMajorityPartition() &&
-			!c.engine.clusterMaybeHasKey(key) {
-			if err := c.engine.ensureSubscribed(key); err != nil {
-				return nil, nil, err
-			}
-			return nil, nil, nil
-		}
 		// No unflushed effects for this key — delegate to committed state.
+		// A definite miss (nothing local, no peer filter admits the key) is
+		// answered by engine.GetSnapshot's free-miss gate without announcing
+		// a subscription; with Cloud configured its backstop still checks
+		// durable storage before deciding the read is a miss.
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
 			return nil, nil, err
@@ -599,16 +582,14 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
-	// A read-only context may have answered a read-miss without subscribing.
-	// If a command then emits anyway (e.g. HGETEX setting a field TTL), it
-	// must subscribe first — exactly as flushTx does — so the effect
-	// dep-references our own SubscriptionEffect instead of being orphaned in
-	// the DAG. Idempotent and fast in the common case: the key existed, so
-	// GetSnapshot already subscribed and this is a no-op.
-	if c.readOnly {
-		if err := c.engine.ensureSubscribed(key); err != nil {
-			return err
-		}
+	// The effect must dep-reference our own SubscriptionEffect, or the
+	// subscription's offset is orphaned in this node's DAG and the subscriber
+	// graph splits brain (see ensureSubscribed). Reads no longer subscribe on
+	// a definite miss (GetSnapshot's free-miss gate), so ANY context can reach
+	// Emit unsubscribed — authority is claimed here, where state is created.
+	// Allocation-free no-op when already subscribed.
+	if err := c.engine.ensureSubscribed(key); err != nil {
+		return err
 	}
 
 	if tracing.Enabled() {

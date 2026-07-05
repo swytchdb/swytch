@@ -90,11 +90,14 @@ func TestPeerWriteVisibleToReader(t *testing.T) {
 	}
 }
 
-// TestReadOnlyMissAnnouncesAsync is the core win: a read of a key no peer
-// holds returns nil without a blocking subscribe round-trip (no ReplicateTo),
-// but it must still announce the subscription fire-and-forget so future peer
-// writes route to us — never skip it. The subscription is installed locally.
-func TestReadOnlyMissAnnouncesAsync(t *testing.T) {
+// TestReadOnlyMissIsFree is the core win: a read of a key no peer holds and
+// this node holds nothing for is answered entirely from the filters — nil
+// result, no blocking subscribe round-trip, no subscription record, no index
+// leaf, no announce. There is nothing to bootstrap and no writer to hear
+// from; a subscription here would be pure DAG noise. Every read re-evaluates,
+// so a peer that later claims the key flips the next read onto the subscribe
+// path.
+func TestReadOnlyMissIsFree(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 
@@ -109,17 +112,22 @@ func TestReadOnlyMissAnnouncesAsync(t *testing.T) {
 	if len(bc.replicateToPeers) != 0 {
 		t.Fatalf("read-only miss must not block on a subscribe round-trip, but ReplicateTo was called for %v", bc.replicateToPeers)
 	}
-	if e.index.Contains("never-written") == nil {
-		t.Fatal("the async announce must install our own subscription in the index")
+	if _, ok := e.subscriptions.Load("never-written"); ok {
+		t.Fatal("a free miss must not record a subscription")
 	}
-	// The announce is fire-and-forget (go), so observe it through the lock.
-	waitForBroadcast(t, bc)
+	if e.index.Contains("never-written") != nil {
+		t.Fatal("a free miss must not touch the index")
+	}
+	if bc.broadcastCount() != 0 {
+		t.Fatalf("a free miss must not announce, got %d broadcasts", bc.broadcastCount())
+	}
 }
 
-// TestReadWriteMissAnnouncesAsync confirms the rule is uniform: a normal
-// (read-write) context also announces async on a miss — fire-and-forget, no
-// blocking ReplicateTo — rather than the old synchronous bootstrap.
-func TestReadWriteMissAnnouncesAsync(t *testing.T) {
+// TestReadWriteMissSubscribesAtWrite confirms where authority is claimed: the
+// miss itself is free (no announce), and the first Emit on the key subscribes
+// — installing our own SubscriptionEffect so the write dep-references it —
+// and announces.
+func TestReadWriteMissSubscribesAtWrite(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2, 3}, allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 
@@ -127,8 +135,35 @@ func TestReadWriteMissAnnouncesAsync(t *testing.T) {
 	if _, _, err := ctx.GetSnapshot("never-written"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(bc.replicateToPeers) != 0 {
-		t.Fatalf("read-write miss on a nowhere-key must not block on a subscribe round-trip, got %v", bc.replicateToPeers)
+	if _, ok := e.subscriptions.Load("never-written"); ok {
+		t.Fatal("the miss alone must not subscribe")
+	}
+
+	if err := ctx.Emit(dataEffect("never-written")); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if _, ok := e.subscriptions.Load("never-written"); !ok {
+		t.Fatal("the write must subscribe")
+	}
+	subTips := e.index.Contains("never-written")
+	if subTips == nil || subTips.Len() != 1 {
+		t.Fatalf("the write's subscription must self-install as the key's tip, got %v", subTips)
+	}
+	subTip := subTips.Tips()[0]
+	if err := ctx.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// The flushed effect consumed the subscription tip as its dep.
+	tips := e.index.Contains("never-written")
+	if tips == nil || tips.Len() != 1 {
+		t.Fatalf("expected the data effect as the sole tip, got %v", tips)
+	}
+	eff, ok := e.effectCache.Get(tips.Tips()[0])
+	if !ok {
+		t.Fatal("flushed effect not in cache")
+	}
+	if len(eff.Deps) != 1 || (Tip{eff.Deps[0].NodeId, eff.Deps[0].Offset}) != subTip {
+		t.Fatalf("the write must dep-reference our own SubscriptionEffect %v, got %v", subTip, eff.Deps)
 	}
 	// The announce is fire-and-forget (go), so observe it through the lock.
 	waitForBroadcast(t, bc)

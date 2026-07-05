@@ -38,6 +38,10 @@ type fakeCloudReader struct {
 	calls   int
 }
 
+// MayHold is always true: these tests exercise the consult path, which the
+// engine's free-miss gate would otherwise skip for a filter-negative key.
+func (f *fakeCloudReader) MayHold(string) bool { return true }
+
 func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []Tip, error) {
 	f.calls++
 	if f.err != nil {
@@ -202,9 +206,10 @@ func TestReadMissPartialFrontierFailsRead(t *testing.T) {
 	}
 }
 
-// TestReadMissNoCloudFreeMisses: with no Cloud configured the read-only free-miss
-// fast path is preserved — the read returns nil without any Cloud consult (Cloud
-// is optional, and standalone must keep its zero-cost miss).
+// TestReadMissNoCloudFreeMisses: with no Cloud configured a key nobody holds
+// is a completely free miss — no Cloud consult, no subscription record, no
+// index leaf, no announce. There is no state to bootstrap and no writer to
+// hear from; authority is claimed at the first write, not the first miss.
 func TestReadMissNoCloudFreeMisses(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true, peerIDs: []pb.NodeID{2, 3}}
 	e := newTestEngine(bc) // cloudReader stays nil
@@ -217,6 +222,14 @@ func TestReadMissNoCloudFreeMisses(t *testing.T) {
 	if result != nil {
 		t.Fatal("expected a free-miss with no Cloud configured")
 	}
-	// The async subscription announce still fires (never skipped).
-	waitForBroadcast(t, bc)
+	if _, ok := e.subscriptions.Load("never-written"); ok {
+		t.Fatal("a free miss must not record a subscription")
+	}
+	if e.index.Contains("never-written") != nil {
+		t.Fatal("a free miss must not touch the index")
+	}
+	// The gate decides synchronously — no announce goroutine is ever spawned.
+	if bc.broadcastCount() != 0 {
+		t.Fatalf("a free miss must not announce, got %d broadcasts", bc.broadcastCount())
+	}
 }
