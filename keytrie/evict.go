@@ -72,6 +72,12 @@ const (
 // consumer the dropped key's tips and leaf payload so it can release refs and
 // tear down (e.g. unsubscribe). Both run without any trie lock the consumer
 // could re-enter; keep them prompt.
+//
+// decider must be installed before any Insert: the sweep reads each leaf's pin
+// verdict (critNode.pinned) cached at creation, so a leaf written before the
+// decider exists would carry the default (unpinned) verdict. The memory
+// governor installs the hooks inside NewEngine, before any write, so this
+// holds.
 func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T)) {
 	c.evictDecider = decider
 	c.evictNotify = notify
@@ -233,8 +239,8 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			}
 			return
 		}
-		if c.evictDecider != nil && !c.evictDecider(leaf.key) {
-			return // pinned (e.g. a system key)
+		if leaf.pinned {
+			return // pinned (e.g. a system key) — verdict cached at leaf creation
 		}
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access

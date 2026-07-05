@@ -68,7 +68,14 @@ type critNode[T any] struct {
 	bytePos   uint32                         // 4 bytes,  offset 16 (internal)
 	otherbits uint8                          // 1 byte,   offset 20 (internal)
 	isLeaf    bool                           // 1 byte,   offset 21
-	_         [2]byte                        //           offset 22
+	// pinned caches the eviction decider's verdict (the system-key pin), computed
+	// once when the leaf is created, so the sweep reads a bit instead of calling
+	// the decider — a func-pointer indirect plus a per-key prefix check — on every
+	// leaf it visits. The verdict is a pure function of the immutable key; key
+	// updates reuse the leaf, so it never needs recomputing. Written once before
+	// publish, so no atomic is needed (same discipline as key).
+	pinned bool    // 1 byte,   offset 22 (leaf)
+	_      [1]byte //           offset 23
 	key       string                         // 16 bytes, offset 24 (leaf)
 	tips      atomic.Pointer[TipSet]         // 8 bytes,  offset 40 (leaf)
 	deleted   atomic.Bool                    // 4 bytes,  offset 44 (leaf)
@@ -421,6 +428,9 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n, ci := c.leafArena.alloc() // born deleted=true via the arena init hook
 	n.chunkIdx = ci
 	n.key = key
+	// A decider returning false means "do not evict" → pinned. When no decider is
+	// installed, no sweep ever runs, so the default false is inert.
+	n.pinned = c.evictDecider != nil && !c.evictDecider(key)
 	n.tips.Store(ts)
 	n.freq.Store(1) // start warm enough to survive one sweep
 	n.lastAccess.Store(c.clock.Add(1))
