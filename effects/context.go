@@ -575,6 +575,12 @@ func (c *Context) Abort() {
 // state so that consecutive effects on the same key form a dep chain.
 // The index is NOT updated until Flush.
 //
+// Emit takes ownership of eff: it fills causality fields in place and
+// caches the message itself, so the caller must not retain, reuse, or
+// mutate eff (or its submessages) after the call. Byte-slice fields may
+// alias pooled buffers (e.g. RESP parser args) — Emit copies those
+// before caching.
+//
 // For read-modify-write commands, pass the tip offsets returned by
 // GetSnapshot as snapshotTips so that the first effect depends on the
 // tips the handler actually read, not whatever the index contains now.
@@ -667,9 +673,14 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 		}
 	}
 
-	// Clone so the cached *pb.Effect owns its byte slices. Callers
-	// (e.g. RESP parser) may pool the underlying buffers.
-	eff = proto.Clone(eff).(*pb.Effect)
+	// Own the byte slices before caching: handler-built effects carry
+	// []byte fields that alias pooled parser buffers, which are recycled
+	// after the command returns while the cached message lives on in the
+	// vertex pool. Only those fields need copying — the message structs
+	// are built fresh per call (Emit already mutated them in place above,
+	// so sharing one across calls was never legal), so a full reflective
+	// proto.Clone here just duplicated every submessage and payload.
+	ownEffectBytes(eff)
 
 	offset, notify, err := c.rawEmit(eff)
 	if err != nil {
@@ -695,6 +706,51 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	}
 
 	return nil
+}
+
+// ownEffectBytes copies the []byte fields of eff that can alias
+// caller-pooled memory. Engine-built kinds (TxnBind, Snapshot,
+// Subscription, Serialization, Noop) own their memory already — a
+// Snapshot's ReducedEffect may share slices with cached effects, but
+// cache memory is immutable and never recycled, so aliasing it is safe.
+func ownEffectBytes(eff *pb.Effect) {
+	eff.Key = bytes.Clone(eff.Key)
+	switch k := eff.Kind.(type) {
+	case *pb.Effect_Data:
+		d := k.Data
+		d.Reference = bytes.Clone(d.Reference)
+		d.Id = bytes.Clone(d.Id)
+		if v, ok := d.Value.(*pb.DataEffect_Raw); ok {
+			v.Raw = bytes.Clone(v.Raw)
+		}
+	case *pb.Effect_Meta:
+		k.Meta.ElementId = bytes.Clone(k.Meta.ElementId)
+	case *pb.Effect_PubsubMessage:
+		m := k.PubsubMessage
+		m.Channel = bytes.Clone(m.Channel)
+		m.Payload = bytes.Clone(m.Payload)
+	case *pb.Effect_RowWrite:
+		rw := k.RowWrite
+		rw.Pk = bytes.Clone(rw.Pk)
+		for _, col := range rw.Columns {
+			col.BlobVal = bytes.Clone(col.BlobVal)
+		}
+	case *pb.Effect_Observation:
+		ownPredicateBytes(k.Observation.Predicate)
+	}
+}
+
+func ownPredicateBytes(p *pb.Predicate) {
+	if p == nil {
+		return
+	}
+	if p.Literal != nil {
+		p.Literal.BlobVal = bytes.Clone(p.Literal.BlobVal)
+	}
+	ownPredicateBytes(p.Child)
+	for _, c := range p.Children {
+		ownPredicateBytes(c)
+	}
 }
 
 // applySubOps applies a key's deferred peer-subscriber mutations after its leaf

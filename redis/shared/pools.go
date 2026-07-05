@@ -22,6 +22,7 @@ package shared
 import (
 	"bytes"
 	"sync"
+	"unsafe"
 )
 
 // Buffer sizes for optimal performance
@@ -51,20 +52,23 @@ var writerPool = sync.Pool{
 	},
 }
 
-// dataBufPools - tiered pools for data buffers of various sizes
-var dataBufPools = [...]sync.Pool{
-	{New: func() any { b := make([]byte, 64); return &b }},      // 0: 64B
-	{New: func() any { b := make([]byte, 256); return &b }},     // 1: 256B
-	{New: func() any { b := make([]byte, 1024); return &b }},    // 2: 1KB
-	{New: func() any { b := make([]byte, 4096); return &b }},    // 3: 4KB
-	{New: func() any { b := make([]byte, 16384); return &b }},   // 4: 16KB
-	{New: func() any { b := make([]byte, 65536); return &b }},   // 5: 64KB
-	{New: func() any { b := make([]byte, 262144); return &b }},  // 6: 256KB
-	{New: func() any { b := make([]byte, 1048576); return &b }}, // 7: 1MB
-}
-
 // dataBufSizes maps pool index to buffer size
 var dataBufSizes = [...]int{64, 256, 1024, 4096, 16384, 65536, 262144, 1048576}
+
+// dataBufPools - tiered pools for data buffers of various sizes. Each pool
+// holds raw pointers to fixed-size backing arrays (as unsafe.Pointer, which
+// fits an interface word without boxing) rather than *[]byte: a slice header
+// is a fresh heap object per Put, so pooling headers cost an allocation to
+// donate a buffer. The class size is re-attached on Get.
+var dataBufPools [len(dataBufSizes)]sync.Pool
+
+func init() {
+	for i, size := range dataBufSizes {
+		dataBufPools[i].New = func() any {
+			return unsafe.Pointer(unsafe.SliceData(make([]byte, size)))
+		}
+	}
+}
 
 // sizeClassIndex returns the pool index for the given size using O(1) bit math
 // Pool sizes: 64, 256, 1K, 4K, 16K, 64K, 256K, 1M (indices 0-7)
@@ -101,28 +105,22 @@ func GetDataBuf(n int) []byte {
 	}
 
 	poolIdx := sizeClassIndex(n)
-	buf := dataBufPools[poolIdx].Get().(*[]byte)
-	if cap(*buf) < n {
-		// Pool returned smaller buffer than expected - return it to the pool
-		// before allocating a new one to avoid memory leak
-		dataBufPools[poolIdx].Put(buf)
-		return make([]byte, n)
-	}
-	return (*buf)[:n]
+	p := dataBufPools[poolIdx].Get().(unsafe.Pointer)
+	return unsafe.Slice((*byte)(p), dataBufSizes[poolIdx])[:n]
 }
 
-// PutDataBuf returns a byte buffer to the appropriate pool
+// PutDataBuf returns a byte buffer to the appropriate pool. The caller yields
+// ownership of buf's full capacity.
 func PutDataBuf(buf []byte) {
-	if buf == nil || cap(buf) > maxDataBufSize {
+	c := cap(buf)
+	if c < dataBufSizes[0] || c > maxDataBufSize {
 		return
 	}
 
 	// Find the right pool based on capacity
-	c := cap(buf)
 	for i := len(dataBufSizes) - 1; i >= 0; i-- {
 		if c >= dataBufSizes[i] {
-			b := buf[:cap(buf)]
-			dataBufPools[i].Put(&b)
+			dataBufPools[i].Put(unsafe.Pointer(unsafe.SliceData(buf)))
 			return
 		}
 	}
@@ -165,6 +163,11 @@ func PutWriter(w *Writer) {
 	if w.buf.Cap() > ResponseBufSize*4 {
 		// Don't pool overly large buffers
 		return
+	}
+	if w.scratch.Cap() > ResponseBufSize*4 {
+		// Same size policy as buf: one huge response must not pin its
+		// staging capacity in the pool forever.
+		w.scratch = bytes.Buffer{}
 	}
 	writerPool.Put(w)
 }

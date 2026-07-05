@@ -867,6 +867,26 @@ func (c CommandType) String() string {
 	return "unknown"
 }
 
+// commandStringPtrs interns each command's display name so hot paths can
+// store a stable *string (e.g. ClientInfo.LastCmd) without allocating one
+// per command.
+var commandStringPtrs = func() [CmdMax]*string {
+	var t [CmdMax]*string
+	for c := range CmdMax {
+		s := c.String()
+		t[c] = &s
+	}
+	return t
+}()
+
+// StringPtr returns a stable pointer to the command's display name.
+func (c CommandType) StringPtr() *string {
+	if c < 0 || c >= CmdMax {
+		c = CmdUnknown
+	}
+	return commandStringPtrs[c]
+}
+
 // ParseCommandType converts a command name byte slice to CommandType
 func ParseCommandType(name []byte) CommandType {
 	// Convert to uppercase for lookup

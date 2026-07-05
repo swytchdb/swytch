@@ -361,8 +361,8 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	// This prevents clients from seeing stale state when racing against chained
 	// notifications (e.g. Circular BRPOPLPUSH).
 	origBuf := w.Buffer()
-	var tmpBuf bytes.Buffer
-	w.Reset(&tmpBuf)
+	tmpBuf := w.Scratch()
+	w.Reset(tmpBuf)
 	defer func() {
 		origBuf.Write(tmpBuf.Bytes())
 		w.Reset(origBuf)
@@ -374,7 +374,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	defer func() {
 		if h.stats != nil && cmd.Type != shared.CmdUnknown {
 			usec := uint64(time.Since(cmdStart).Microseconds())
-			h.stats.RecordCommand(strings.ToLower(cmd.Type.String()), usec, w.WroteError())
+			h.stats.RecordCommand(cmd.Type, usec, w.WroteError())
 		}
 	}()
 
@@ -570,7 +570,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	}
 
 	// Adaptive serialization: forward write commands to the serialization leader
-	if valid && entry.Flags&shared.FlagWrite != 0 && cmd.Runtime != nil && entry.Keys != nil {
+	if effects.ForwardingEnabled() && valid && entry.Flags&shared.FlagWrite != 0 && cmd.Runtime != nil && entry.Keys != nil {
 		var fwdSpan trace.Span
 		if tracing.Enabled() {
 			_, fwdSpan = tracing.Tracer().Start(ctx, "handler.forward_check")
@@ -998,7 +998,7 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 
 	// Adaptive serialization: forward the entire EXEC to the leader if any
 	// queued command touches a serialized key.
-	if cmd.Runtime != nil {
+	if effects.ForwardingEnabled() && cmd.Runtime != nil {
 		fwdCmds := make([]effects.ForwardCommand, len(conn.QueuedCmds))
 		for i, qcmd := range conn.QueuedCmds {
 			fwdCmds[i] = effects.ForwardCommand{

@@ -599,7 +599,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}()
 
 	// Register client for CLIENT LIST tracking
-	s.clients.Register(cs.conn)
+	clientInfo := s.clients.Register(cs.conn)
 	defer s.clients.Unregister(cs.conn)
 
 	// Get writer from pool
@@ -764,10 +764,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		// Track last command for CLIENT LIST
-		cmdName := cmd.Type.String()
-		if cmdName != "" {
-			s.clients.SetLastCmd(cs.conn, cmdName)
-		}
+		clientInfo.RecordCommand(cmd.Type)
 
 		// Flush pending writes before blocking commands
 		// This ensures pipelined responses (e.g., LPUSH response before BLPOP)

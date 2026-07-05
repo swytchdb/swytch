@@ -98,27 +98,12 @@ func (r *ClientRegistry) GetByConn(conn *shared.Connection) *ClientInfo {
 	return r.byConn[conn]
 }
 
-// SetLastCmd updates the last command for a client
-func (r *ClientRegistry) SetLastCmd(conn *shared.Connection, cmd string) {
-	token := r.mu.RLock()
-	info := r.byConn[conn]
-	r.mu.RUnlock(token)
-
-	if info != nil {
-		info.LastCmd.Store(&cmd)
-		info.LastActive = time.Now()
-	}
-}
-
-// UpdateDB updates the database for a client
-func (r *ClientRegistry) UpdateDB(conn *shared.Connection, db int) {
-	token := r.mu.RLock()
-	info := r.byConn[conn]
-	r.mu.RUnlock(token)
-
-	if info != nil {
-		info.DB = db
-	}
+// RecordCommand updates last-command tracking for CLIENT LIST. It stores an
+// interned name pointer, so the per-command path performs no allocation, no
+// registry lookup, and no locking.
+func (info *ClientInfo) RecordCommand(t shared.CommandType) {
+	info.LastCmd.Store(t.StringPtr())
+	info.LastActive = time.Now()
 }
 
 // buildFlags builds the flags string for a client info entry
