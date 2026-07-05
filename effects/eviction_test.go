@@ -360,6 +360,58 @@ func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	}
 }
 
+// TestDrainReclaim_QueueDrivenReclaim covers the governor's per-tick reclaim: a
+// vertex that reaches refs==0 (a dropped adoption, a born-at-zero cache fetch)
+// is freed by drainReclaim alone — the queue is the whole mechanism, there is no
+// full-map scan behind it — while a still-referenced vertex and a pinned system
+// key survive.
+func TestDrainReclaim_QueueDrivenReclaim(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	// Born-at-zero cache fetch: enqueued at birth, freed by the queue drain.
+	cacheTip := Tip{1, 1}
+	p.PutSizedCache(cacheTip, &pb.Effect{Key: []byte("user:c")}, 10)
+
+	// System-key cache entry: also enqueued, but pinned — drainReclaim must skip it.
+	sysTip := Tip{1, 2}
+	p.PutSizedCache(sysTip, &pb.Effect{Key: []byte("__swytch:members")}, 10)
+
+	// Owned vertex (creation ref): never enqueued, must survive the drain.
+	ownedTip := Tip{1, 3}
+	p.PutSized(ownedTip, &pb.Effect{Key: []byte("user:o")}, 10)
+
+	// Adopted then dropped: incref over the creation ref, then two decrefs drive
+	// it back to 0 — only the last transition enqueues it.
+	dropTip := Tip{1, 4}
+	p.PutSized(dropTip, &pb.Effect{Key: []byte("user:d")}, 10) // refs=1 (creation)
+	p.incref(dropTip)                                          // refs=2 (adoption)
+	p.decref(dropTip)                                          // refs=1, no enqueue
+	p.decref(dropTip)                                          // refs=0, enqueue
+
+	if freed := p.drainReclaim(); freed == 0 {
+		t.Fatal("drainReclaim freed nothing; queued refs==0 candidates were not reclaimed")
+	}
+	if _, ok := p.Get(cacheTip); ok {
+		t.Fatal("born-at-zero cache entry survived drainReclaim")
+	}
+	if _, ok := p.Get(dropTip); ok {
+		t.Fatal("dropped (refs→0) vertex survived drainReclaim")
+	}
+	if _, ok := p.Get(sysTip); !ok {
+		t.Fatal("pinned system-key entry was freed by drainReclaim")
+	}
+	if _, ok := p.Get(ownedTip); !ok {
+		t.Fatal("owned (refs>0) vertex was freed by drainReclaim")
+	}
+
+	// A second drain with nothing queued must be a no-op (and must not block on
+	// the empty UMPSCQueue).
+	if freed := p.drainReclaim(); freed != 0 {
+		t.Fatalf("second drainReclaim freed %d bytes; expected an empty-queue no-op", freed)
+	}
+}
+
 // TestEvictBounded_PinsSystemKey asserts the eviction sweep never selects a
 // "__swytch:" key as a victim (the registered decider pins it), while a
 // user key with the same frequency is evicted.
