@@ -113,11 +113,6 @@ type Critbit[T any] struct {
 	reapQueue   *xsync.MPMCQueue[*critNode[T]]
 	reapDropped atomic.Int64
 
-	// clock is a monotonic counter stamped onto a leaf's lastAccess on each
-	// access, giving the eviction policy an LRU tiebreak among equal-freq
-	// leaves without a wall clock.
-	clock atomic.Uint64
-
 	// Eviction policy (lifted from CloxCache as a single bounded domain;
 	// see evict.go). Sweeps run serialized under evictMu — a cold path —
 	// while the read path only bumps per-leaf freq/lastAccess + the window
@@ -129,8 +124,8 @@ type Critbit[T any] struct {
 	evictHand      uint64
 	evictK         atomic.Int32  // protected-freq threshold (adaptive)
 	ghostCount     atomic.Int64  // soft-deleted leaves retained for warm restart
-	windowHits     atomic.Uint64 // live accesses in the current adapt window
-	windowOps      atomic.Uint64 // total accesses (live + ghost) in the window
+	windowHits     windowCounter // live accesses in the current adapt window (sharded)
+	windowOps      windowCounter // total accesses (live + ghost) in the window (sharded)
 	evictedProt    atomic.Uint64 // evicted with freq > k (protected fallback)
 	evictedUnprot  atomic.Uint64 // evicted with freq <= k (unprotected)
 	reachedProt    atomic.Uint64 // leaves whose freq crossed k under pressure
@@ -139,10 +134,15 @@ type Critbit[T any] struct {
 	rateHigh       atomic.Uint32 // adaptive high graduation threshold * 10000
 	lastKDir       atomic.Int32  // direction of the last k change (+1/-1/0)
 	lastAdaptCheck atomic.Uint64 // eviction count at the last adapt check
-	lastEvictClock atomic.Uint64 // trie clock at the last EvictBatch; detects eviction resuming after a pause
 	evictDecider   func(key string) bool
 	evictNotify    func(key string, tips []EffectRef, data *T)
-	evictActive    atomic.Bool // true once eviction hooks are installed
+	// underPressure reports whether the consumer is currently over its eviction
+	// target — the keytrie analogue of CloxCache's instantaneous
+	// entryCount >= capacity check. A graduation (a leaf's freq crossing k) is
+	// counted only while this is true, so adaptive-k measures the current
+	// eviction episode instead of accumulating graduations across idle pauses.
+	underPressure func() bool
+	evictActive   atomic.Bool // true once eviction hooks are installed
 
 	// refDelta, if set, is called on every leaf tip-set transition so the
 	// consumer can maintain per-tip refcounts without re-deriving them at each
@@ -433,7 +433,7 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n.pinned = c.evictDecider != nil && !c.evictDecider(key)
 	n.tips.Store(ts)
 	n.freq.Store(1) // start warm enough to survive one sweep
-	n.lastAccess.Store(c.clock.Add(1))
+	n.lastAccess.Store(monotonic())
 	return n
 }
 
@@ -727,7 +727,7 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 }
 
 // bumpAccess records an access to leaf: it raises the frequency counter
-// (saturating at maxLeafFreq) and stamps lastAccess from the trie clock.
+// (saturating at maxLeafFreq) and stamps lastAccess from the monotonic clock.
 // Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —
 // it is promoted explicitly when its key is re-inserted.
 func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
@@ -743,24 +743,29 @@ func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
 			break
 		}
 		if leaf.freq.CompareAndSwap(f, f+1) {
-			// Count a leaf crossing into protected status, but only under
-			// eviction pressure — the graduation rate is graduated/evictions, so
-			// a graduation logged while nothing is evicting (cold start, cache
-			// not yet full) inflates the numerator against a zero denominator and
-			// pushes k around on noise. evicted>0 is the keytrie analogue of
-			// CloxCache's entryCount>=capacity guard: once a victim has been
-			// taken we are, by definition, under pressure. The extra loads only
-			// run at the f==k crossing (once per leaf lifetime), not every read.
-			if f == c.evictK.Load() && c.evictedUnprot.Load()+c.evictedProt.Load() > 0 {
+			// Count a leaf crossing into protected status, but only while
+			// instantaneously over the eviction target — CloxCache's
+			// entryCount >= capacity guard. The graduation rate is
+			// graduated/evictions; counting graduations while not under pressure
+			// (cold start, or an idle pause after the governor brought us back
+			// under target) inflates the numerator against a frozen denominator
+			// and rails k. underPressure must be the *current* over-target
+			// condition, not a "have we ever evicted" latch — a latch never falls
+			// back to false, so the rate accumulates across pauses. The predicate
+			// runs only at the f==k crossing (once per leaf lifetime), not on
+			// every read.
+			if f == c.evictK.Load() && c.underPressure != nil && c.underPressure() {
 				c.reachedProt.Add(1)
 			}
 			break
 		}
 	}
-	leaf.lastAccess.Store(c.clock.Add(1))
-	// Window accounting for adaptive-k: a live-leaf access is a hit.
-	c.windowHits.Add(1)
-	c.windowOps.Add(1)
+	leaf.lastAccess.Store(monotonic())
+	// Window accounting for adaptive-k: a live-leaf access is a hit. Sharded by
+	// leaf address so the per-access increment doesn't serialize on one line.
+	p := unsafe.Pointer(leaf)
+	c.windowHits.add(p, 1)
+	c.windowOps.add(p, 1)
 }
 
 // LoadOrStoreData returns the leaf payload for key, installing def if none is

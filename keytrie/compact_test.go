@@ -155,7 +155,7 @@ func TestCompact_InternalChunksFollowLeaves(t *testing.T) {
 // deleted accounting staying balanced.
 func TestCompact_GhostsForfeited(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 	n := defaultCritbitArenaChunkSize + 100
 	keys := make([]string, n)
 	for i := range n {
