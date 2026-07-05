@@ -851,6 +851,19 @@ func topoOrder(fetched map[effects.Tip]*pb.Effect) []*pb.Effect {
 // fetchEffect pulls one effect blob from the CDN and peels it: envelope →
 // open → inner effect.
 func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effect, error) {
+	// Our own un-acked mints are served from the outbox: the CDN cannot have
+	// an effect that hasn't been uploaded yet, and asking it anyway both fails
+	// the read (404) and risks the CDN negative-caching the miss. The read
+	// path lands here when a key's effects were evicted from the pool while
+	// still waiting in the upload queue — CloudTips names the outbox tip as
+	// frontier, and this is where its bytes come from.
+	cs.mu.Lock()
+	eff := cs.pending[tip]
+	cs.mu.Unlock()
+	if eff != nil {
+		return eff, nil
+	}
+
 	url := fmt.Sprintf("%s/%s/%016x-%016x", CloudCDNEndpoint, cs.folder, tip[0], tip[1])
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -877,11 +890,11 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 	if err != nil {
 		return nil, fmt.Errorf("cdn blob open: %w", err)
 	}
-	eff := &pb.Effect{}
-	if err := effects.UnmarshalEffect(raw, eff); err != nil {
+	fetched := &pb.Effect{}
+	if err := effects.UnmarshalEffect(raw, fetched); err != nil {
 		return nil, err
 	}
-	return eff, nil
+	return fetched, nil
 }
 
 // cloudEffectType maps the Effect.kind oneof to the cloud's structural enum.

@@ -218,3 +218,26 @@ func TestCloudTipsGatedSkipsRPC(t *testing.T) {
 		t.Fatalf("gated CloudTips returned tips: %v (closure %v)", tips, closure)
 	}
 }
+
+// TestFetchEffectServesOutbox pins the outbox-before-CDN order in fetchEffect:
+// an un-acked mint's bytes come from cs.pending, with no HTTP attempt — the
+// CDN cannot hold an effect that hasn't been uploaded, and a read that lands
+// here (evicted key whose frontier is an outbox tip) must not fail on a 404
+// the process can answer itself.
+func TestFetchEffectServesOutbox(t *testing.T) {
+	tip := effects.Tip{7, 42}
+	want := &pb.Effect{Key: []byte("k")}
+	cs := &CloudSync{
+		pending: map[effects.Tip]*pb.Effect{tip: want},
+		// No httpClient: reaching for the CDN would nil-panic, which is the
+		// test's proof that the outbox short-circuits the fetch.
+	}
+
+	got, err := cs.fetchEffect(context.Background(), tip)
+	if err != nil {
+		t.Fatalf("fetchEffect: %v", err)
+	}
+	if got != want {
+		t.Fatalf("fetchEffect returned %v, want the outbox effect", got)
+	}
+}
