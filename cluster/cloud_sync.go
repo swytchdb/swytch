@@ -29,10 +29,12 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	gproto "google.golang.org/protobuf/proto"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -71,6 +73,11 @@ const (
 	cloudReconcileTipsTimeout = 30 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
+	// cloudProgressInterval paces the outbox drain log line: pending/queued/
+	// in-flight and the interval's send/ack deltas, so a backlog is always
+	// attributable to a stage (nothing queued vs sends stalled vs acks
+	// stalled) instead of just a growing pending gauge.
+	cloudProgressInterval = 30 * time.Second
 )
 
 // CloudSync uploads this node's locally-authored effects to Swytch Cloud over
@@ -135,6 +142,11 @@ type CloudSync struct {
 	filterBulk *effects.CuckooChain
 	filterOwn  effects.CuckooChain
 
+	// sentCount/ackedCount mirror the prometheus counters so the progress
+	// logger can read interval deltas (prometheus counters aren't readable).
+	sentCount  atomic.Uint64
+	ackedCount atomic.Uint64
+
 	wake   chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -168,11 +180,22 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 	// bounded by the dataplane's walk (closureCap), not by gRPC's default
 	// 4MiB receive cap, which would artificially truncate a legit response.
 	recvCap := grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32))
-	conn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap)
+	// Keepalive is load-bearing for the outbox: a dataplane restart behind the
+	// edge leaves a half-open conn with no RST, and without pings the sender
+	// parks in Send flow control forever — the outbox freezes silently while
+	// pending grows (a 2026-07-06 bench wedged ~1M effects/node this way, with
+	// zero reconnect attempts). With pings the dead path errors out of
+	// Send/Recv and run()'s reconnect loop takes over.
+	kal := grpc.WithKeepaliveParams(keepalive.ClientParameters{
+		Time:                20 * time.Second,
+		Timeout:             10 * time.Second,
+		PermitWithoutStream: true,
+	})
+	conn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap, kal)
 	if err != nil {
 		return nil, fmt.Errorf("cloud sync: dial %s: %w", cs.target, err)
 	}
-	streamConn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap)
+	streamConn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap, kal)
 	if err != nil {
 		err = errors.Join(err, conn.Close())
 		return nil, fmt.Errorf("cloud sync: dial %s (stream): %w", cs.target, err)
@@ -188,10 +211,29 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 func (cs *CloudSync) Start() error {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	cs.engine.OnLocalEffect = cs.handleLocalEffect
-	cs.wg.Add(2)
+	cs.wg.Add(3)
 	go cs.run()
 	go cs.reconcileLoop()
+	go cs.progressLoop()
 	return nil
+}
+
+// progressLoop runs the outbox watchdog on its own goroutine — the sender can
+// park in stream.Send flow control for the entire duration of a stall, so the
+// log that reports the stall must not share its loop.
+func (cs *CloudSync) progressLoop() {
+	defer cs.wg.Done()
+	t := time.NewTicker(cloudProgressInterval)
+	defer t.Stop()
+	lastSent, lastAcked := cs.sentCount.Load(), cs.ackedCount.Load()
+	for {
+		select {
+		case <-cs.ctx.Done():
+			return
+		case <-t.C:
+			lastSent, lastAcked = cs.logOutboxProgress(lastSent, lastAcked)
+		}
+	}
 }
 
 // Stop drains the outbox, then halts the upload loop. Graceful shutdown must
@@ -426,6 +468,34 @@ func (cs *CloudSync) runStream() error {
 	}
 }
 
+// logOutboxProgress emits the per-interval drain line and returns the new
+// send/ack watermarks. Warn when a non-empty outbox moved nothing this
+// interval — with keepalive that means the stream is dying (about to error
+// out), without it that was the silent-wedge signature.
+func (cs *CloudSync) logOutboxProgress(lastSent, lastAcked uint64) (uint64, uint64) {
+	sent, acked := cs.sentCount.Load(), cs.ackedCount.Load()
+	cs.mu.Lock()
+	pending := len(cs.pending)
+	queued := len(cs.sendQ)
+	relays := len(cs.relayQ)
+	cs.mu.Unlock()
+	if pending == 0 && queued == 0 && relays == 0 {
+		return sent, acked
+	}
+	if sent == lastSent && acked == lastAcked {
+		slog.Warn("cloud sync: outbox stalled",
+			"pending", pending, "queued", queued, "relays", relays,
+			"inflight", sent-acked, "interval", cloudProgressInterval)
+	} else {
+		slog.Info("cloud sync: outbox progress",
+			"pending", pending, "queued", queued, "relays", relays,
+			"inflight", sent-acked,
+			"sent_delta", sent-lastSent, "acked_delta", acked-lastAcked,
+			"interval", cloudProgressInterval)
+	}
+	return sent, acked
+}
+
 // nextEnvelope pops the next upload: fetch-relays first (the cloud is blocked
 // on them mid-scan), then outbox mints. Sealing happens here, on the sync
 // goroutine, never on the emit path.
@@ -458,6 +528,7 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 			continue
 		}
 		cloudEffectsSentTotal.Inc()
+		cs.sentCount.Add(1)
 		return env, true
 	}
 }
@@ -487,6 +558,7 @@ func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 	if ack.GetOk() {
 		if cs.retire(tip) {
 			cloudEffectsAckedTotal.Inc()
+			cs.ackedCount.Add(1)
 		}
 		return
 	}
