@@ -52,7 +52,7 @@ func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, ta
 	}}, nil
 }
 
-func (b *selectiveBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
+func (b *selectiveBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
 	if data, ok := b.fetchable[Tip{ref.NodeId, ref.Offset}]; ok && data != nil {
 		return data, nil
 	}

@@ -268,7 +268,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 				State:      result,
 			}
 			for _, t := range tips {
-				cached, err := c.engine.getEffect(t)
+				cached, err := c.engine.getEffect(key, t)
 				if err != nil {
 					continue
 				}
@@ -1438,7 +1438,7 @@ func (c *Context) flushTx() error {
 				}
 				for beatenTxn, beatenOffset := range defeatedSet {
 					verdicts[beatenTxn] = pb.Verdict_LOST
-					loserEff, err := c.engine.getEffect(beatenOffset)
+					loserEff, err := c.engine.getEffect("", beatenOffset)
 					if err != nil {
 						slog.Warn("flushTx: cannot fetch beaten bind for verdict emit",
 							"loser_txn", beatenTxn,

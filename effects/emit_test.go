@@ -101,7 +101,9 @@ func (m *mockBroadcaster) SendNack(nack *pb.NackNotify, targetNodeID pb.NodeID) 
 	defer m.mu.Unlock()
 	m.sentNacks = append(m.sentNacks, nack)
 }
-func (m *mockBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) { return nil, nil }
+func (m *mockBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
+	return nil, nil
+}
 func (m *mockBroadcaster) Fetch(ref *pb.EffectRef) ([]byte, error) {
 	return nil, nil
 }

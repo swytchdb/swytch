@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -163,11 +164,15 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 		wake:        make(chan struct{}, 1),
 	}
 	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS13})
-	conn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds))
+	// GetTips responses carry the closure effects inline; the closure is
+	// bounded by the dataplane's walk (closureCap), not by gRPC's default
+	// 4MiB receive cap, which would artificially truncate a legit response.
+	recvCap := grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32))
+	conn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap)
 	if err != nil {
 		return nil, fmt.Errorf("cloud sync: dial %s: %w", cs.target, err)
 	}
-	streamConn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds))
+	streamConn, err := grpc.NewClient(cs.target, grpc.WithTransportCredentials(creds), recvCap)
 	if err != nil {
 		err = errors.Join(err, conn.Close())
 		return nil, fmt.Errorf("cloud sync: dial %s (stream): %w", cs.target, err)
@@ -286,6 +291,8 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	cs.sendQ = append(cs.sendQ, offset)
 	backlog := len(cs.pending)
 	cs.mu.Unlock()
+	cloudOutboxEnqueuedTotal.Inc()
+	cloudOutboxPending.Set(float64(backlog))
 	cs.wakeSender()
 
 	if backlog%backlogWarnEvery == 0 {
@@ -300,8 +307,10 @@ func (cs *CloudSync) wakeSender() {
 	}
 }
 
-// retire removes an outbox entry and releases its pool reference.
-func (cs *CloudSync) retire(tip effects.Tip) {
+// retire removes an outbox entry and releases its pool reference. Returns
+// whether the tip was actually held — false for acks of fetch-relays and
+// duplicate acks, which were never outbox entries.
+func (cs *CloudSync) retire(tip effects.Tip) bool {
 	cs.mu.Lock()
 	eff, held := cs.pending[tip]
 	delete(cs.pending, tip)
@@ -314,10 +323,13 @@ func (cs *CloudSync) retire(tip effects.Tip) {
 			}
 		}
 	}
+	backlog := len(cs.pending)
 	cs.mu.Unlock()
 	if held {
+		cloudOutboxPending.Set(float64(backlog))
 		cs.engine.EffectCache().Decref(tip)
 	}
+	return held
 }
 
 // pendingTipsFor returns the outbox's un-acked tips on key — the frontier the
@@ -351,6 +363,7 @@ func (cs *CloudSync) run() {
 		if time.Since(started) > time.Minute {
 			backoff = cloudRetryMin
 		}
+		cloudStreamReconnectsTotal.Inc()
 		slog.Warn("cloud sync: stream ended, reconnecting", "error", err, "retry_in", backoff)
 		select {
 		case <-cs.ctx.Done():
@@ -444,6 +457,7 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 			cs.retire(tip)
 			continue
 		}
+		cloudEffectsSentTotal.Inc()
 		return env, true
 	}
 }
@@ -471,7 +485,9 @@ func (cs *CloudSync) readLoop(stream dp.DataPlane_WriteEffectsClient) error {
 func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 	tip := effects.Tip{ack.GetId().GetNodeId(), ack.GetId().GetOffset()}
 	if ack.GetOk() {
-		cs.retire(tip)
+		if cs.retire(tip) {
+			cloudEffectsAckedTotal.Inc()
+		}
 		return
 	}
 
@@ -481,6 +497,7 @@ func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 	if !held {
 		return
 	}
+	cloudEffectsNackedTotal.Inc()
 	slog.Warn("cloud sync: cloud failed to store effect, will retry",
 		"tip", tip, "error", ack.GetError())
 	time.AfterFunc(cloudNackRetry, func() {
@@ -580,10 +597,10 @@ func (cs *CloudSync) buildEnvelope(tip effects.Tip, eff *pb.Effect) (*dp.Effect,
 	}, nil
 }
 
-// FetchFromCDN implements CDNFetcher: the engine's FetchFromAny races this
-// against peer fetch, so every recursive dep fetch (NACK ingest, backfill,
-// subscription bootstrap) transparently falls back to the cloud for effects
-// no live peer holds. Returns wire-format bytes, same as a peer fetch.
+// FetchFromCDN implements CDNFetcher: FetchFromAny orders this against peer
+// fetch by the caller's FetchHint, so every recursive dep fetch (NACK ingest,
+// backfill, subscription bootstrap) transparently falls back to the cloud for
+// effects no live peer holds. Returns wire-format bytes, same as a peer fetch.
 func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byte, error) {
 	eff, err := cs.fetchEffect(ctx, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 	if err != nil {
@@ -593,13 +610,14 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 }
 
 // DiscoverMembers reads the membership roster from the cloud for peer
-// discovery: GetTips names the frontier, the CDN serves the blobs, and
-// ReduceBranch — the real reducer — produces the roster. Deliberately zero
-// engine interaction: pre-loading membership into the engine makes this node
-// non-divergent at subscription bootstrap, so peers ACK instead of NACK and
-// their key filters never arrive — free-read-misses then return false
-// negatives for keys written before we joined. Discovery only yields candidate
-// addresses; the authoritative state arrives through the normal join path.
+// discovery: GetTips names the frontier and delivers the closure effects
+// inline, and ReduceBranch — the real reducer — produces the roster.
+// Deliberately zero engine interaction: pre-loading membership into the
+// engine makes this node non-divergent at subscription bootstrap, so peers
+// ACK instead of NACK and their key filters never arrive — free-read-misses
+// then return false negatives for keys written before we joined. Discovery
+// only yields candidate addresses; the authoritative state arrives through
+// the normal join path.
 func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) (*pb.ReducedEffect, error) {
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
@@ -608,19 +626,25 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	if err != nil {
 		return nil, fmt.Errorf("cloud get tips: %w", err)
 	}
+	// Pull the sub-DAG tips-down, seeded from the inline closure; the per-tip
+	// CDN fetch below only covers stragglers the sidecar didn't carry.
+	// Snapshot compaction keeps membership chains short; the bound only stops
+	// a runaway walk, and hitting it means the roster may be partial — say
+	// so, since discovery still works with any one live address.
+	const walkLimit = 1024
+	fetched := map[effects.Tip]*pb.Effect{}
 	var queue []effects.Tip
 	for _, kt := range resp.GetKeys() {
+		for _, ce := range cs.peelSidecar(kt) {
+			fetched[ce.Tip] = ce.Eff
+			for _, dep := range ce.Eff.Deps {
+				queue = append(queue, effects.Tip{dep.NodeId, dep.Offset})
+			}
+		}
 		for _, ref := range kt.GetTips() {
 			queue = append(queue, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
 	}
-
-	// Pull the sub-DAG tips-down. Snapshot compaction keeps membership chains
-	// short; the bound only stops a runaway walk, and hitting it means the
-	// roster may be partial — say so, since discovery still works with any
-	// one live address.
-	const walkLimit = 1024
-	fetched := map[effects.Tip]*pb.Effect{}
 	for len(queue) > 0 {
 		if len(fetched) >= walkLimit {
 			slog.Warn("cloud discover: membership walk truncated, roster may be partial",
@@ -655,11 +679,11 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 // its upload acked would free-miss even though its bytes sit refcount-pinned
 // in our own pool. A nil slice means neither holds anything. This is the
 // read-miss backstop — the engine installs these tips (walkAndInstall) and
-// pulls the effect blobs on demand (pool first, then CDN), rehydrating an
-// evicted key so the cluster owns it again. Unlike DiscoverMembers this does
-// no reduction: it hands the frontier to the engine, whose own reconstruct
-// path does the rest. The closure passes through Cloud's advisory prefetch
-// list verbatim; outbox tips need no closure — their bytes are already local.
+// the closure effects arrive inline (the sidecar), so the install walk runs
+// locally instead of one fetch per dep, rehydrating an evicted key so the
+// cluster owns it again. Unlike DiscoverMembers this does no reduction: it
+// hands the frontier to the engine, whose own reconstruct path does the rest.
+// Outbox tips need no sidecar — their bytes are already local.
 // MayHold implements effects.CloudReader: the free, no-RPC filter gate the
 // engine consults before deciding a read-miss can skip the subscribe +
 // CloudTips path entirely. Own un-acked uploads are covered: filterOwn is fed
@@ -668,7 +692,7 @@ func (cs *CloudSync) MayHold(key string) bool {
 	return cs.cloudMayHold(CloudKeyName(cs.keyNameKey, []byte(key)))
 }
 
-func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.Tip, error) {
+func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {
 		return nil, nil, nil
@@ -697,7 +721,7 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 	for _, t := range tips {
 		seen[t] = struct{}{}
 	}
-	var closure []effects.Tip
+	var sidecar []effects.CloudEffect
 	for _, kt := range resp.GetKeys() {
 		for _, ref := range kt.GetTips() {
 			t := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -706,11 +730,9 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 				tips = append(tips, t)
 			}
 		}
-		for _, ref := range kt.GetClosure() {
-			closure = append(closure, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
-		}
+		sidecar = append(sidecar, cs.peelSidecar(kt)...)
 	}
-	return tips, closure, nil
+	return tips, sidecar, nil
 }
 
 // markReconcile records a key whose read was served outbox-only during a
@@ -795,18 +817,15 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 		if !ok {
 			continue
 		}
-		var tips, closure []effects.Tip
+		var tips []effects.Tip
 		for _, ref := range kt.GetTips() {
 			tips = append(tips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
-		}
-		for _, ref := range kt.GetClosure() {
-			closure = append(closure, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
 		if len(tips) == 0 {
 			cs.clearReconcile(key) // the cloud holds nothing we haven't already served
 			continue
 		}
-		if err := cs.engine.InstallCloudTips(key, tips, closure); err != nil {
+		if err := cs.engine.InstallCloudTips(key, tips, cs.peelSidecar(kt)); err != nil {
 			slog.Warn("cloud reconcile: install failed; will retry", "key", key, "error", err)
 			continue
 		}
@@ -885,6 +904,7 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 	if err != nil {
 		return nil, err
 	}
+	cloudCDNFetchesTotal.Inc()
 	resp, err := cs.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -902,15 +922,52 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 	if err := gproto.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("cdn blob decode: %w", err)
 	}
-	raw, err := cs.enc.OpenAndDecompress(env.GetRawEffect(), cloudEffectInfo)
+	fetched, _, err := cs.peelEnvelope(&env)
 	if err != nil {
-		return nil, fmt.Errorf("cdn blob open: %w", err)
-	}
-	fetched := &pb.Effect{}
-	if err := effects.UnmarshalEffect(raw, fetched); err != nil {
 		return nil, err
 	}
 	return fetched, nil
+}
+
+// peelEnvelope opens one cloud effect envelope — seal off, decompress,
+// unmarshal the inner effect. Returns the inner effect and its marshaled
+// proto length (the pool's cache-accounting size).
+func (cs *CloudSync) peelEnvelope(env *dp.Effect) (*pb.Effect, int, error) {
+	raw, err := cs.enc.OpenAndDecompress(env.GetRawEffect(), cloudEffectInfo)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cloud blob open: %w", err)
+	}
+	eff := &pb.Effect{}
+	if err := effects.UnmarshalEffect(raw, eff); err != nil {
+		return nil, 0, err
+	}
+	return eff, len(raw), nil
+}
+
+// peelSidecar decodes a KeyTips' inline closure into engine-installable
+// effects. An envelope that fails to peel is skipped with a warning — the
+// install walk fetches it like any other straggler.
+func (cs *CloudSync) peelSidecar(kt *dp.KeyTips) []effects.CloudEffect {
+	closure := kt.GetClosure()
+	if len(closure) == 0 {
+		return nil
+	}
+	sidecar := make([]effects.CloudEffect, 0, len(closure))
+	for _, env := range closure {
+		eff, protoLen, err := cs.peelEnvelope(env)
+		if err != nil {
+			slog.Warn("cloud sync: sidecar envelope unusable, walk will fetch it",
+				"tip", effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}, "error", err)
+			continue
+		}
+		sidecar = append(sidecar, effects.CloudEffect{
+			Tip:      effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()},
+			Eff:      eff,
+			ProtoLen: protoLen,
+		})
+	}
+	cloudSidecarEffectsTotal.Add(float64(len(sidecar)))
+	return sidecar
 }
 
 // cloudEffectType maps the Effect.kind oneof to the cloud's structural enum.

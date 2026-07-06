@@ -168,3 +168,16 @@ func (e *Engine) clusterMaybeHasKey(key string) bool {
 	}
 	return false
 }
+
+// fetchHint orders FetchFromAny's sources for a fetch on key: a key some
+// peer's filter claims is served peers-first (the cluster holds it — the CDN
+// would be a WAN detour and, in bulk, a request storm the edge blocks); a key
+// no peer claims is cloud state being rehydrated, CDN-first. Unknown key
+// (cross-key bind adjudication) defaults to peers — those refs arrive via
+// NACK chains a peer provably holds.
+func (e *Engine) fetchHint(key string) FetchHint {
+	if key == "" || e.clusterMaybeHasKey(key) {
+		return PreferPeers
+	}
+	return PreferCDN
+}

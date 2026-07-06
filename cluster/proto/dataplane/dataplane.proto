@@ -137,12 +137,12 @@ message GetTipsResponse {
 message KeyTips {
   bytes key = 1;             // echoes the requested encrypted key
   repeated EffectRef tips = 2;
-  // closure is every ref (tips included) a reconstruction from these tips
+  // closure is every effect (tips included) a reconstruction from these tips
   // needs: the sub-DAG from the tips down to the LCA state-carrying snapshot,
-  // walked over the cleartext envelope deps. It lets the node fetch all blobs
-  // in one parallel fan-out instead of a sequential per-dep walk. Advisory and
-  // possibly partial (capped, or truncated at a blob the cloud is still
-  // fetching back from the cluster) — the node's own walk remains the
-  // authority and pulls any ref not listed here on demand.
-  repeated EffectRef closure = 3;
+  // walked over the cleartext envelope deps, carried as full envelopes so the
+  // node installs them without per-blob origin round-trips. Possibly partial
+  // (capped, or missing a blob the cloud is still fetching back from the
+  // cluster) — the node's own walk remains the authority and pulls any
+  // missing effect on demand.
+  repeated Effect closure = 3;
 }

@@ -42,7 +42,10 @@ type Broadcaster interface {
 	ReplicateMarshalled(notify *pb.OffsetNotify, notifyBody []byte, targetNodeID pb.NodeID) ([]*pb.NackNotify, error)
 	// SendNack sends an enriched NACK to the originator.
 	SendNack(nack *pb.NackNotify, targetNodeID pb.NodeID)
-	FetchFromAny(ref *pb.EffectRef) ([]byte, error)
+	// FetchFromAny fetches effect bytes from peers or the cloud CDN. hint
+	// orders the two sources; the second is a fallback tried only after the
+	// first actually failed — never raced.
+	FetchFromAny(ref *pb.EffectRef, hint FetchHint) ([]byte, error)
 	Fetch(ref *pb.EffectRef) ([]byte, error)
 	PeerIDs() []pb.NodeID
 	// AllRegionPeersReachable returns true if every same-region peer is
@@ -56,6 +59,32 @@ type Broadcaster interface {
 	// ForwardTransaction sends a transaction to a specific peer for execution
 	// (adaptive serialization §5). Returns the leader's response.
 	ForwardTransaction(ctx context.Context, targetNodeID pb.NodeID, tx *pb.ForwardedTransaction) (*pb.ForwardedResponse, error)
+}
+
+// FetchHint orders the two effect-byte sources for FetchFromAny. The engine
+// derives it from knowledge it already holds: the per-peer key filters claim
+// the key → PreferPeers; otherwise the cluster provably lacks it →
+// PreferCDN. The unpreferred source is a failure fallback, never raced.
+type FetchHint uint8
+
+const (
+	// PreferPeers tries connected peers first, cloud CDN on total peer
+	// failure. The default for peer-origin fetches (NACK ingest, backfill)
+	// and any fetch without key context.
+	PreferPeers FetchHint = iota
+	// PreferCDN tries the cloud CDN first, peers on failure. Chosen when no
+	// peer's key filter claims the key — a cloud rehydrate of state the
+	// cluster no longer holds.
+	PreferCDN
+)
+
+// CloudEffect is one closure effect delivered inline by a GetTips response:
+// the decrypted inner effect plus its marshaled proto length for cache
+// accounting.
+type CloudEffect struct {
+	Tip      Tip
+	Eff      *pb.Effect
+	ProtoLen int
 }
 
 // CloudReader is the tiered-storage backstop: it reports the tip frontier that
@@ -72,15 +101,15 @@ type CloudReader interface {
 	// cloudConsulted marker caps the WAN round-trips.
 	MayHold(key string) bool
 	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
-	// error) if Cloud holds nothing for it. closure is Cloud's advisory list of
-	// every ref reachable from those tips down to the LCA snapshot: the engine
-	// prefetches those blobs in one parallel fan-out before walkAndInstall so
-	// the walk runs against warm cache instead of a sequential per-dep WAN
-	// fetch. closure may be nil, partial, or a superset — the walk stays the
-	// authority and pulls anything missing on demand (FetchFromAny, which
-	// already races the CDN). Content-blind on the wire: the implementation
-	// maps key to its Cloud PRF image and calls GetTips.
-	CloudTips(ctx context.Context, key string) (tips []Tip, closure []Tip, err error)
+	// error) if Cloud holds nothing for it. sidecar is the closure — every
+	// effect reachable from those tips down to the LCA snapshot — delivered
+	// inline by GetTips and installed into the effect cache before the tip
+	// walk, so the walk runs locally instead of one WAN fetch per dep. The
+	// sidecar may be partial (capped, or missing a blob the cloud is still
+	// fetching back) — the walk stays the authority and pulls anything
+	// missing on demand via FetchFromAny. Content-blind on the wire: the
+	// implementation maps key to its Cloud PRF image and calls GetTips.
+	CloudTips(ctx context.Context, key string) (tips []Tip, sidecar []CloudEffect, err error)
 }
 
 // PeerRTTProvider provides RTT measurements to peers for optimal leader selection.

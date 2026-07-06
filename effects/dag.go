@@ -185,7 +185,7 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 	queue := make([]Tip, 0, len(tips)*2)
 
 	for _, t := range tips {
-		eff, err := d.engine.getEffect(t)
+		eff, err := d.engine.getEffect(d.key, t)
 		if err != nil {
 			return err
 		}
@@ -222,7 +222,7 @@ func (d *dag) bfs(tips []Tip, lcaTip *Tip) error {
 			if d.visited[dt] {
 				continue
 			}
-			depEff, err := d.engine.getEffect(dt)
+			depEff, err := d.engine.getEffect(d.key, dt)
 			if err != nil {
 				return err
 			}

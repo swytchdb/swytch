@@ -1387,7 +1387,7 @@ func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map
 				continue
 			}
 			visited[t] = true
-			eff, err := e.getEffect(t)
+			eff, err := e.getEffect(k, t)
 			if err != nil {
 				continue
 			}
@@ -1512,7 +1512,7 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 			continue
 		}
 		visited[t] = true
-		eff, err := e.getEffect(t)
+		eff, err := e.getEffect(key, t)
 		if err != nil {
 			continue
 		}
@@ -1641,7 +1641,7 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 		for len(stack) > 0 {
 			cur := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			eff, err := e.getEffect(cur)
+			eff, err := e.getEffect(key, cur)
 			if err != nil {
 				continue
 			}
@@ -1756,7 +1756,7 @@ func (e *Engine) collectBindEffects(bindEff *pb.Effect, key string) ([]*pb.Effec
 		}
 		visited[t] = true
 
-		eff, err := e.getEffect(t)
+		eff, err := e.getEffect(key, t)
 		if err != nil {
 			return nil, err
 		}
@@ -1777,8 +1777,11 @@ func (e *Engine) collectBindEffects(bindEff *pb.Effect, key string) ([]*pb.Effec
 }
 
 // getEffect returns the deserialized Effect at the given offset, fetching
-// from the effect cache or remote peers as needed.
-func (e *Engine) getEffect(offset Tip) (*pb.Effect, error) {
+// from the effect cache, peers, or the cloud CDN as needed. key is the key
+// the walk runs on — it picks the fetch source order via fetchHint — and may
+// be "" when the caller has no single-key context (cross-key bind
+// adjudication), which defaults to peers-first.
+func (e *Engine) getEffect(key string, offset Tip) (*pb.Effect, error) {
 	// Check deserialized effect cache
 	if e.effectCache != nil {
 		if cached, ok := e.effectCache.Get(offset); ok {
@@ -1790,7 +1793,7 @@ func (e *Engine) getEffect(offset Tip) (*pb.Effect, error) {
 	if e.broadcaster == nil {
 		return nil, fmt.Errorf("getEffect: offset %d not cached and no broadcaster", offset)
 	}
-	fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(offset))
+	fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(offset), e.fetchHint(key))
 	if fetchErr != nil {
 		return nil, fmt.Errorf("getEffect: offset %d fetch failed: %w", offset, fetchErr)
 	}

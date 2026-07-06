@@ -615,7 +615,7 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
 	defer cancel()
-	tips, closure, err := e.cloudReader.CloudTips(ctx, key)
+	tips, sidecar, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
 		slog.Warn("cloud read-miss backstop: get tips failed; failing read", "key", key, "error", err)
 		return false, false, fmt.Errorf("%w: get tips for %q: %w", ErrCloudUnavailable, key, err)
@@ -623,7 +623,7 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 	if len(tips) == 0 {
 		return false, true, nil // Cloud holds nothing either: an authoritative miss.
 	}
-	if err := e.InstallCloudTips(key, tips, closure); err != nil {
+	if err := e.InstallCloudTips(key, tips, sidecar); err != nil {
 		return false, false, err
 	}
 	return true, true, nil
@@ -637,15 +637,23 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 // outbox during a Cloud outage installs the missed Cloud frontier here once
 // Cloud answers again.
 //
-// The install is all-or-nothing: the whole frontier is walk-validated (blobs
-// pulled via FetchFromAny → CDN) before any tip lands in the index. Installing
-// the reachable subset would let a subsequent read reconstruct partial state
-// as if it were the whole answer. Unlike retryBootstrap's walkAndInstall,
-// which is deliberately progressive.
-func (e *Engine) InstallCloudTips(key string, tips, closure []Tip) error {
-	// Warm the cache with Cloud's advisory closure in one parallel fan-out so
-	// the walk below runs locally instead of one WAN fetch per dep (n+1).
-	e.prefetchEffects(closure)
+// The install is all-or-nothing: the whole frontier is walk-validated before
+// any tip lands in the index. Installing the reachable subset would let a
+// subsequent read reconstruct partial state as if it were the whole answer.
+// Unlike retryBootstrap's walkAndInstall, which is deliberately progressive.
+func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
+	// Warm the cache with the closure effects GetTips delivered inline, so the
+	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
+	// owned-vs-cache routing as every other ingest path; stragglers the
+	// sidecar didn't carry are pulled by the walk itself.
+	if e.effectCache != nil {
+		for _, ce := range sidecar {
+			if _, ok := e.effectCache.Get(ce.Tip); ok {
+				continue
+			}
+			e.putIngested(ce.Tip, ce.Eff, ce.ProtoLen)
+		}
+	}
 	for _, tip := range tips {
 		rd := newDag(e, key, "")
 		if walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil }); walkErr != nil {
@@ -786,7 +794,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	if currentSet != nil {
 		tips := currentSet.Tips()
 		for _, t := range tips {
-			cached, err := e.getEffect(t)
+			cached, err := e.getEffect(key, t)
 			if err != nil {
 				continue
 			}
@@ -859,7 +867,7 @@ func (e *Engine) lookupSnapshotVerdict(key, txnID string) (pb.Verdict, bool) {
 			continue
 		}
 		visited[t] = true
-		eff, err := e.getEffect(t)
+		eff, err := e.getEffect(key, t)
 		if err != nil {
 			continue
 		}
@@ -928,7 +936,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		}
 		slog.Debug("HandleRemote: fetching missing effect data", "offset", notify.Origin)
 		var err error
-		effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+		effectData, err = e.broadcaster.FetchFromAny(notify.Origin, e.fetchHint(string(notify.Key)))
 		if err != nil {
 			return nil, err
 		}
@@ -1307,7 +1315,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 				return nil
 			}
 			var err error
-			effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+			effectData, err = e.broadcaster.FetchFromAny(notify.Origin, e.fetchHint(string(notify.Key)))
 			if err != nil {
 				return err
 			}
@@ -1505,7 +1513,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 		for len(ancestorStack) > 0 {
 			cur := ancestorStack[len(ancestorStack)-1]
 			ancestorStack = ancestorStack[:len(ancestorStack)-1]
-			eff, err := e.getEffect(cur)
+			eff, err := e.getEffect(k, cur)
 			if err != nil {
 				continue
 			}
@@ -1528,7 +1536,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 				continue
 			}
 			visited[t] = true
-			eff, err := e.getEffect(t)
+			eff, err := e.getEffect(k, t)
 			if err != nil {
 				continue
 			}
@@ -1599,7 +1607,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 			if tipOff == bindOffset {
 				continue
 			}
-			eff, err := e.getEffect(tipOff)
+			eff, err := e.getEffect(k, tipOff)
 			if err != nil {
 				continue
 			}
@@ -1672,7 +1680,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 							continue
 						}
 						visited[off] = true
-						depEff, err := e.getEffect(off)
+						depEff, err := e.getEffect(k, off)
 						if err != nil {
 							continue
 						}
@@ -1957,7 +1965,7 @@ func (e *Engine) prefetchEffects(refs []Tip) {
 		}
 		pending++
 		go func(ref *pb.EffectRef) {
-			data, err := e.broadcaster.FetchFromAny(ref)
+			data, err := e.broadcaster.FetchFromAny(ref, PreferPeers)
 			if err != nil {
 				results <- fetchResult{}
 				return
@@ -2378,7 +2386,7 @@ func (e *Engine) probeAndFetchKey(key string) {
 			}
 		}
 
-		fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(off))
+		fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(off), e.fetchHint(key))
 		if fetchErr != nil {
 			continue
 		}

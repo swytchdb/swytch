@@ -31,6 +31,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/quic-go/quic-go"
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -452,60 +453,53 @@ func (pm *PeerManager) SetCDNFetcher(f CDNFetcher) {
 	pm.cdnFetcher = f
 }
 
-// FetchFromAny tries to fetch effect bytes from any connected peer,
-// racing against CDN fetch if available. First successful result wins.
-func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
+// FetchFromAny fetches effect bytes from peers or the CDN, in the order the
+// hint names. The unpreferred source is a fallback tried only after the
+// preferred one actually failed — never raced: racing turned every cold-key
+// hydration into a per-effect CDN GET storm from one address, which the
+// edge's per-IP protection blocks (accept-TLS-then-reset), stalling reads
+// cluster-wide. Each leg runs under its own 10s timeout; peer legs fail fast
+// (every conn answers not-found in ~1 RTT), so the fallback adds latency only
+// when the preferred source genuinely missed.
+func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint) ([]byte, error) {
 	token := pm.mu.RLock()
 	cdnFetcher := pm.cdnFetcher
 	pm.mu.RUnlock(token)
 
-	conns := pm.fetchConns()
+	fetchPeers := func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
+		defer cancel()
+		return pm.fetchFromConns(ctx, offset, pm.fetchConns())
+	}
 
-	// No CDN fetcher: peer fetch only (original behavior). No outer race to
-	// honor, so root the fetch in pm.ctx (lives for the manager's lifetime).
 	if cdnFetcher == nil {
-		return pm.fetchFromConns(pm.ctx, offset, conns)
+		return fetchPeers()
 	}
 
-	// Race CDN against peer fetch
-	ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
-	defer cancel()
-
-	type result struct {
-		data []byte
-		err  error
-	}
-	ch := make(chan result, 2)
-
-	// Path 1: CDN fetch
-	go func() {
-		data, err := cdnFetcher.FetchFromCDN(ctx, offset)
-		ch <- result{data, err}
-	}()
-
-	// Path 2: Peer fetch — share the race ctx so peer fetches cancel the
-	// moment CDN wins (or the 10s timeout fires).
-	go func() {
-		data, err := pm.fetchFromConns(ctx, offset, conns)
-		ch <- result{data, err}
-	}()
-
-	// First success wins
-	var lastErr error
-	for range 2 {
-		select {
-		case r := <-ch:
-			if r.err == nil && len(r.data) > 0 {
-				return r.data, nil
-			}
-			lastErr = r.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	fetchCDN := func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
+		defer cancel()
+		return cdnFetcher.FetchFromCDN(ctx, offset)
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
+	first, second := fetchPeers, fetchCDN
+	if hint == effects.PreferCDN {
+		first, second = fetchCDN, fetchPeers
+	}
+
+	data, err := first()
+	if err == nil && len(data) > 0 {
+		return data, nil
+	}
+	fallbackData, fallbackErr := second()
+	if fallbackErr == nil && len(fallbackData) > 0 {
+		return fallbackData, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fallbackErr != nil {
+		return nil, fallbackErr
 	}
 	return nil, ErrPeerUnavailable
 }

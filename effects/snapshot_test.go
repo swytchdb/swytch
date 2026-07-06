@@ -1042,7 +1042,7 @@ func (b *bootstrapBroadcaster) ReplicateTo(notify *pb.OffsetNotify, wireData []b
 	return nil, nil
 }
 
-func (b *bootstrapBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
+func (b *bootstrapBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
 	if b.remoteEngine == nil {
 		return nil, nil
 	}

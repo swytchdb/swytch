@@ -215,7 +215,7 @@ func (g *gatedBroadcaster) SendNack(_ *pb.NackNotify, _ pb.NodeID) {
 	// here.
 }
 
-func (g *gatedBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
+func (g *gatedBroadcaster) FetchFromAny(ref *pb.EffectRef, _ effects.FetchHint) ([]byte, error) {
 	g.bus.mu.Lock()
 	peer, ok := g.bus.engines[g.peer]
 	g.bus.mu.Unlock()
@@ -247,7 +247,7 @@ func (g *gatedBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
 }
 
 func (g *gatedBroadcaster) Fetch(ref *pb.EffectRef) ([]byte, error) {
-	return g.FetchFromAny(ref)
+	return g.FetchFromAny(ref, effects.PreferPeers)
 }
 
 func (g *gatedBroadcaster) PeerIDs() []pb.NodeID          { return g.peers }

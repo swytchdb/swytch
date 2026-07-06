@@ -28,12 +28,12 @@ import (
 )
 
 // fakeCloudReader is a CloudReader stub: it returns a fixed tip frontier (and
-// advisory closure) per key and counts how many times it was consulted, so a
-// test can assert that once a key is rehydrated the cluster takes over and
-// Cloud is not asked again.
+// inline closure sidecar) per key and counts how many times it was consulted,
+// so a test can assert that once a key is rehydrated the cluster takes over
+// and Cloud is not asked again.
 type fakeCloudReader struct {
 	tips    map[string][]Tip
-	closure map[string][]Tip
+	sidecar map[string][]CloudEffect
 	err     error
 	calls   int
 }
@@ -42,12 +42,23 @@ type fakeCloudReader struct {
 // engine's free-miss gate would otherwise skip for a filter-negative key.
 func (f *fakeCloudReader) MayHold(string) bool { return true }
 
-func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []Tip, error) {
+func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []CloudEffect, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, nil, f.err
 	}
-	return f.tips[key], f.closure[key], nil
+	return f.tips[key], f.sidecar[key], nil
+}
+
+// cloudEffect converts wire bytes (as makeReachableEffect returns) into the
+// CloudEffect a GetTips sidecar would deliver for that tip.
+func cloudEffect(t *testing.T, tip Tip, wire []byte) CloudEffect {
+	t.Helper()
+	eff, err := parseWireEffect(wire)
+	if err != nil {
+		t.Fatalf("parse wire effect: %v", err)
+	}
+	return CloudEffect{Tip: tip, Eff: eff, ProtoLen: len(wire)}
 }
 
 // TestReadMissRehydratesFromCloud is the tiered-storage core: a read of a key
@@ -60,19 +71,19 @@ func TestReadMissRehydratesFromCloud(t *testing.T) {
 	// The single leaf effect Cloud still holds for the key (writer long gone).
 	tip, wire := makeReachableEffect(t, key, pb.NodeID(7), 1)
 
+	// Nothing is fetchable from the broadcaster: the sidecar must carry the
+	// whole closure, so the install walk runs entirely locally — zero
+	// per-effect network fetches.
 	bc := &selectiveBroadcaster{
 		mockBroadcaster: mockBroadcaster{
 			allRegionPeersReachable: true, // in the majority partition
 			peerIDs:                 []pb.NodeID{7},
 		},
-		fetchable: map[Tip][]byte{tip: wire}, // the CDN/peer serves the blob
 	}
 	e := newTestEngine(bc)
-	// The closure names the same ref, exercising the parallel prefetch ahead of
-	// the walk (the walk then finds the blob already cached).
 	fake := &fakeCloudReader{
 		tips:    map[string][]Tip{key: {tip}},
-		closure: map[string][]Tip{key: {tip}},
+		sidecar: map[string][]CloudEffect{key: {cloudEffect(t, tip, wire)}},
 	}
 	e.SetCloudReader(fake)
 
@@ -105,6 +116,63 @@ func TestReadMissRehydratesFromCloud(t *testing.T) {
 	}
 	if fake.calls != 1 {
 		t.Fatalf("Cloud was re-consulted after rehydrate (%d calls); the cluster should have taken over", fake.calls)
+	}
+}
+
+// TestReadMissPartialSidecarFetchesStraggler: the sidecar is advisory and may
+// be partial (capped, or a blob the cloud was still fetching back). The
+// install walk stays the authority: anything the sidecar didn't carry is
+// pulled through FetchFromAny like any other missing dep.
+func TestReadMissPartialSidecarFetchesStraggler(t *testing.T) {
+	const key = "evicted"
+	depTip, depWire := makeReachableEffect(t, key, pb.NodeID(7), 1)
+	depEff, err := parseWireEffect(depWire)
+	if err != nil {
+		t.Fatalf("parse dep: %v", err)
+	}
+	hlc := sTs(2)
+	tipEff := &pb.Effect{
+		Key:            []byte(key),
+		Hlc:            hlc,
+		NodeId:         7,
+		Deps:           []*pb.EffectRef{{NodeId: uint64(depEff.NodeId), Offset: depTip[1]}},
+		ForkChoiceHash: ComputeForkChoiceHash(pb.NodeID(7), hlc),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:         pb.EffectOp_INSERT_OP,
+			Merge:      pb.MergeRule_LAST_WRITE_WINS,
+			Collection: pb.CollectionKind_SCALAR,
+			Value:      &pb.DataEffect_Raw{Raw: []byte("v2")},
+		}},
+	}
+	tip := Tip{7, 2}
+	tipWire := wireEffect(tipEff)
+
+	// The sidecar carries only the tip; the dep is the straggler, served by
+	// the broadcaster.
+	bc := &selectiveBroadcaster{
+		mockBroadcaster: mockBroadcaster{
+			allRegionPeersReachable: true,
+			peerIDs:                 []pb.NodeID{7},
+		},
+		fetchable: map[Tip][]byte{depTip: depWire},
+	}
+	e := newTestEngine(bc)
+	fake := &fakeCloudReader{
+		tips:    map[string][]Tip{key: {tip}},
+		sidecar: map[string][]CloudEffect{key: {cloudEffect(t, tip, tipWire)}},
+	}
+	e.SetCloudReader(fake)
+
+	ctx := e.NewReadOnlyContext()
+	result, _, err := ctx.GetSnapshot(key)
+	if err != nil {
+		t.Fatalf("read with partial sidecar errored: %v", err)
+	}
+	if result == nil {
+		t.Fatal("read free-missed; the walk should have fetched the straggler dep")
+	}
+	if e.index.Contains(key) == nil {
+		t.Fatal("rehydrated key was not installed into the local index")
 	}
 }
 

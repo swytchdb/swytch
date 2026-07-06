@@ -227,7 +227,7 @@ func (e *Engine) selectSerializationLeader(key string) pb.NodeID {
 	contenders := make(map[pb.NodeID]struct{})
 	contenders[e.nodeID] = struct{}{} // self is always a contender
 	for _, tipOff := range tips.Tips() {
-		eff, err := e.getEffect(tipOff)
+		eff, err := e.getEffect(key, tipOff)
 		if err != nil {
 			continue
 		}
