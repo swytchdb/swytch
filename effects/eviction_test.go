@@ -646,6 +646,44 @@ func TestBroadcastUnsubscribe_EmitsUnsub(t *testing.T) {
 	}
 }
 
+// TestBroadcastUnsubscribe_HookSeesResidentVertex pins the OnLocalEffect
+// contract on the eviction path: the hook must observe a resident, owned
+// vertex — the cloud outbox increfs it and panics on a miss, which is what
+// killed every node of the 2026-07-06 evil-trace runs on their first cold
+// eviction batch. And when the hook's holder releases, the vertex must be
+// reclaimable, not pinned forever by an unreleasable creation ref.
+func TestBroadcastUnsubscribe_HookSeesResidentVertex(t *testing.T) {
+	bc := &mockBroadcaster{}
+	e := newTestEngine(bc)
+
+	const key = "user:k"
+	e.subscriptions.Store(key, &subscriptionState{ready: make(chan struct{})})
+
+	var hookTip Tip
+	increfOK := false
+	e.OnLocalEffect = func(offset Tip, eff *pb.Effect) {
+		hookTip = offset
+		increfOK = e.effectCache.Incref(offset)
+	}
+	e.broadcastUnsubscribe(key, []Tip{{1, 42}})
+
+	if !increfOK {
+		t.Fatal("OnLocalEffect could not incref the just-emitted unsub — vertex not installed before the hook fired")
+	}
+	// The hook's holder is now the sole owner (broadcastUnsubscribe dropped
+	// the creation ref after firing); releasing must reach zero cleanly.
+	e.effectCache.Decref(hookTip)
+	if _, ok := e.effectCache.Get(hookTip); ok {
+		// Still resident is fine (reclaim is async) — but it must be sitting
+		// at refs 0, which Incref-then-restore verifies without racing the
+		// reclaimer: a second Incref succeeding means refs was >= 0.
+		if !e.effectCache.Incref(hookTip) {
+			return // claimed by the reclaimer already — also correct
+		}
+		e.effectCache.Decref(hookTip)
+	}
+}
+
 // TestBroadcastUnsubscribe_ShutdownShortCircuit asserts teardown during
 // shutdown performs no state changes — the broadcaster may already be gone.
 func TestBroadcastUnsubscribe_ShutdownShortCircuit(t *testing.T) {

@@ -2115,7 +2115,19 @@ func (e *Engine) broadcastUnsubscribe(key string, tips []Tip) {
 			}},
 		}
 		if data, err := MarshalEffect(unsub); err == nil {
+			// OnLocalEffect's contract is that the vertex is resident and owned
+			// when the hook runs (the cloud outbox increfs it and panics on a
+			// miss). This hand-rolled emit must install like rawEmit does. No
+			// leaf will ever release the creation ref — the key is evicted and
+			// unsubscribed — so it is dropped right after the hook: whoever
+			// increfed there (or nobody) owns the vertex from here.
+			if e.effectCache != nil {
+				e.effectCache.PutSized(offset, unsub, len(data))
+			}
 			e.fireLocalEffect(offset, unsub)
+			if e.effectCache != nil {
+				e.effectCache.Decref(offset)
+			}
 			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
 			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		} else {
