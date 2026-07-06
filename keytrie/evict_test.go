@@ -119,6 +119,46 @@ func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
 	}
 }
 
+// TestEvictBatch_SkipsDynamicallyPinned verifies the Pin/Unpin eviction hold:
+// a pinned key survives a sweep that takes everything around it (the cloud
+// outbox pins keys whose uploads haven't been acked — evicting one hides
+// cluster-durable data), and unpinning makes it evictable again.
+func TestEvictBatch_SkipsDynamicallyPinned(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+
+	const n = 10
+	keys := make([]string, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("k-%04d", i)
+		c.Insert(keys[i], nil, NewTipSet(tip(uint64(i+1))))
+	}
+	const held = "k-0000" // the oldest — first in line for eviction
+	if !c.Pin(held) {
+		t.Fatal("Pin on a live key must succeed")
+	}
+	if c.Pin("nonexistent") {
+		t.Fatal("Pin on a missing key must report no hold taken")
+	}
+
+	if got := c.EvictBatch(n); got != n-1 {
+		t.Fatalf("EvictBatch(%d) = %d; want %d (everything but the pinned key)", n, got, n-1)
+	}
+	if c.Contains(held) == nil {
+		t.Fatal("pinned key was evicted")
+	}
+
+	if !c.Unpin(held) {
+		t.Fatal("Unpin on a live key must succeed")
+	}
+	if got := c.EvictBatch(1); got != 1 {
+		t.Fatalf("EvictBatch(1) after Unpin = %d; want 1", got)
+	}
+	if c.Contains(held) != nil {
+		t.Fatal("unpinned key must be evictable again")
+	}
+}
+
 // TestEvictBounded_ReclaimsGhostBeforeHotKey verifies the ghost-as-fallback
 // policy: when the sweep finds no cold (unprotected) live leaf but ghosts exist,
 // eviction reclaims the oldest ghost instead of evicting a hot (protected) key.

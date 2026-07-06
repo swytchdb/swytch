@@ -27,6 +27,7 @@
 package keytrie
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -83,10 +84,19 @@ type critNode[T any] struct {
 	// these are written on the hot read path (freq bump) so they sit
 	// apart from the structural fields above. freq < 0 marks a ghost:
 	// a soft-deleted leaf retaining |freq| so a returning key warms back.
-	freq       atomic.Int32      // 4 bytes,  offset 48
-	chunkIdx   uint32            // 4 bytes,  offset 52 (arena chunk, for reclamation)
-	lastAccess atomic.Uint64     // 8 bytes,  offset 56 (LRU tiebreak)
-	data       atomic.Pointer[T] // 8 bytes,  offset 64 (leaf payload)
+	freq       atomic.Int32  // 4 bytes,  offset 48
+	chunkIdx   uint32        // 4 bytes,  offset 52 (arena chunk, for reclamation)
+	lastAccess atomic.Uint64 // 8 bytes,  offset 56 (LRU tiebreak)
+	// pins counts dynamic do-not-evict holds (Pin/Unpin). The cloud outbox
+	// holds one while any of the key's effects await a durability ack:
+	// evicting then would free almost nothing — the outbox already pins the
+	// effect bytes — while making the key invisible cluster-wide (this node
+	// unsubscribes and drops its tips, and the cloud has no tip markers yet),
+	// so every read of the key anywhere misses data the cluster durably
+	// holds. Unlike the static pinned bit this changes at runtime, so the
+	// sweep pays one atomic load per visited leaf.
+	pins atomic.Int32      // 4 bytes,  offset 64
+	data atomic.Pointer[T] // 8 bytes,  offset 72 (leaf payload, 8-aligned)
 }
 
 func noop() {}
@@ -707,6 +717,61 @@ func (c *Critbit[T]) walkAndInsert(rootNode *critNode[T], newInternal *critNode[
 
 		current = childNode
 	}
+}
+
+// Pin adds a dynamic do-not-evict hold on key's live leaf, reporting whether
+// one was taken (false: no live leaf — nothing to protect). Taken under the
+// reap read lock, writer discipline: chunk compaction copies leaf fields under
+// the write lock, so a hold can never land on a husk the copy already left.
+func (c *Critbit[T]) Pin(key string) bool {
+	if c.closed.Load() {
+		return false
+	}
+	rt := c.reapMu.RLock()
+	defer c.reapMu.RUnlock(rt)
+	root := c.root.Load()
+	if root == nil {
+		return false
+	}
+	leaf := c.findBestMatch(root, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return false
+	}
+	leaf.pins.Add(1)
+	// Dekker partner of EvictBatch's post-claim pins re-check: if the sweep
+	// claimed this leaf between our liveness check and the Add, exactly one of
+	// us observes the other — undo so the hold is never stranded on an evicted
+	// leaf (a ghost promotion would resurrect it as a permanent pin).
+	if leaf.isDeleted() {
+		leaf.pins.Add(-1)
+		return false
+	}
+	return true
+}
+
+// Unpin releases one dynamic hold on key's live leaf. A missing or deleted
+// leaf is a no-op (the key was explicitly deleted or the index flushed while
+// held — the hold died with the leaf). A negative count on a live leaf is an
+// unpin without a matching pin: a protocol bug that would let the sweep evict
+// a key another holder still protects, so it panics like a refcount underflow.
+func (c *Critbit[T]) Unpin(key string) bool {
+	if c.closed.Load() {
+		return false
+	}
+	rt := c.reapMu.RLock()
+	defer c.reapMu.RUnlock(rt)
+	root := c.root.Load()
+	if root == nil {
+		return false
+	}
+	leaf := c.findBestMatch(root, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return false
+	}
+	if n := leaf.pins.Add(-1); n < 0 {
+		panic(fmt.Sprintf("keytrie: pin underflow on %q (unpin without matching pin)", key))
+	}
+	return true
 }
 
 // Contains checks if a key exists and returns its TipSet.

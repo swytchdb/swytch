@@ -230,6 +230,9 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		if leaf.pinned {
 			return // pinned (e.g. a system key) — verdict cached at leaf creation
 		}
+		if leaf.pins.Load() != 0 {
+			return // dynamically pinned (e.g. cloud outbox holds un-acked uploads)
+		}
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access
 		}
@@ -256,6 +259,15 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		// Claim: deleted=false means a live, linked leaf, so a successful CAS
 		// false→true is an atomic claim. A lost CAS means a concurrent delete won.
 		if !leaf.deleted.CompareAndSwap(false, true) {
+			continue
+		}
+		// Pin/claim race, resolved Dekker-style: Pin increments then re-reads
+		// deleted (undoing if set); the sweep claims then re-reads pins. With
+		// seq-cst atomics exactly one side observes the other, so a pin can
+		// never be stranded on an evicted leaf and a pinned leaf can never be
+		// evicted — whichever write lands second detects the first.
+		if leaf.pins.Load() != 0 {
+			leaf.deleted.Store(false)
 			continue
 		}
 		tips := leaf.tips.Load()

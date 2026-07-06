@@ -80,6 +80,13 @@ const (
 	cloudProgressInterval = 30 * time.Second
 )
 
+// pendingKeyEntry is one key's slice of the outbox: its un-acked tips and
+// whether the entry holds the key's do-not-evict pin.
+type pendingKeyEntry struct {
+	tips   map[effects.Tip]struct{}
+	pinned bool
+}
+
 // CloudSync uploads this node's locally-authored effects to Swytch Cloud over
 // the dataplane WriteEffects stream.
 //
@@ -120,8 +127,12 @@ type CloudSync struct {
 	// read-miss from the outbox: an evicted-before-ack key has no index tips
 	// and no cloud tips, but its effects sit refcount-pinned in the pool — the
 	// outbox tips are the frontier the cloud will eventually hold, and the
-	// walk fetches their bytes locally.
-	pendingKeys map[string]map[effects.Tip]struct{}
+	// walk fetches their bytes locally. pinned records whether the entry holds
+	// the key's eviction pin (PinKey succeeded — false when the key's leaf was
+	// already gone at enqueue), so the drain never unpins a hold it never took:
+	// the key could have been re-created since, and stealing the fresh leaf's
+	// pin count would underflow.
+	pendingKeys map[string]*pendingKeyEntry
 	sendQ       []effects.Tip
 	relayQ      []*dp.Effect // fetch-request replies, already enveloped
 	// reconcile holds keys whose read was answered from the outbox while
@@ -171,7 +182,7 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 		folder:      CloudFolder(authKey),
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		pending:     make(map[effects.Tip]*pb.Effect),
-		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		pendingKeys: make(map[string]*pendingKeyEntry),
 		reconcile:   make(map[string]struct{}),
 		wake:        make(chan struct{}, 1),
 	}
@@ -324,12 +335,23 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	cs.mu.Lock()
 	cs.pending[offset] = eff
 	k := string(eff.Key)
-	set := cs.pendingKeys[k]
-	if set == nil {
-		set = make(map[effects.Tip]struct{})
-		cs.pendingKeys[k] = set
+	entry := cs.pendingKeys[k]
+	if entry == nil {
+		// First un-acked upload on this key: hold it in the index until the
+		// cloud acks everything. Evicting it early frees almost nothing (the
+		// outbox pins the bytes) but unsubscribes and drops the tips, making
+		// data only this node holds invisible to every reader in the cluster
+		// until the upload drains. Pin/Unpin ride cs.mu so the first-effect /
+		// last-ack transitions can't interleave their index calls. PinKey
+		// reports false when the key has no live leaf (the eviction path's own
+		// unsubscribe mint) — nothing to keep findable, nothing to unpin later.
+		entry = &pendingKeyEntry{
+			tips:   make(map[effects.Tip]struct{}),
+			pinned: cs.engine.PinKey(k),
+		}
+		cs.pendingKeys[k] = entry
 	}
-	set[offset] = struct{}{}
+	entry.tips[offset] = struct{}{}
 	cs.sendQ = append(cs.sendQ, offset)
 	backlog := len(cs.pending)
 	cs.mu.Unlock()
@@ -358,10 +380,15 @@ func (cs *CloudSync) retire(tip effects.Tip) bool {
 	delete(cs.pending, tip)
 	if held {
 		k := string(eff.Key)
-		if set := cs.pendingKeys[k]; set != nil {
-			delete(set, tip)
-			if len(set) == 0 {
+		if entry := cs.pendingKeys[k]; entry != nil {
+			delete(entry.tips, tip)
+			if len(entry.tips) == 0 {
 				delete(cs.pendingKeys, k)
+				// Last un-acked upload on this key drained: the key is
+				// cloud-durable, eviction may take it again.
+				if entry.pinned {
+					cs.engine.UnpinKey(k)
+				}
 			}
 		}
 	}
@@ -380,12 +407,12 @@ func (cs *CloudSync) retire(tip effects.Tip) bool {
 func (cs *CloudSync) pendingTipsFor(key string) []effects.Tip {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	set := cs.pendingKeys[key]
-	if len(set) == 0 {
+	entry := cs.pendingKeys[key]
+	if entry == nil || len(entry.tips) == 0 {
 		return nil
 	}
-	tips := make([]effects.Tip, 0, len(set))
-	for tip := range set {
+	tips := make([]effects.Tip, 0, len(entry.tips))
+	for tip := range entry.tips {
 		tips = append(tips, tip)
 	}
 	return tips

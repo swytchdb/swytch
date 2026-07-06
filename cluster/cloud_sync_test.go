@@ -117,7 +117,7 @@ func TestPendingTipsIndex(t *testing.T) {
 		engine:      engine,
 		keyNameKey:  DeriveKeyNameKey("outbox-test-secret"),
 		pending:     make(map[effects.Tip]*pb.Effect),
-		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		pendingKeys: make(map[string]*pendingKeyEntry),
 		wake:        make(chan struct{}, 1),
 	}
 
@@ -147,6 +147,82 @@ func TestPendingTipsIndex(t *testing.T) {
 	}
 }
 
+// TestOutboxPinsKeyUntilDrained: the outbox holds a do-not-evict pin on a key
+// from its first un-acked upload to its last ack — evicting mid-flight would
+// unsubscribe and drop the tips while this node holds the only copy, hiding
+// committed data from every reader in the cluster.
+func TestOutboxPinsKeyUntilDrained(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs := &CloudSync{
+		engine:      engine,
+		keyNameKey:  DeriveKeyNameKey("pin-test-secret"),
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]*pendingKeyEntry),
+		wake:        make(chan struct{}, 1),
+	}
+
+	// A real emit creates the key's index leaf, as it has always done by the
+	// time handleLocalEffect fires in production.
+	const key = "pinned-key"
+	ectx := engine.NewContext()
+	if err := ectx.Emit(&pb.Effect{
+		Key: []byte(key),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:    pb.EffectOp_INSERT_OP,
+			Value: &pb.DataEffect_Raw{Raw: []byte("v")},
+		}},
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if err := ectx.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	effA := &pb.Effect{Key: []byte(key)}
+	effB := &pb.Effect{Key: []byte(key)}
+	tipA := effects.Tip{1, 1000}
+	tipB := effects.Tip{1, 1001}
+	engine.EffectCache().PutSized(tipA, effA, 64)
+	engine.EffectCache().PutSized(tipB, effB, 64)
+
+	cs.handleLocalEffect(tipA, effA)
+	if !cs.pendingKeys[key].pinned {
+		t.Fatal("first enqueue on a live key must take the eviction pin")
+	}
+	cs.handleLocalEffect(tipB, effB)
+
+	cs.retire(tipA)
+	if _, held := cs.pendingKeys[key]; !held {
+		t.Fatal("key entry must survive while a tip is still un-acked")
+	}
+	// The last retire must UnpinKey exactly once — a second release would
+	// underflow the leaf's pin count and panic.
+	cs.retire(tipB)
+
+	// Balanced count check: a fresh pin/unpin cycle on the drained key panics
+	// if the drain under- or over-released.
+	if !engine.PinKey(key) {
+		t.Fatal("key leaf disappeared after drain")
+	}
+	engine.UnpinKey(key)
+
+	// A key with no live leaf (the eviction path's own unsubscribe mint):
+	// enqueue takes no pin, drain releases none.
+	ghost := &pb.Effect{Key: []byte("never-indexed")}
+	ghostTip := effects.Tip{1, 1002}
+	engine.EffectCache().PutSized(ghostTip, ghost, 64)
+	cs.handleLocalEffect(ghostTip, ghost)
+	if cs.pendingKeys["never-indexed"].pinned {
+		t.Fatal("enqueue on a leafless key must not claim a pin")
+	}
+	cs.retire(ghostTip)
+}
+
 // TestSubscriptionMintDoesNotOpenGate: ensureSubscribed mints a
 // SubscriptionEffect on every read of an absent key, moments before that read
 // reaches the cloudMayHold gate. The mint must upload (the DAG needs the blob
@@ -165,7 +241,7 @@ func TestSubscriptionMintDoesNotOpenGate(t *testing.T) {
 		engine:      engine,
 		keyNameKey:  keyNameKey,
 		pending:     make(map[effects.Tip]*pb.Effect),
-		pendingKeys: make(map[string]map[effects.Tip]struct{}),
+		pendingKeys: make(map[string]*pendingKeyEntry),
 		wake:        make(chan struct{}, 1),
 	}
 	// The cloud has pushed an (empty) filter — the gate is armed.

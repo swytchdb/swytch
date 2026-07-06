@@ -410,6 +410,14 @@ func (e *Engine) NodeID() pb.NodeID {
 	return e.nodeID
 }
 
+// PinKey adds a dynamic do-not-evict hold on key; UnpinKey releases it. The
+// cloud outbox is the caller: a key with un-acked uploads must stay findable —
+// evicting it frees almost nothing (the outbox pins the effect bytes) while
+// unsubscribing makes the committed data invisible to the whole cluster until
+// the ack lands. Reports whether a live leaf carried the operation.
+func (e *Engine) PinKey(key string) bool   { return e.index.Pin(key) }
+func (e *Engine) UnpinKey(key string) bool { return e.index.Unpin(key) }
+
 // makeTip constructs a full Tip from a local offset.
 func (e *Engine) makeTip(offset uint64) Tip {
 	return Tip{uint64(e.nodeID), offset}
