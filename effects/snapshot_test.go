@@ -535,13 +535,14 @@ func TestGetSnapshot_SubscriptionTracked(t *testing.T) {
 	log := newSnapshotLog()
 	e := newSnapshotEngine(log)
 
-	// A key nobody holds still subscribes; advisory fast-misses are disabled.
+	// A key nobody holds free-misses: no subscription is recorded.
 	_, _, _, _ = e.GetSnapshot("newkey")
-	if _, ok := e.subscriptions.Load("newkey"); !ok {
-		t.Fatal("read miss must record a subscription")
+	if _, ok := e.subscriptions.Load("newkey"); ok {
+		t.Fatal("a free miss must not record a subscription")
 	}
 
-	// A key we hold state for (e.g. backfilled from a peer) also subscribes and tracks it.
+	// A key we hold state for (e.g. backfilled from a peer) is not free-miss
+	// eligible: reading it subscribes and tracks it.
 	off := log.putEffect(&pb.Effect{
 		Key: []byte("held"), Hlc: sTs(10), NodeId: 1,
 		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("v"))},
@@ -561,6 +562,7 @@ func TestGetSnapshot_SubscriptionBroadcast(t *testing.T) {
 	bc.nackTarget = e // wire up so bootstrap NACKs arrive and don't block
 	// A peer claims the key so the subscribe takes the blocking bootstrap
 	// (a nowhere-key would announce async without probing anyone).
+	e.peerFilterAdd(pb.NodeID(10), "newkey")
 
 	_, _, _, _ = e.GetSnapshot("newkey")
 
@@ -1133,6 +1135,7 @@ func TestSubscriptionBootstrap_FetchesRemoteState(t *testing.T) {
 	// have populated our filter. Without this, clusterMaybeHasKey is false and
 	// the subscribe takes the async-announce path (nothing to fetch) — but here
 	// there IS remote state to fetch, so the blocking bootstrap must run.
+	localEngine.peerFilterAdd(2, "shared-key")
 
 	// Now the local engine reads "shared-key" for the first time
 	r, _, _, err := localEngine.GetSnapshot("shared-key")
@@ -1179,10 +1182,12 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{10, 20}, allRegionPeersReachable: true}
 	e := newSnapshotEngine(log)
 	e.broadcaster = bc
-	bc.nackTarget = e
+	bc.nackTarget = e // wired, but the free miss won't drive it
 
-	// Peers exist but none holds this key: without advisory filters the read
-	// still performs a real bootstrap and records the subscription.
+	// Peers exist but none holds this key (clusterMaybeHasKey is false): there
+	// is nothing to bootstrap and no writer to hear from, so the read is a
+	// completely free miss — no ReplicateTo rounds, no subscription, no
+	// announce.
 	r, _, _, err := e.GetSnapshot("missing-key")
 	if err != nil {
 		t.Fatal(err)
@@ -1190,11 +1195,14 @@ func TestSubscriptionBootstrap_AllPeersEmpty(t *testing.T) {
 	if r != nil {
 		t.Fatal("expected nil when all peers have no data")
 	}
-	if len(bc.replicateToPeers) == 0 {
-		t.Fatal("read miss must run subscription bootstrap")
+	if len(bc.replicateToPeers) != 0 {
+		t.Fatalf("nowhere-key miss must not block on ReplicateTo rounds, got %d", len(bc.replicateToPeers))
 	}
-	if _, ok := e.subscriptions.Load("missing-key"); !ok {
-		t.Fatal("read miss must record a subscription")
+	if _, ok := e.subscriptions.Load("missing-key"); ok {
+		t.Fatal("a free miss must not record a subscription")
+	}
+	if bc.broadcastCount() != 0 {
+		t.Fatalf("a free miss must not announce, got %d broadcasts", bc.broadcastCount())
 	}
 }
 

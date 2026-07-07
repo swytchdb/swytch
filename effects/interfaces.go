@@ -91,8 +91,15 @@ type CloudEffect struct {
 // durable Cloud storage holds for a key. A key evicted from every live peer
 // (e.g. its writer departed) may still live on Cloud, so a read that finds
 // nothing cluster-wide asks Cloud for the frontier, installs it, and lets the
-// cluster take over. Nil (unset) means no Cloud is configured.
+// cluster take over. Nil (unset) means no Cloud is configured and the read
+// free-misses as before.
 type CloudReader interface {
+	// MayHold reports whether Cloud may hold key, answered from the pushed
+	// key-name filter — free, no RPC. False is the filter's definite no and
+	// lets a read free-miss without subscribing or consulting; true routes
+	// the read through the subscribe + consult path, whose per-leaf
+	// cloudConsulted marker caps the WAN round-trips.
+	MayHold(key string) bool
 	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
 	// error) if Cloud holds nothing for it. sidecar is the closure — every
 	// effect reachable from those tips down to the LCA snapshot — delivered

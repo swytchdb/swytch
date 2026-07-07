@@ -141,6 +141,18 @@ type CloudSync struct {
 	// answers and the missed frontier is merged into the DAG.
 	reconcile map[string]struct{}
 
+	// Cloud-pushed key-name filter gating the read-miss consult (CloudTips).
+	// filterBulk is replaced wholesale per KeyFilter frame; filterOwn is
+	// append-only with our own uploads' key names, covering the window until
+	// the cloud's next push reflects them. Both hold PRF images (CloudKeyName).
+	// A nil filterBulk (no frame received yet) leaves the gate open — every
+	// miss consults the cloud, the pre-filter behavior. Guarded by filterMu,
+	// not mu: the gate runs on the read path and must not contend with the
+	// outbox.
+	filterMu   sync.RWMutex
+	filterBulk *effects.CuckooChain
+	filterOwn  effects.CuckooChain
+
 	// sentCount/ackedCount mirror the prometheus counters so the progress
 	// logger can read interval deltas (prometheus counters aren't readable).
 	sentCount  atomic.Uint64
@@ -295,6 +307,20 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	}
 	if eff.GetPubsubMessage() != nil {
 		return
+	}
+
+	// Anything cloud-bound is filter-positive from the moment it's enqueued,
+	// even if it's later evicted locally before the cloud's push reflects it.
+	// Except subscriptions: ensureSubscribed mints one on every read of an
+	// absent key, moments before that same read reaches the cloudMayHold gate
+	// — letting it into the filter would open the gate for the very key being
+	// missed, turning every first-touch read into a wasted consult of a
+	// stateless chain.
+	if eff.GetSubscription() == nil {
+		name := CloudKeyName(cs.keyNameKey, eff.Key)
+		cs.filterMu.Lock()
+		cs.filterOwn.Add(string(name))
+		cs.filterMu.Unlock()
 	}
 
 	// OnLocalEffect fires synchronously in emit, after PutSized installed the
@@ -545,6 +571,8 @@ func (cs *CloudSync) readLoop(stream dp.DataPlane_WriteEffectsClient) error {
 			cs.handleAck(m.Ack)
 		case *dp.WriteResponse_Fetch:
 			cs.handleFetch(m.Fetch)
+		case *dp.WriteResponse_Filter:
+			cs.handleFilter(m.Filter)
 		}
 	}
 }
@@ -602,6 +630,38 @@ func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 	cs.wakeSender()
 }
 
+// cloudMayHold is the read-miss filter gate: once the cloud has pushed its
+// key-name filter, a PRF name absent from both it and our own-uploads chain
+// cannot be in the cloud — free-miss without the round-trip. No filter yet
+// (filterBulk nil) leaves the gate open. False positives fall through to a
+// wasted consult; false negatives (stale filter) cost one premature miss and
+// never hide a key a live peer holds — the cluster subscription path doesn't
+// run through here.
+func (cs *CloudSync) cloudMayHold(name []byte) bool {
+	cs.filterMu.RLock()
+	defer cs.filterMu.RUnlock()
+	if cs.filterBulk == nil {
+		return true
+	}
+	return cs.filterBulk.MaybeContains(string(name)) || cs.filterOwn.MaybeContains(string(name))
+}
+
+// handleFilter installs the cloud's key-name filter, replacing the previous
+// one wholesale (the stream is ordered and each reconnect re-delivers the
+// current filter, so latest always wins). An undecodable frame is dropped and
+// the prior filter kept — the filter is advisory, never worth failing over.
+func (cs *CloudSync) handleFilter(kf *dp.KeyFilter) {
+	decoded := &effects.CuckooChain{}
+	if err := decoded.UnmarshalBinary(kf.GetFilter()); err != nil {
+		slog.Warn("cloud sync: undecodable key filter frame, keeping previous", "error", err)
+		return
+	}
+	cs.filterMu.Lock()
+	cs.filterBulk = decoded
+	cs.filterMu.Unlock()
+	slog.Debug("cloud sync: key filter installed", "bytes", len(kf.GetFilter()))
+}
+
 // buildEnvelope maps a swytch effect to the cloud's structural envelope: the
 // (NodeID, Offset) identity, deps, kind, and time stay readable (the cloud's
 // retention scan walks them); the key name becomes its PRF image and the whole
@@ -651,8 +711,12 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 // DiscoverMembers reads the membership roster from the cloud for peer
 // discovery: GetTips names the frontier and delivers the closure effects
 // inline, and ReduceBranch — the real reducer — produces the roster.
-// Deliberately zero engine interaction: discovery only yields candidate
-// addresses; the authoritative state arrives through the normal join path.
+// Deliberately zero engine interaction: pre-loading membership into the
+// engine makes this node non-divergent at subscription bootstrap, so peers
+// ACK instead of NACK and their key filters never arrive — free-read-misses
+// then return false negatives for keys written before we joined. Discovery
+// only yields candidate addresses; the authoritative state arrives through
+// the normal join path.
 func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) (*pb.ReducedEffect, error) {
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
@@ -711,16 +775,27 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 // holds for key, mapping key to its Cloud PRF image (CloudKeyName) and calling
 // GetTips — merged with the outbox's un-acked tips on the key, which are the
 // frontier the cloud hasn't seen yet. Without the merge, a key evicted before
-// its upload acked could miss even though its bytes sit refcount-pinned in our
-// own pool. A nil slice means neither holds anything. This is the
+// its upload acked would free-miss even though its bytes sit refcount-pinned
+// in our own pool. A nil slice means neither holds anything. This is the
 // read-miss backstop — the engine installs these tips (walkAndInstall) and
 // the closure effects arrive inline (the sidecar), so the install walk runs
 // locally instead of one fetch per dep, rehydrating an evicted key so the
 // cluster owns it again. Unlike DiscoverMembers this does no reduction: it
 // hands the frontier to the engine, whose own reconstruct path does the rest.
 // Outbox tips need no sidecar — their bytes are already local.
+// MayHold implements effects.CloudReader: the free, no-RPC filter gate the
+// engine consults before deciding a read-miss can skip the subscribe +
+// CloudTips path entirely. Own un-acked uploads are covered: filterOwn is fed
+// at outbox enqueue.
+func (cs *CloudSync) MayHold(key string) bool {
+	return cs.cloudMayHold(CloudKeyName(cs.keyNameKey, []byte(key)))
+}
+
 func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
+	if !cs.cloudMayHold(name) {
+		return nil, nil, nil
+	}
 	tips := cs.pendingTipsFor(key)
 
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
