@@ -127,19 +127,6 @@ type Engine struct {
 	// Subscription bootstrapping: key → *bootstrapCollector
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
 
-	// Per-node cluster key filters powering free read-misses. ownKeyFilter
-	// holds the keys this node has data for; it's shipped on NACKs so peers
-	// can answer a read-miss without subscribing. peerKeyFilters caches each
-	// peer's keys — bulk from NACKs, real-time from inbound
-	// SubscriptionEffects (see cuckoo.go and keyfilter.go). Guarded by
-	// keyFilterMu (plain map + mutex, never sync.Map).
-	keyFilterMu       sync.RWMutex
-	ownKeyFilter      CuckooChain
-	ownFilterVer      uint64
-	ownFilterBytes    []byte // cached marshal of ownKeyFilter at ownFilterBytesVer
-	ownFilterBytesVer uint64
-	peerKeyFilters    map[pb.NodeID]*peerKeyFilter
-
 	// Deserialized effect store — effects are immutable once written.
 	// Replaces the per-offset CloxCache; eviction is driven by the engine
 	// memory governor (see startMemoryGovernor), not the pool itself.
@@ -369,7 +356,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
 		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
-		peerKeyFilters:     make(map[pb.NodeID]*peerKeyFilter),
 		effectCache:        newVertexPool(),
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
 	}
@@ -550,16 +536,9 @@ func (e *Engine) PeerSubscribers(key string) []pb.NodeID {
 }
 
 // DropPeer releases per-peer cached state when a peer permanently leaves the
-// cluster. Wired into PeerManager.SetPeerLifecycleHooks on the onRemoved hook
-// (which fires only on genuine membership removal, not transient
-// unreachability). Subscriber sets are NOT scrubbed here: they live in per-key
-// leafState (reclaimed on leaf eviction) and are filtered against current
-// membership at broadcast time, so a departed peer's id simply falls out of
-// collectSubscribers. The key filter, by contrast, is real per-peer cached
-// data that cannot be lazily re-derived, so it must be dropped explicitly.
-func (e *Engine) DropPeer(peer pb.NodeID) {
-	e.removePeerKeyFilter(peer)
-}
+// cluster. Subscriber sets are retained and filtered against current membership
+// at broadcast time, so no eager scrub is required here.
+func (e *Engine) DropPeer(peer pb.NodeID) {}
 
 // SetBroadcaster sets the broadcaster for replicating effects to peers.
 // Must be called before any Emit/Flush if cluster mode is desired.
@@ -586,7 +565,7 @@ func (e *Engine) SetRTTProvider(p PeerRTTProvider) {
 }
 
 // SetCloudReader installs the Cloud read backstop consulted on a read-miss. Nil
-// leaves the engine free-missing as before (standalone / no cloud).
+// means no Cloud tier is configured.
 func (e *Engine) SetCloudReader(r CloudReader) {
 	e.cloudReader = r
 }
@@ -1012,25 +991,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		return nil, nil
 	}
 
-	// Populate the cluster key filter from the originating peer BEFORE the
-	// authority gate below. That gate early-returns for keys we don't yet
-	// track — which are exactly the keys a read-only handler needs the filter
-	// to know about (a peer's brand-new key). Recording the originator's
-	// effect on K here is a safe over-approximation: worst case a needless
-	// subscribe, never a wrong free-miss. peerFilterAdd skips self and system
-	// keys.
-	if origin := pb.NodeID(eff.NodeId); origin != e.nodeID {
-		if bind := eff.GetTxnBind(); bind != nil {
-			for _, kb := range bind.Keys {
-				e.peerFilterAdd(origin, string(kb.Key))
-			}
-		} else if eff.GetData() != nil {
-			e.peerFilterAdd(origin, string(eff.Key))
-		} else if sub := eff.GetSubscription(); sub != nil && !sub.Unsubscribe {
-			e.peerFilterAdd(origin, string(eff.Key))
-		}
-	}
-
 	// Authority gate: accept the effect only if we already track the
 	// key locally — either subscribed to it, or the index already has
 	// tips (a previous local write installed them). System keys are
@@ -1259,7 +1219,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		} else {
 			// Bind effect: wake waiters for each bound key (spurious wakeups OK)
 			for _, kb := range bind.Keys {
-				e.ownFilterAdd(string(kb.Key))
 				if e.OnKeyDataAdded != nil {
 					e.OnKeyDataAdded(string(kb.Key))
 				}
@@ -1269,7 +1228,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		// Non-transactional data effect
 		switch data.Op {
 		case pb.EffectOp_INSERT_OP:
-			e.ownFilterAdd(key)
 			if e.OnKeyDataAdded != nil {
 				e.OnKeyDataAdded(key)
 			}
@@ -1280,7 +1238,6 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 				}
 			} else if data.Collection == pb.CollectionKind_ORDERED || data.Collection == pb.CollectionKind_KEYED {
 				// Element remove on ordered/keyed collection — chain-wake
-				e.ownFilterAdd(key)
 				if e.OnKeyDataAdded != nil {
 					e.OnKeyDataAdded(key)
 				}
@@ -1810,20 +1767,6 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	}
 
 	nack.CausalChain = e.collectCausalChain(key, tips)
-
-	// Advertise our held keys so the subscriber can answer future read-misses
-	// without subscribing. Attaching the (potentially large) filter to every
-	// NACK is too much bandwidth, so the bulk transfer rides only on
-	// system-key NACKs — every node subscribes to the membership key on join,
-	// so that one rendezvous distributes the full set. Ongoing freshness is
-	// the real-time peerFilterAdd push on each SubscriptionEffect. The
-	// subscriber applies the bulk replace-if-newer.
-	if isSystemKey([]byte(key)) {
-		if b, ver := e.ownFilterSnapshot(); b != nil {
-			nack.NodeKeyFilter = b
-			nack.FilterVersion = ver
-		}
-	}
 
 	return nack
 }

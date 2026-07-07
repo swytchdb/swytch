@@ -297,7 +297,6 @@ func TestFlushSafeMode(t *testing.T) {
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
 	// A peer holds "k", so SafeMode has a durable-replication target and must
 	// take the synchronous first-ACK path (rather than the no-target downgrade).
-	e.peerFilterAdd(pb.NodeID(2), "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -316,16 +315,12 @@ func TestFlushSafeMode(t *testing.T) {
 	}
 }
 
-// TestFlushSafeMode_DowngradesWhenKeyHeldNowhere: a SafeMode write to a key no
-// peer holds has no durable-replication target — every peer would NACK
-// NotSubscribed — so the first-ACK wait is pure latency. While in the majority
-// partition the engine downgrades to the async broadcast path, mirroring the
-// read-only fast-miss.
-func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
+// TestFlushSafeMode_NoFilterDowngrade: without advisory key filters, SafeMode
+// writes use the normal replication path even for a key no peer currently holds.
+func TestFlushSafeMode_NoFilterDowngrade(t *testing.T) {
 	bc := &mockBroadcaster{peerIDs: []pb.NodeID{2}, allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
-	// No peerFilterAdd: clusterMaybeHasKey("k") is false.
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -335,11 +330,8 @@ func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The downgrade path is fire-and-forget, so observe it through the locked
-	// accessors after the announce goroutine has had a chance to land.
-	waitForBroadcast(t, bc)
-	if got := bc.replicateCount(); got != 0 {
-		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", got)
+	if got := bc.replicateCount(); got == 0 {
+		t.Fatal("SafeMode should replicate without filter downgrade")
 	}
 }
 
@@ -349,7 +341,6 @@ func TestFlushSafeModeError_ReplicateFailAfterPrecheck(t *testing.T) {
 	bc := &mockBroadcaster{replicateErr: errors.New("quorum unreachable"), allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
-	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": exercises the Replicate-fails path
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -365,7 +356,6 @@ func TestFlushSafeMode_AllowsWhenAllPeersReachable(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true}
 	e := newTestEngine(bc)
 	e.safety.Store(&safetyMap{defaultMode: SafeMode})
-	e.peerFilterAdd(pb.NodeID(2), "k") // a peer holds "k": real replication target
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {

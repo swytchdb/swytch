@@ -60,8 +60,7 @@ type Context struct {
 	txSnapshot  keytrie.KeyIndex            // frozen index snapshot for SSI reads (nil outside MULTI/EXEC)
 
 	// readOnly marks a context used only for read-only, non-transactional
-	// commands. Such a context may answer a read-miss from the cluster key
-	// filters without subscribing (free misses), and skips chain compaction.
+	// commands. Such a context skips chain compaction.
 	readOnly bool
 }
 
@@ -236,10 +235,9 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			return c.getSnapshotFromTx(key)
 		}
 		// No unflushed effects for this key — delegate to committed state.
-		// A definite miss (nothing local, no peer filter admits the key) is
-		// answered by engine.GetSnapshot's free-miss gate without announcing
-		// a subscription; with Cloud configured its backstop still checks
-		// durable storage before deciding the read is a miss.
+		// Read misses take the real subscription/bootstrap path; with Cloud
+		// configured its backstop checks durable storage before deciding the
+		// read is a miss.
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
 			return nil, nil, err
@@ -590,10 +588,8 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 
 	// The effect must dep-reference our own SubscriptionEffect, or the
 	// subscription's offset is orphaned in this node's DAG and the subscriber
-	// graph splits brain (see ensureSubscribed). Reads no longer subscribe on
-	// a definite miss (GetSnapshot's free-miss gate), so ANY context can reach
-	// Emit unsubscribed — authority is claimed here, where state is created.
-	// Allocation-free no-op when already subscribed.
+	// graph splits brain (see ensureSubscribed). Allocation-free no-op when
+	// already subscribed.
 	if err := c.engine.ensureSubscribed(key); err != nil {
 		return err
 	}
@@ -915,7 +911,6 @@ func (c *Context) flushNonTx() error {
 
 		// Fire notification callbacks after effect is durable
 		if ck.shouldNotifyData {
-			c.engine.ownFilterAdd(key)
 			if c.engine.OnKeyDataAdded != nil {
 				c.engine.OnKeyDataAdded(key)
 			}
@@ -1516,7 +1511,6 @@ func (c *Context) flushTx() error {
 	// Fire notification callbacks after successful commit
 	for key, ck := range c.keys {
 		if ck.shouldNotifyData {
-			c.engine.ownFilterAdd(key)
 			if c.engine.OnKeyDataAdded != nil {
 				c.engine.OnKeyDataAdded(key)
 			}

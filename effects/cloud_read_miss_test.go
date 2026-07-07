@@ -38,10 +38,6 @@ type fakeCloudReader struct {
 	calls   int
 }
 
-// MayHold is always true: these tests exercise the consult path, which the
-// engine's free-miss gate would otherwise skip for a filter-negative key.
-func (f *fakeCloudReader) MayHold(string) bool { return true }
-
 func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []CloudEffect, error) {
 	f.calls++
 	if f.err != nil {
@@ -63,7 +59,7 @@ func cloudEffect(t *testing.T, tip Tip, wire []byte) CloudEffect {
 
 // TestReadMissRehydratesFromCloud is the tiered-storage core: a read of a key
 // the cluster holds nothing for, but Cloud does, must pull Cloud's frontier,
-// install it, and return the value instead of free-missing. After that the key
+// install it, and return the value instead of missing. After that the key
 // lives in the local index and the cluster owns it — Cloud is never consulted
 // again for it.
 func TestReadMissRehydratesFromCloud(t *testing.T) {
@@ -87,19 +83,13 @@ func TestReadMissRehydratesFromCloud(t *testing.T) {
 	}
 	e.SetCloudReader(fake)
 
-	// No peer announces the key and we hold nothing: without the Cloud backstop
-	// this would free-miss.
-	if e.clusterMaybeHasKey(key) {
-		t.Fatal("precondition: no peer should announce the evicted key")
-	}
-
 	ctx := e.NewReadOnlyContext()
 	result, _, err := ctx.GetSnapshot(key)
 	if err != nil {
 		t.Fatalf("read of Cloud-resident key errored: %v", err)
 	}
 	if result == nil {
-		t.Fatal("read free-missed a key Cloud still holds; expected a rehydrated value")
+		t.Fatal("read missed a key Cloud still holds; expected a rehydrated value")
 	}
 	if fake.calls != 1 {
 		t.Fatalf("expected exactly one Cloud consult on the miss, got %d", fake.calls)
@@ -169,7 +159,7 @@ func TestReadMissPartialSidecarFetchesStraggler(t *testing.T) {
 		t.Fatalf("read with partial sidecar errored: %v", err)
 	}
 	if result == nil {
-		t.Fatal("read free-missed; the walk should have fetched the straggler dep")
+		t.Fatal("read missed; the walk should have fetched the straggler dep")
 	}
 	if e.index.Contains(key) == nil {
 		t.Fatal("rehydrated key was not installed into the local index")
@@ -274,11 +264,10 @@ func TestReadMissPartialFrontierFailsRead(t *testing.T) {
 	}
 }
 
-// TestReadMissNoCloudFreeMisses: with no Cloud configured a key nobody holds
-// is a completely free miss — no Cloud consult, no subscription record, no
-// index leaf, no announce. There is no state to bootstrap and no writer to
-// hear from; authority is claimed at the first write, not the first miss.
-func TestReadMissNoCloudFreeMisses(t *testing.T) {
+// TestReadMissNoCloudSubscribes: with no Cloud configured a key nobody holds
+// still goes through the real subscription/bootstrap path. Advisory filters no
+// longer produce fast misses.
+func TestReadMissNoCloudSubscribes(t *testing.T) {
 	bc := &mockBroadcaster{allRegionPeersReachable: true, peerIDs: []pb.NodeID{2, 3}}
 	e := newTestEngine(bc) // cloudReader stays nil
 
@@ -288,16 +277,12 @@ func TestReadMissNoCloudFreeMisses(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result != nil {
-		t.Fatal("expected a free-miss with no Cloud configured")
+		t.Fatal("expected a miss with no Cloud configured")
 	}
-	if _, ok := e.subscriptions.Load("never-written"); ok {
-		t.Fatal("a free miss must not record a subscription")
+	if _, ok := e.subscriptions.Load("never-written"); !ok {
+		t.Fatal("read miss must record a subscription")
 	}
-	if e.index.Contains("never-written") != nil {
-		t.Fatal("a free miss must not touch the index")
-	}
-	// The gate decides synchronously — no announce goroutine is ever spawned.
-	if bc.broadcastCount() != 0 {
-		t.Fatalf("a free miss must not announce, got %d broadcasts", bc.broadcastCount())
+	if e.index.Contains("never-written") == nil {
+		t.Fatal("read miss must install a subscription tip")
 	}
 }

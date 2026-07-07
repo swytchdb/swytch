@@ -367,8 +367,7 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 	// and without the distinction every GET of them pays a WAN GetTips
 	// round-trip. A data-bearing tip marks the nil authoritative; subscription
 	// tips don't count (a subscribed reader's own SubscriptionEffect sits in
-	// the index as a tip), and a free-missed key has no tips at all —
-	// vacuously subscription-only. The leaf's cloudConsulted marker
+	// the index as a tip). The leaf's cloudConsulted marker
 	// additionally caps consults: nil becomes authoritative once Cloud has
 	// given one complete answer, and eviction reclaims the marker with the
 	// leaf, re-arming the rehydrate. Gated on the majority partition: a
@@ -435,32 +434,10 @@ func (e *Engine) awaitSubscription(existing *subscriptionState, unsafe bool) err
 	return nil
 }
 
-// freeMissEligible reports whether a read of key can be answered "absent"
-// without announcing a subscription: this node holds nothing (no subscription
-// record, no index tips), no peer's key filter admits the key, and the
-// cluster view is trustworthy (majority, or UnsafeMode where there is no
-// majority to trust — a SafeMode minority falls through so ensureSubscribed
-// surfaces ErrRegionPartitioned instead of fabricating a miss). No key is
-// special-cased: whatever a key is for, holding nothing of it and hearing no
-// claim on it means there is nothing to announce — a later write (or a peer's
-// claim) puts it on the subscribe path like any other key.
-func (e *Engine) freeMissEligible(key string) bool {
-	if _, ok := e.subscriptions.Load(key); ok {
-		return false // already subscribed; ensureSubscribed is a cheap no-op
-	}
-	if e.index.Contains(key) != nil {
-		return false // we hold state (peer arrivals, backfill): formalize authority
-	}
-	if e.clusterMaybeHasKey(key) {
-		return false // a peer may hold it: bootstrap required
-	}
-	if e.cloudReader != nil && e.cloudReader.MayHold(key) {
-		// Cloud may hold it: the consult path below needs the subscription's
-		// leaf to anchor the cloudConsulted marker that caps WAN round-trips.
-		return false
-	}
-	return e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode
-}
+// freeMissEligible is disabled. Advisory filters cannot prove absence
+// consistently, so a read miss must subscribe/bootstrap rather than taking a
+// fast-miss path.
+func (e *Engine) freeMissEligible(key string) bool { return false }
 
 // subscriptionOnlyTips reports whether tips carry no data history: every tip
 // resolves to a SubscriptionEffect (vacuously true for an empty set). A tip
@@ -672,9 +649,8 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	// but the network send is off the critical path: fire it in the background
 	// so the calling SET/GET returns immediately. QUIC delivers reliably on a
 	// live connection, and peer-recovery re-announce heals downed peers.
-	// System keys are exempt: they're excluded from the cluster key filters
-	// (so clusterMaybeHasKey is always false for them) and are how a node
-	// bootstraps cluster state — they must always do the blocking bootstrap.
+	// System keys bootstrap cluster state and must always do the blocking
+	// bootstrap.
 	if allowAsync && !isSystemKey([]byte(key)) &&
 		(e.inMajorityPartition() || unsafe) && !e.clusterMaybeHasKey(key) {
 		go e.broadcaster.BroadcastWithData(notify, notify.EffectData)
@@ -725,7 +701,6 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 				// returns them as the ReplicateTo response.
 				mu.Lock()
 				for _, nack := range nacks {
-					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}
@@ -796,7 +771,6 @@ done:
 				}
 				mu.Lock()
 				for _, nack := range nacks {
-					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}

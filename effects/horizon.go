@@ -278,7 +278,6 @@ func (h *HorizonSet) MakeVisible(txnID string) {
 	}
 
 	for k := range allKeys {
-		h.engine.ownFilterAdd(k)
 		if h.engine.OnKeyDataAdded != nil {
 			h.engine.OnKeyDataAdded(k)
 		}

@@ -86,13 +86,11 @@ message WriteEffectsRequest {
 }
 
 // WriteResponse is one message on the response stream: an ack for an effect the
-// node wrote, a fetch-request the cloud is pushing to the node, or the folder's
-// current key-name filter.
+// node wrote, or a fetch-request the cloud is pushing to the node.
 message WriteResponse {
   oneof msg {
     WriteAck ack = 1;
     FetchRequest fetch = 2;
-    KeyFilter filter = 3;
   }
 }
 
@@ -109,15 +107,6 @@ message WriteAck {
 // the node has evicted the effect, it stays silent and the cloud re-asks later.
 message FetchRequest {
   EffectRef ref = 1;
-}
-
-// KeyFilter is the folder's key-name cuckoo filter (effects.CuckooChain wire
-// format) over the (encrypted) key names the cloud holds, pushed on stream open
-// and whenever the folder's filter changes. Advisory: a stale or absent filter
-// only changes read-miss cost, never correctness. Each frame replaces the
-// previous one wholesale.
-message KeyFilter {
-  bytes filter = 1;
 }
 
 // GetTipsRequest asks for the current tip frontier of each listed (encrypted)
