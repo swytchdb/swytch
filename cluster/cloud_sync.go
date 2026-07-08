@@ -144,14 +144,15 @@ type CloudSync struct {
 	// Cloud-pushed key-name filter gating the read-miss consult (CloudTips).
 	// filterBulk is replaced wholesale per KeyFilter frame; filterOwn is
 	// append-only with our own uploads' key names, covering the window until
-	// the cloud's next push reflects them. Both hold PRF images (CloudKeyName).
-	// A nil filterBulk (no frame received yet) leaves the gate open — every
-	// miss consults the cloud, the pre-filter behavior. Guarded by filterMu,
-	// not mu: the gate runs on the read path and must not contend with the
-	// outbox.
+	// the cloud's next frame reflects them (frames arrive only at stream
+	// attach and after a cloud-side rebuild, so that window is long — never
+	// reset filterOwn). Both hold PRF images (CloudKeyName). A nil filterBulk
+	// (no frame received yet) leaves the gate open — every miss consults the
+	// cloud, the pre-filter behavior. Guarded by filterMu, not mu: the gate
+	// runs on the read path and must not contend with the outbox.
 	filterMu   sync.RWMutex
-	filterBulk *effects.CuckooChain
-	filterOwn  effects.CuckooChain
+	filterBulk *effects.Bloom
+	filterOwn  ownFilter
 
 	// sentCount/ackedCount mirror the prometheus counters so the progress
 	// logger can read interval deltas (prometheus counters aren't readable).
@@ -319,7 +320,7 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	if eff.GetSubscription() == nil {
 		name := CloudKeyName(cs.keyNameKey, eff.Key)
 		cs.filterMu.Lock()
-		cs.filterOwn.Add(string(name))
+		cs.filterOwn.add(name)
 		cs.filterMu.Unlock()
 	}
 
@@ -631,19 +632,20 @@ func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 }
 
 // cloudMayHold is the read-miss filter gate: once the cloud has pushed its
-// key-name filter, a PRF name absent from both it and our own-uploads chain
+// key-name filter, a PRF name absent from both it and our own-uploads filter
 // cannot be in the cloud — free-miss without the round-trip. No filter yet
 // (filterBulk nil) leaves the gate open. False positives fall through to a
 // wasted consult; false negatives (stale filter) cost one premature miss and
 // never hide a key a live peer holds — the cluster subscription path doesn't
 // run through here.
 func (cs *CloudSync) cloudMayHold(name []byte) bool {
+	h := effects.BloomHash(name)
 	cs.filterMu.RLock()
 	defer cs.filterMu.RUnlock()
 	if cs.filterBulk == nil {
 		return true
 	}
-	return cs.filterBulk.MaybeContains(string(name)) || cs.filterOwn.MaybeContains(string(name))
+	return cs.filterBulk.HasHash(h) || cs.filterOwn.has(h)
 }
 
 // handleFilter installs the cloud's key-name filter, replacing the previous
@@ -651,8 +653,8 @@ func (cs *CloudSync) cloudMayHold(name []byte) bool {
 // current filter, so latest always wins). An undecodable frame is dropped and
 // the prior filter kept — the filter is advisory, never worth failing over.
 func (cs *CloudSync) handleFilter(kf *dp.KeyFilter) {
-	decoded := &effects.CuckooChain{}
-	if err := decoded.UnmarshalBinary(kf.GetFilter()); err != nil {
+	decoded, err := effects.ParseBloomFrame(kf.GetFilter())
+	if err != nil {
 		slog.Warn("cloud sync: undecodable key filter frame, keeping previous", "error", err)
 		return
 	}
@@ -660,6 +662,39 @@ func (cs *CloudSync) handleFilter(kf *dp.KeyFilter) {
 	cs.filterBulk = decoded
 	cs.filterMu.Unlock()
 	slog.Debug("cloud sync: key filter installed", "bytes", len(kf.GetFilter()))
+}
+
+// ownFilter is the append-only approximate set of this node's own uploaded
+// key names: a bloom list that grows by doubling, so membership stays O(k)
+// per bloom at any upload count (the CuckooChain it replaced degraded to a
+// linear walk of ~500 segments at trace scale). Bits are never cleared and
+// the list is never reset — a false negative here would free-miss a key
+// whose upload the cloud frame doesn't cover yet.
+type ownFilter struct {
+	blooms []*effects.Bloom // newest last; earlier blooms are at capacity
+}
+
+func (f *ownFilter) add(name []byte) {
+	h := effects.BloomHash(name)
+	n := len(f.blooms)
+	if n == 0 || f.blooms[n-1].Fill() > 0.5 {
+		size := effects.BloomMinBytes
+		if n > 0 {
+			size = f.blooms[n-1].SizeBytes() * 2
+		}
+		f.blooms = append(f.blooms, effects.NewBloom(size))
+		n++
+	}
+	f.blooms[n-1].SetHash(h)
+}
+
+func (f *ownFilter) has(h uint64) bool {
+	for _, b := range f.blooms {
+		if b.HasHash(h) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildEnvelope maps a swytch effect to the cloud's structural envelope: the

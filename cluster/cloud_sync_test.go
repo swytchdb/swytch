@@ -28,19 +28,15 @@ import (
 	"github.com/swytchdb/swytch/effects"
 )
 
-// filterFrame marshals a CuckooChain over the given PRF names into the wire
-// bytes a KeyFilter frame carries.
+// filterFrame builds the bloom wire bytes a KeyFilter frame carries over the
+// given PRF names.
 func filterFrame(t *testing.T, names ...[]byte) []byte {
 	t.Helper()
-	var cc effects.CuckooChain
+	b := effects.NewBloom(effects.BloomMinBytes)
 	for _, n := range names {
-		cc.Add(string(n))
+		b.Set(n)
 	}
-	b, err := cc.MarshalBinary()
-	if err != nil {
-		t.Fatalf("marshal filter: %v", err)
-	}
-	return b
+	return b.Frame()
 }
 
 // TestCloudMayHoldGate covers the read-miss filter gate: open with no filter,
@@ -69,7 +65,7 @@ func TestCloudMayHoldGate(t *testing.T) {
 
 	// Our own upload stays consultable before the cloud's push reflects it.
 	cs.filterMu.Lock()
-	cs.filterOwn.Add(string(ours))
+	cs.filterOwn.add(ours)
 	cs.filterMu.Unlock()
 	if !cs.cloudMayHold(ours) {
 		t.Fatal("own-uploaded name must pass the gate")
@@ -100,6 +96,27 @@ func TestHandleFilterUndecodableKeepsPrevious(t *testing.T) {
 	}
 	if cs.cloudMayHold(CloudKeyName(keyNameKey, []byte("absent"))) {
 		t.Fatal("undecodable frame must not open the gate")
+	}
+}
+
+// TestOwnFilterGrowth: the own-uploads filter doubles as it fills and never
+// loses a name across doublings — a false negative would free-miss a key
+// whose upload the cloud frame doesn't cover yet.
+func TestOwnFilterGrowth(t *testing.T) {
+	var f ownFilter
+	const n = 10_000 // enough to force several doublings from the 4KB floor
+	names := make([][]byte, n)
+	for i := range n {
+		names[i] = []byte{byte(i), byte(i >> 8), 'o', 'w', 'n'}
+		f.add(names[i])
+	}
+	if len(f.blooms) < 2 {
+		t.Fatalf("expected the filter to grow, still %d bloom(s)", len(f.blooms))
+	}
+	for i, name := range names {
+		if !f.has(effects.BloomHash(name)) {
+			t.Fatalf("false negative for name %d after growth", i)
+		}
 	}
 }
 
