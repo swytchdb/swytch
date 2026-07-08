@@ -723,7 +723,11 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer, db *shared
 		// ReducedEffect and would report nonzero size for a TTL-
 		// expired key.
 		snap, _, err := cmd.Context.GetSnapshot(key)
-		if err != nil || snap == nil {
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		if snap == nil {
 			w.WriteNullBulkString()
 			return
 		}

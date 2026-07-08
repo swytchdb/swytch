@@ -890,26 +890,43 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	valid = true
 
 	runner = func() {
-		w.WriteArray(len(keys))
-		for _, key := range keys {
+		type mgetResult struct {
+			snap *pb.ReducedEffect
+			data []byte
+		}
+		results := make([]mgetResult, len(keys))
+		for i, key := range keys {
 			snap, _, err := cmd.Context.GetSnapshot(key)
-			if err != nil || snap == nil {
-				w.WriteNullBulkString()
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if snap == nil {
 				continue
 			}
 			// Pure scalar string
 			if snap.Collection == pb.CollectionKind_SCALAR &&
 				(snap.TypeTag == pb.ValueType_TYPE_STRING || snap.TypeTag == pb.ValueType_TYPE_UNSPECIFIED) {
-				w.WriteBulkString(snapshotToRaw(snap))
+				results[i].snap = snap
 				continue
 			}
 			// Try reconstruction (bitmap, HLL, etc.)
 			if data, ok := shared.ReconstructBytes(snap); ok {
-				w.WriteBulkString(data)
+				results[i].data = data
 				continue
 			}
-			// MGET is lenient — no WRONGTYPE error, just null
-			w.WriteNullBulkString()
+			// MGET is lenient for WRONGTYPE — null — but read uncertainty is an error.
+		}
+
+		w.WriteArray(len(keys))
+		for _, r := range results {
+			if r.snap != nil {
+				w.WriteBulkString(snapshotToRaw(r.snap))
+			} else if r.data != nil {
+				w.WriteBulkString(r.data)
+			} else {
+				w.WriteNullBulkString()
+			}
 		}
 	}
 	return

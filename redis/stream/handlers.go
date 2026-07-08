@@ -782,12 +782,15 @@ parseStreams:
 	}
 
 	// Try to read streams
-	tryReadStreams := func() []streamResult {
+	tryReadStreams := func() ([]streamResult, error) {
 		var results []streamResult
 
 		for j, sKey := range streamKeys {
 			snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
-			if err != nil || !exists || wrongType {
+			if err != nil {
+				return nil, err
+			}
+			if !exists || wrongType {
 				continue
 			}
 
@@ -819,12 +822,16 @@ parseStreams:
 			}
 		}
 
-		return results
+		return results, nil
 	}
 
 	// Non-blocking case
 	if block < 0 {
-		results := tryReadStreams()
+		results, err := tryReadStreams()
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
 		if len(results) == 0 {
 			w.WriteNullArray()
 			return
@@ -837,7 +844,11 @@ parseStreams:
 	// First resolve $ IDs to current LastID
 	for j, sKey := range streamKeys {
 		if useLastID[j] {
-			snap, _, exists, _, _ := getStreamSnapshot(cmd, sKey)
+			snap, _, exists, _, err := getStreamSnapshot(cmd, sKey)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 			if exists {
 				lastID, _, _, found := streamMetadata(snap)
 				if !found {
@@ -864,7 +875,12 @@ parseStreams:
 
 	// Blocking loop
 	for {
-		results := tryReadStreams()
+		results, err := tryReadStreams()
+		if err != nil {
+			reg.Cancel()
+			w.WriteError(err.Error())
+			return
+		}
 		if len(results) > 0 {
 			reg.Cancel()
 			writeXReadResults(w, results)
@@ -981,7 +997,11 @@ parseNBStreams:
 
 		for j, sKey := range streamKeys {
 			snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
-			if err != nil || !exists || wrongType {
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !exists || wrongType {
 				continue
 			}
 
