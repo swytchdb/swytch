@@ -184,12 +184,12 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	case pb.CollectionKind_ORDERED:
 		// Lists
 		for _, elem := range snap.OrderedElements {
-			elements = append(elements, elem.Data.GetRaw())
+			elements = append(elements, elem.Data.Decompress())
 		}
 	case pb.CollectionKind_KEYED:
 		// Sets and sorted sets
 		for _, elem := range snap.NetAdds {
-			elements = append(elements, elem.Data.GetRaw())
+			elements = append(elements, elem.Data.Decompress())
 		}
 	default:
 		w.WriteWrongType()
@@ -264,7 +264,7 @@ func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, p
 		}
 		for _, elem := range snap.OrderedElements {
 			if string(elem.Data.GetId()) == field {
-				return elem.Data.GetRaw(), true, nil
+				return elem.Data.Decompress(), true, nil
 			}
 		}
 		return nil, false, nil
@@ -273,7 +273,7 @@ func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, p
 	if snap.Scalar == nil {
 		return nil, false, nil
 	}
-	return snap.Scalar.GetRaw(), true, nil
+	return snap.Scalar.Decompress(), true, nil
 }
 
 // buildSortItems creates sortItems from elements with computed weights

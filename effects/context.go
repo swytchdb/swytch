@@ -673,6 +673,14 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 		}
 	}
 
+	// Value compression (--compress): swap raw values for their compressed
+	// form before the effect is owned, marshaled, cached, and broadcast —
+	// the compressed form IS the effect everywhere downstream, and readers
+	// inflate off the per-effect flag at the reduce boundary.
+	if c.engine.compressValues {
+		CompressEffectValues(eff)
+	}
+
 	// Own the byte slices before caching: handler-built effects carry
 	// []byte fields that alias pooled parser buffers, which are recycled
 	// after the command returns while the cached message lives on in the
@@ -680,6 +688,7 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	// are built fresh per call (Emit already mutated them in place above,
 	// so sharing one across calls was never legal), so a full reflective
 	// proto.Clone here just duplicated every submessage and payload.
+	// A just-compressed raw value is already owned (fresh codec output).
 	ownEffectBytes(eff)
 
 	offset, notify, err := c.rawEmit(eff)
@@ -723,6 +732,8 @@ func ownEffectBytes(eff *pb.Effect) {
 		if v, ok := d.Value.(*pb.DataEffect_Raw); ok {
 			v.Raw = bytes.Clone(v.Raw)
 		}
+		// A compressed arm needs no clone: it only exists as fresh codec
+		// output from CompressEffectValues, never as pooled parser memory.
 	case *pb.Effect_Meta:
 		k.Meta.ElementId = bytes.Clone(k.Meta.ElementId)
 	case *pb.Effect_PubsubMessage:

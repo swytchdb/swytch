@@ -358,7 +358,7 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer, db *shared.D
 		// Remove pending entries for this consumer
 		if pelSnap != nil && pelSnap.NetAdds != nil {
 			for elemID, elem := range pelSnap.NetAdds {
-				consumer, _, _ := decodePELEntry(elem.Data.GetRaw())
+				consumer, _, _ := decodePELEntry(elem.Data.Decompress())
 				if consumer == consumerName && len(elemID) == 16 {
 					id := decodeStreamElementID([]byte(elemID))
 					emitPELRemove(cmd, key, groupName, id)
@@ -1275,7 +1275,7 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 			gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
 			consumers := getConsumersFromGroup(gSnap)
 			if elem, ok := consumers[consumerName]; ok {
-				_, activeTime := decodeConsumerMeta(elem.Data.GetRaw())
+				_, activeTime := decodeConsumerMeta(elem.Data.Decompress())
 				consumerMeta = encodeConsumerMeta(now, activeTime)
 			}
 			emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta)
@@ -1694,7 +1694,7 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			var pe *shared.PendingEntry
 			if pelSnap != nil && pelSnap.NetAdds != nil {
 				if elem, ok := pelSnap.NetAdds[elemID]; ok {
-					consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.GetRaw())
+					consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.Decompress())
 					pe = &shared.PendingEntry{
 						ID:            id,
 						Consumer:      consumer,

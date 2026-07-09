@@ -654,7 +654,7 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		if snap != nil && snap.NetAdds != nil {
 			if elem, has := snap.NetAdds[field]; has {
 				// Could be Raw (LWW) or IntVal (additive)
-				if raw := elem.Data.GetRaw(); raw != nil {
+				if raw := elem.Data.Decompress(); raw != nil {
 					current, ok = shared.ParseInt64(raw)
 					if !ok {
 						w.WriteNotInteger()
@@ -731,7 +731,7 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		if snap != nil && snap.NetAdds != nil {
 			if elem, has := snap.NetAdds[field]; has {
 				// Could be Raw (LWW) or FloatVal (additive)
-				if raw := elem.Data.GetRaw(); raw != nil {
+				if raw := elem.Data.Decompress(); raw != nil {
 					var parseErr error
 					current, parseErr = strconv.ParseFloat(string(raw), 64)
 					if parseErr != nil {

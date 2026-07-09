@@ -68,6 +68,11 @@ type RuntimeConfig struct {
 	// it at a name that resolves to every peer's cluster-port IP.
 	JoinAddr string
 
+	// CompressValues makes this node store data values zstd-compressed inside
+	// the effects it emits (--compress). Write-side only; peers with any
+	// setting read them via the per-effect compression arm.
+	CompressValues bool
+
 	// ClusterPort is the QUIC port used for cluster traffic. 0 =
 	// no default; the caller is responsible for supplying a non-zero
 	// value when ClusterPassphrase is set.
@@ -127,6 +132,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		DefaultMode:        effects.SafeMode,
 		MemoryLimit:        cfg.MemoryLimit,
 		MemoryLimitPercent: cfg.MemoryLimitPercent,
+		CompressValues:     cfg.CompressValues,
 	})
 	log.Info("effects engine initialized", "node_id", engine.NodeID())
 

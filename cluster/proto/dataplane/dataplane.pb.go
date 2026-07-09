@@ -173,10 +173,12 @@ type Effect struct {
 	// is structure (a flag), not content — the snapshot's State stays encrypted.
 	SnapshotStateCarrying bool `protobuf:"varint,7,opt,name=snapshot_state_carrying,json=snapshotStateCarrying,proto3" json:"snapshot_state_carrying,omitempty"`
 	// raw_size is the effect's byte size before compression and encryption — the
-	// customer's data as they wrote it. Usage metering bills
-	// max(raw_size, len(raw_effect)) so the bill tracks their bytes rather than
-	// our seal and compression choices, while the sealed blob — the one size the
-	// cloud can measure itself — floors it against under-declaring writers.
+	// customer's data as they wrote it. Usage metering resolves a key's level
+	// from its frontier: a data-carrying effect re-levels the key to
+	// max(raw_size, len(raw_effect)) (the sealed blob floors an under-declaring
+	// writer), while a structural effect — meta, noop, bind, subscription,
+	// verdict-only snapshot — inherits the level of the data it supersedes
+	// rather than re-leveling the key to its own marker size.
 	RawSize uint64 `protobuf:"varint,8,opt,name=raw_size,json=rawSize,proto3" json:"raw_size,omitempty"`
 }
 

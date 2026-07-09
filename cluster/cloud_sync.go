@@ -701,8 +701,9 @@ func (f *ownFilter) has(h uint64) bool {
 // (NodeID, Offset) identity, deps, kind, and time stay readable (the cloud's
 // retention scan walks them); the key name becomes its PRF image and the whole
 // serialized effect is sealed into raw_effect. raw_size carries the pre-seal
-// byte count so the cloud can bill the customer's data rather than the sealed
-// blob it stores.
+// byte count — plus what value compression (--compress) hid from the marshal
+// — so the cloud can bill the customer's data rather than the sealed blob it
+// stores or the writer's compression choices.
 func (cs *CloudSync) buildEnvelope(tip effects.Tip, eff *pb.Effect) (*dp.Effect, error) {
 	raw, err := effects.MarshalEffect(eff)
 	if err != nil {
@@ -727,7 +728,7 @@ func (cs *CloudSync) buildEnvelope(tip effects.Tip, eff *pb.Effect) (*dp.Effect,
 		Deps:                  deps,
 		Key:                   CloudKeyName(cs.keyNameKey, eff.Key),
 		RawEffect:             sealed,
-		RawSize:               uint64(len(raw)),
+		RawSize:               uint64(len(raw)) + effects.InflatedSizeDelta(eff),
 		TimeLocal:             timeLocal,
 		EffectType:            cloudEffectType(eff),
 		SnapshotStateCarrying: snap != nil && snap.State != nil,

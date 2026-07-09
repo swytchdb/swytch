@@ -43,6 +43,7 @@ type EffectsConfig struct {
 	AdvertiseAddr      string
 	MemoryLimit        int64
 	MemoryLimitPercent float64
+	Compress           bool
 	Port               int // main Redis port, used to compute default ClusterPort
 }
 
@@ -54,6 +55,7 @@ func RegisterEffectsFlags(fs *flag.FlagSet) *EffectsConfig {
 	fs.StringVar(&cfg.JoinAddr, "join", "", "DNS name to resolve for cluster peer discovery")
 	fs.IntVar(&cfg.ClusterPort, "cluster-port", 0, "QUIC port for cluster traffic (default: --port + 1000)")
 	fs.StringVar(&cfg.AdvertiseAddr, "cluster-advertise", "", "Address:port this node advertises to peers (default: auto-detect)")
+	fs.BoolVar(&cfg.Compress, "compress", false, "Store values compressed inside effects (more resident data per byte of memory, decompression on read); nodes with any setting interoperate")
 	return cfg
 }
 
@@ -87,6 +89,7 @@ func InitializeEffects(cfg *EffectsConfig) error {
 		JoinAddr:           cfg.JoinAddr,
 		ClusterPort:        clusterPort,
 		AdvertiseAddr:      cfg.AdvertiseAddr,
+		CompressValues:     cfg.Compress,
 	})
 	cfg.Cloud = "" // derive-and-drop: the runtime has its keys, nothing retains the master
 	if err != nil {

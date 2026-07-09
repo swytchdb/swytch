@@ -44,16 +44,16 @@ func loadIndexSchema(ctx *effects.Context, name string) (*indexSchema, error) {
 
 	idx := &indexSchema{Name: name}
 	if el, ok := reduced.NetAdds[indexFieldIndexID]; ok && el.Data != nil {
-		idx.IndexID = el.Data.GetRaw()
+		idx.IndexID = el.Data.Decompress()
 	}
 	if el, ok := reduced.NetAdds[indexFieldTable]; ok && el.Data != nil {
-		idx.Table = string(el.Data.GetRaw())
+		idx.Table = string(el.Data.Decompress())
 	}
 	if el, ok := reduced.NetAdds[indexFieldTableID]; ok && el.Data != nil {
-		idx.TableID = el.Data.GetRaw()
+		idx.TableID = el.Data.Decompress()
 	}
 	if el, ok := reduced.NetAdds[indexFieldColumns]; ok && el.Data != nil {
-		raw := el.Data.GetRaw()
+		raw := el.Data.Decompress()
 		if len(raw) > 0 {
 			for _, part := range splitNUL(raw) {
 				idx.Columns = append(idx.Columns, string(part))

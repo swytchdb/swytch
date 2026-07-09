@@ -51,7 +51,7 @@ func reconstructHLL(snap *pb.ReducedEffect) *shared.HLLValue {
 	if snap == nil || snap.Scalar == nil {
 		return hll
 	}
-	raw := snap.Scalar.GetRaw()
+	raw := snap.Scalar.Decompress()
 	n := min(len(raw), 16384)
 	copy(hll.Registers[:n], raw)
 	return hll
@@ -62,7 +62,7 @@ func mergeHLLFromSnap(dst *shared.HLLValue, snap *pb.ReducedEffect) {
 	if snap == nil || snap.Scalar == nil {
 		return
 	}
-	raw := snap.Scalar.GetRaw()
+	raw := snap.Scalar.Decompress()
 	n := min(len(raw), 16384)
 	for i := range n {
 		if raw[i] > dst.Registers[i] {

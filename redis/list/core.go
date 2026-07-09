@@ -344,11 +344,11 @@ func handleLPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		if count == 1 && !hasCountArg {
-			w.WriteBulkString(elements[0].Data.GetRaw())
+			w.WriteBulkString(elements[0].Data.Decompress())
 		} else {
 			w.WriteArray(n)
 			for i := range n {
-				w.WriteBulkString(elements[i].Data.GetRaw())
+				w.WriteBulkString(elements[i].Data.Decompress())
 			}
 		}
 	}
@@ -418,11 +418,11 @@ func handleRPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		if count == 1 && !hasCountArg {
-			w.WriteBulkString(elements[len(elements)-1].Data.GetRaw())
+			w.WriteBulkString(elements[len(elements)-1].Data.Decompress())
 		} else {
 			w.WriteArray(n)
 			for i := range n {
-				w.WriteBulkString(elements[len(elements)-1-i].Data.GetRaw())
+				w.WriteBulkString(elements[len(elements)-1-i].Data.Decompress())
 			}
 		}
 	}
@@ -518,7 +518,7 @@ func handleLRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		result := elements[s : e+1]
 		w.WriteArray(len(result))
 		for _, elem := range result {
-			w.WriteBulkString(elem.Data.GetRaw())
+			w.WriteBulkString(elem.Data.Decompress())
 		}
 	}
 	return
@@ -565,7 +565,7 @@ func handleLIndex(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			w.WriteNullBulkString()
 			return
 		}
-		w.WriteBulkString(elements[idx].Data.GetRaw())
+		w.WriteBulkString(elements[idx].Data.Decompress())
 	}
 	return
 }
@@ -668,7 +668,7 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		var toRemove []*pb.ReducedElement
 		if count > 0 {
 			for _, elem := range elements {
-				if bytes.Equal(elem.Data.GetRaw(), element) {
+				if bytes.Equal(elem.Data.Decompress(), element) {
 					toRemove = append(toRemove, elem)
 					if int64(len(toRemove)) >= count {
 						break
@@ -677,7 +677,7 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		} else if count < 0 {
 			for i := len(elements) - 1; i >= 0; i-- {
-				if bytes.Equal(elements[i].Data.GetRaw(), element) {
+				if bytes.Equal(elements[i].Data.Decompress(), element) {
 					toRemove = append(toRemove, elements[i])
 					if int64(len(toRemove)) >= -count {
 						break
@@ -686,7 +686,7 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		} else {
 			for _, elem := range elements {
-				if bytes.Equal(elem.Data.GetRaw(), element) {
+				if bytes.Equal(elem.Data.Decompress(), element) {
 					toRemove = append(toRemove, elem)
 				}
 			}
@@ -839,7 +839,7 @@ func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 		var pivotID []byte
 		for _, elem := range snap.OrderedElements {
-			if bytes.Equal(elem.Data.GetRaw(), pivot) {
+			if bytes.Equal(elem.Data.Decompress(), pivot) {
 				pivotID = elem.Data.Id
 				break
 			}
@@ -1001,7 +1001,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				}
 				comparisons++
 
-				if bytes.Equal(elements[idx].Data.GetRaw(), element) {
+				if bytes.Equal(elements[idx].Data.Decompress(), element) {
 					if skipCount > 0 {
 						skipCount--
 						continue
@@ -1020,7 +1020,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				}
 				comparisons++
 
-				if bytes.Equal(elements[idx].Data.GetRaw(), element) {
+				if bytes.Equal(elements[idx].Data.Decompress(), element) {
 					if skipCount > 0 {
 						skipCount--
 						continue
@@ -1156,7 +1156,7 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			popped := make([][]byte, n)
 			if left {
 				for i := range n {
-					popped[i] = elements[i].Data.GetRaw()
+					popped[i] = elements[i].Data.Decompress()
 					if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -1165,7 +1165,7 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			} else {
 				for i := range n {
 					idx := len(elements) - 1 - i
-					popped[i] = elements[idx].Data.GetRaw()
+					popped[i] = elements[idx].Data.Decompress()
 					if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -1318,7 +1318,7 @@ func doLMove(cmd *shared.Command, source, destination string, popLeft, pushLeft 
 	} else {
 		elem = srcSnap.OrderedElements[len(srcSnap.OrderedElements)-1]
 	}
-	value := elem.Data.GetRaw()
+	value := elem.Data.Decompress()
 
 	// Begin transaction: read source (+ dest if different), remove from source, insert to dest
 	cmd.Context.BeginTx()

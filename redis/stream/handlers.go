@@ -1330,7 +1330,7 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		if err == nil && snap != nil && snap.NetAdds != nil {
 			count := 0
 			for _, elem := range snap.NetAdds {
-				r := elem.Data.GetRaw()
+				r := elem.Data.Decompress()
 				if len(r) >= 32 {
 					entryGen := int64(binary.LittleEndian.Uint64(r[24:32]))
 					if entryGen == currentGen {
@@ -1553,7 +1553,7 @@ func writeXInfoConsumerFull(w *shared.Writer, name string, pelEntries []*shared.
 
 	seenTime, activeTime := int64(0), int64(0)
 	if elem, ok := consumers[name]; ok {
-		seenTime, activeTime = decodeConsumerMeta(elem.Data.GetRaw())
+		seenTime, activeTime = decodeConsumerMeta(elem.Data.Decompress())
 	}
 
 	w.WriteBulkStringStr("seen-time")
@@ -1727,7 +1727,7 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	w.WriteArray(len(consumerNames))
 	for _, name := range consumerNames {
 		elem := consumers[name]
-		seenTime, activeTime := decodeConsumerMeta(elem.Data.GetRaw())
+		seenTime, activeTime := decodeConsumerMeta(elem.Data.Decompress())
 		pendingCount := consumerPendingCount(pelSnap, name)
 
 		w.WriteArray(8)
@@ -1991,7 +1991,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 			for elemID, elem := range pelSnap.NetAdds {
 				if len(elemID) == 16 {
 					id := decodeStreamElementID([]byte(elemID))
-					raw := elem.Data.GetRaw()
+					raw := elem.Data.Decompress()
 					if len(raw) >= 24 {
 						consumer := string(raw[24:])
 						group.Pending[id] = &shared.PendingEntry{

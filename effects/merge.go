@@ -302,7 +302,7 @@ func mergeCommutativeScalars(a, b, winner *pb.ReducedEffect, hlc time.Time, node
 			r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: bv}
 		}
 	case pb.MergeRule_MAX_BYTES:
-		ab, bb := a.Scalar.GetRaw(), b.Scalar.GetRaw()
+		ab, bb := a.Scalar.Decompress(), b.Scalar.Decompress()
 		result := make([]byte, max(len(ab), len(bb)))
 		copy(result, ab)
 		for i := range bb {
@@ -337,7 +337,7 @@ func mergeMixedScalar(comm, nonComm, winner *pb.ReducedEffect, hlc time.Time, no
 	switch comm.Merge {
 	case pb.MergeRule_ADDITIVE_INT:
 		baseVal := nonComm.Scalar.GetIntVal()
-		if raw := nonComm.Scalar.GetRaw(); raw != nil {
+		if raw := nonComm.Scalar.Decompress(); raw != nil {
 			baseVal = rawToInt(raw)
 		}
 		r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: baseVal + comm.Scalar.GetIntVal()}
@@ -345,7 +345,7 @@ func mergeMixedScalar(comm, nonComm, winner *pb.ReducedEffect, hlc time.Time, no
 
 	case pb.MergeRule_ADDITIVE_FLOAT:
 		baseVal := nonComm.Scalar.GetFloatVal()
-		if raw := nonComm.Scalar.GetRaw(); raw != nil {
+		if raw := nonComm.Scalar.Decompress(); raw != nil {
 			baseVal = rawToFloat(raw)
 		}
 		r.Scalar.Value = &pb.DataEffect_FloatVal{FloatVal: baseVal + comm.Scalar.GetFloatVal()}

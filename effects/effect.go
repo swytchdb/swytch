@@ -153,6 +153,11 @@ type Engine struct {
 	// (0 = unbounded). Exposed via MemoryTarget for heartbeat telemetry.
 	memTarget int64
 
+	// compressValues makes Emit store data values zstd-compressed inside the
+	// effect (--compress). Write-side only: reading inflates unconditionally,
+	// driven by the per-effect flag, never by this setting.
+	compressValues bool
+
 	// evictBudget is the number of keys the governor wants evicted, computed each
 	// tick from the live-heap overage. The write path drains it inline (see
 	// drainEvictBudget) so insertion is back-pressured by eviction — you cannot
@@ -372,6 +377,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		peerKeyFilters:     make(map[pb.NodeID]*peerKeyFilter),
 		effectCache:        newVertexPool(),
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
+		compressValues:     cfg.CompressValues,
 	}
 
 	// Creation refs are seeded at PutSized (one per tipset a vertex occupies) and

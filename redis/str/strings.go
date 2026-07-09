@@ -124,8 +124,8 @@ func snapshotToRaw(snap *pb.ReducedEffect) []byte {
 		return nil
 	}
 	switch v := snap.Scalar.Value.(type) {
-	case *pb.DataEffect_Raw:
-		return v.Raw
+	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
+		return snap.Scalar.Decompress()
 	case *pb.DataEffect_IntVal:
 		return []byte(strconv.FormatInt(v.IntVal, 10))
 	case *pb.DataEffect_FloatVal:
@@ -142,8 +142,8 @@ func snapshotToInt(snap *pb.ReducedEffect) (int64, bool) {
 	switch v := snap.Scalar.Value.(type) {
 	case *pb.DataEffect_IntVal:
 		return v.IntVal, true
-	case *pb.DataEffect_Raw:
-		return shared.ParseInt64(v.Raw)
+	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
+		return shared.ParseInt64(snap.Scalar.Decompress())
 	case nil:
 		return 0, true
 	default:
@@ -158,8 +158,8 @@ func snapshotToFloat(snap *pb.ReducedEffect) (float64, bool) {
 	switch v := snap.Scalar.Value.(type) {
 	case *pb.DataEffect_FloatVal:
 		return v.FloatVal, true
-	case *pb.DataEffect_Raw:
-		f, err := strconv.ParseFloat(string(v.Raw), 64)
+	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
+		f, err := strconv.ParseFloat(string(snap.Scalar.Decompress()), 64)
 		return f, err == nil
 	case *pb.DataEffect_IntVal:
 		return float64(v.IntVal), true

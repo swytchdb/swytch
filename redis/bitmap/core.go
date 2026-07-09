@@ -69,7 +69,7 @@ func getBit(snap *pb.ReducedEffect, offset int64) int64 {
 	if snap.Collection == pb.CollectionKind_KEYED {
 		baseBit := int64(0)
 		if snap.Scalar != nil {
-			baseBit = getScalarBit(snap.Scalar.GetRaw(), offset)
+			baseBit = getScalarBit(snap.Scalar.Decompress(), offset)
 		}
 		elem, exists := snap.NetAdds[strconv.FormatInt(offset, 10)]
 		if exists {
@@ -86,7 +86,7 @@ func getBit(snap *pb.ReducedEffect, offset int64) int64 {
 		return baseBit
 	}
 	// Pure SCALAR bitmap
-	return getScalarBit(snap.Scalar.GetRaw(), offset)
+	return getScalarBit(snap.Scalar.Decompress(), offset)
 }
 
 // reconstructBitmapBytes rebuilds a byte array from a bitmap snapshot.
@@ -99,7 +99,7 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 	}
 	// Pure SCALAR path
 	if snap.Collection == pb.CollectionKind_SCALAR {
-		return snap.Scalar.GetRaw()
+		return snap.Scalar.Decompress()
 	}
 
 	// Collect overlay offsets.  Every entry in NetAdds contributes to the
@@ -122,7 +122,7 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 	// Start from SCALAR base or empty
 	var data []byte
 	if snap.Scalar != nil {
-		base := snap.Scalar.GetRaw()
+		base := snap.Scalar.Decompress()
 		data = make([]byte, len(base))
 		copy(data, base)
 		// Extend if overlays go beyond SCALAR length
@@ -187,7 +187,7 @@ func emitBitmapBulk(cmd *shared.Command, key string, data []byte, oldSnap *pb.Re
 	// Determine SCALAR base for overlay-aware emit
 	var baseData []byte
 	if oldSnap != nil && oldSnap.Scalar != nil {
-		baseData = oldSnap.Scalar.GetRaw()
+		baseData = oldSnap.Scalar.Decompress()
 	}
 
 	// Build set of bit offsets that need a KEYED element (toggle/set)
@@ -331,7 +331,7 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		//   REMOVE = "this bit matches base"
 		emitValue := value
 		if snap != nil && snap.Scalar != nil {
-			baseBit := getScalarBit(snap.Scalar.GetRaw(), offset)
+			baseBit := getScalarBit(snap.Scalar.Decompress(), offset)
 			if value != baseBit {
 				emitValue = 1 // INSERT (toggle from base)
 			} else {

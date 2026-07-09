@@ -377,13 +377,13 @@ func schemaFromSnapshot(name string, reduced *pb.ReducedEffect) (*tableSchema, e
 		return nil, fmt.Errorf("sql: schema for %q missing columns field", name)
 	}
 	var cols []columnSchema
-	if err := json.Unmarshal(colsEl.Data.GetRaw(), &cols); err != nil {
+	if err := json.Unmarshal(colsEl.Data.Decompress(), &cols); err != nil {
 		return nil, fmt.Errorf("sql: unmarshal schema columns for %q: %w", name, err)
 	}
 
 	var pkCols []int
 	if pkEl, ok := reduced.NetAdds[schemaFieldPK]; ok && pkEl.Data != nil {
-		raw := pkEl.Data.GetRaw()
+		raw := pkEl.Data.Decompress()
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &pkCols); err != nil {
 				return nil, fmt.Errorf("sql: unmarshal pk_columns for %q: %w", name, err)
@@ -393,7 +393,7 @@ func schemaFromSnapshot(name string, reduced *pb.ReducedEffect) (*tableSchema, e
 
 	var syntheticPK bool
 	if spkEl, ok := reduced.NetAdds[schemaFieldSyntheticPK]; ok && spkEl.Data != nil {
-		raw := spkEl.Data.GetRaw()
+		raw := spkEl.Data.Decompress()
 		if len(raw) > 0 && raw[0] != 0 {
 			syntheticPK = true
 		}
@@ -405,7 +405,7 @@ func schemaFromSnapshot(name string, reduced *pb.ReducedEffect) (*tableSchema, e
 
 	var tableID []byte
 	if idEl, ok := reduced.NetAdds[schemaFieldTableID]; ok && idEl.Data != nil {
-		tableID = idEl.Data.GetRaw()
+		tableID = idEl.Data.Decompress()
 	}
 	if len(tableID) == 0 {
 		return nil, fmt.Errorf("sql: schema for %q missing tableID field", name)
@@ -413,7 +413,7 @@ func schemaFromSnapshot(name string, reduced *pb.ReducedEffect) (*tableSchema, e
 
 	var indexes []indexSchema
 	if idxEl, ok := reduced.NetAdds[schemaFieldIndexes]; ok && idxEl.Data != nil {
-		raw := idxEl.Data.GetRaw()
+		raw := idxEl.Data.Decompress()
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &indexes); err != nil {
 				return nil, fmt.Errorf("sql: unmarshal schema indexes for %q: %w", name, err)

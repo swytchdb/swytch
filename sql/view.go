@@ -80,7 +80,7 @@ func loadView(ctx *effects.Context, name string) (*viewSchema, error) {
 	if !ok || el.Data == nil {
 		return nil, fmt.Errorf("sql: view %q missing sql field", name)
 	}
-	return &viewSchema{Name: name, Body: string(el.Data.GetRaw())}, nil
+	return &viewSchema{Name: name, Body: string(el.Data.Decompress())}, nil
 }
 
 // listViews returns every view name currently present in the

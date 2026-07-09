@@ -97,7 +97,7 @@ func parseMembership(reduced *pb.ReducedEffect) []Member {
 		if nodeID == 0 {
 			continue
 		}
-		addr := string(elem.Data.GetRaw())
+		addr := string(elem.Data.Decompress())
 		if addr == "" {
 			continue
 		}

@@ -235,7 +235,7 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 			if _, ok := r.Scalar.Value.(*pb.DataEffect_IntVal); ok {
 				base = r.Scalar.GetIntVal()
 			} else {
-				base = rawToInt(r.Scalar.GetRaw())
+				base = rawToInt(r.Scalar.Decompress())
 			}
 			r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: base + d.GetIntVal()}
 			r.Scalar.Merge = pb.MergeRule_LAST_WRITE_WINS
@@ -251,7 +251,7 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 			if _, ok := r.Scalar.Value.(*pb.DataEffect_FloatVal); ok {
 				base = r.Scalar.GetFloatVal()
 			} else {
-				base = rawToFloat(r.Scalar.GetRaw())
+				base = rawToFloat(r.Scalar.Decompress())
 			}
 			r.Scalar.Value = &pb.DataEffect_FloatVal{FloatVal: base + d.GetFloatVal()}
 			r.Scalar.Merge = pb.MergeRule_LAST_WRITE_WINS
@@ -276,20 +276,24 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 		if r.Scalar == nil {
 			// First data effect — clone and make our own copy of the bytes
 			r.Scalar = cloneData(d)
-			src := d.GetRaw()
+			src := d.Decompress()
 			owned := make([]byte, len(src))
 			copy(owned, src)
 			r.Scalar.Value = &pb.DataEffect_Raw{Raw: owned}
 		} else {
-			a := r.Scalar.GetRaw()
-			b := d.GetRaw()
+			a := r.Scalar.Decompress()
+			b := d.Decompress()
 			if len(a) >= len(b) {
-				// Mutate in-place — we own this slice
+				// Mutate in-place — we own this slice (the first-effect branch
+				// copied it, or Decompress freshly inflated it). Re-point the
+				// value at it: when the scalar held a compressed arm, a is a
+				// new slice the mutation would otherwise be lost from.
 				for i := range b {
 					if b[i] > a[i] {
 						a[i] = b[i]
 					}
 				}
+				r.Scalar.Value = &pb.DataEffect_Raw{Raw: a}
 			} else {
 				result := make([]byte, len(b))
 				copy(result, a)
@@ -336,7 +340,7 @@ func reduceKeyed(r *pb.ReducedEffect, e *pb.Effect, d *pb.DataEffect) {
 	switch d.Merge {
 	case pb.MergeRule_ADDITIVE_INT:
 		base := existing.Data.GetIntVal()
-		if raw := existing.Data.GetRaw(); raw != nil {
+		if raw := existing.Data.Decompress(); raw != nil {
 			base = rawToInt(raw)
 		}
 		newElem := &pb.ReducedElement{
@@ -349,7 +353,7 @@ func reduceKeyed(r *pb.ReducedEffect, e *pb.Effect, d *pb.DataEffect) {
 		r.NetAdds[key] = newElem
 	case pb.MergeRule_ADDITIVE_FLOAT:
 		base := existing.Data.GetFloatVal()
-		if raw := existing.Data.GetRaw(); raw != nil {
+		if raw := existing.Data.Decompress(); raw != nil {
 			base = rawToFloat(raw)
 		}
 		newElem := &pb.ReducedElement{
@@ -512,6 +516,10 @@ func cloneData(d *pb.DataEffect) *pb.DataEffect {
 		result.Value = &pb.DataEffect_IntVal{IntVal: v.IntVal}
 	case *pb.DataEffect_FloatVal:
 		result.Value = &pb.DataEffect_FloatVal{FloatVal: v.FloatVal}
+	case *pb.DataEffect_Compressed:
+		// The CompressedValue is immutable once built; share it like the
+		// byte slices above.
+		result.Value = &pb.DataEffect_Compressed{Compressed: v.Compressed}
 	}
 	return result
 }
