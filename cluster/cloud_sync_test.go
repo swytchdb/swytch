@@ -334,3 +334,38 @@ func TestFetchEffectServesOutbox(t *testing.T) {
 		t.Fatalf("fetchEffect returned %v, want the outbox effect", got)
 	}
 }
+
+// TestBuildEnvelopeDeclaresRawSize pins raw_size to the pre-seal marshal
+// length. The cloud bills this field, and it must not move with compression
+// or seal overhead — the payload here is highly compressible precisely so the
+// sealed length diverges from the raw one.
+func TestBuildEnvelopeDeclaresRawSize(t *testing.T) {
+	enc, err := effects.NewEncryptorFromIKM([]byte("raw-size-test-ikm"))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	cs := &CloudSync{keyNameKey: DeriveKeyNameKey("raw-size-secret"), enc: enc}
+
+	eff := &pb.Effect{
+		Key: []byte("k"),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:    pb.EffectOp_INSERT_OP,
+			Value: &pb.DataEffect_Raw{Raw: make([]byte, 4096)},
+		}},
+	}
+	raw, err := effects.MarshalEffect(eff)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	env, err := cs.buildEnvelope(effects.Tip{1, 2}, eff)
+	if err != nil {
+		t.Fatalf("buildEnvelope: %v", err)
+	}
+	if env.GetRawSize() != uint64(len(raw)) {
+		t.Fatalf("raw_size = %d, want pre-seal length %d", env.GetRawSize(), len(raw))
+	}
+	if uint64(len(env.GetRawEffect())) == env.GetRawSize() {
+		t.Fatal("sealed length equals raw_size; the test payload no longer exercises the divergence")
+	}
+}

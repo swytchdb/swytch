@@ -73,6 +73,12 @@ message Effect {
   // retention DAG walk at the LCA; verdict-only ones are followed through. This
   // is structure (a flag), not content — the snapshot's State stays encrypted.
   bool snapshot_state_carrying = 7;
+  // raw_size is the effect's byte size before compression and encryption — the
+  // customer's data as they wrote it. Usage metering bills
+  // max(raw_size, len(raw_effect)) so the bill tracks their bytes rather than
+  // our seal and compression choices, while the sealed blob — the one size the
+  // cloud can measure itself — floors it against under-declaring writers.
+  uint64 raw_size = 8;
 }
 
 // WriteEffectsRequest is one message on the write stream. The FIRST message MUST
