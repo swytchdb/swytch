@@ -52,15 +52,6 @@ type ServerConfig struct {
 	// UnixSocketMode is the file mode for the Unix socket
 	UnixSocketMode os.FileMode
 
-	// NumDatabases is the number of databases (default 16)
-	NumDatabases int
-
-	// CapacityPerDB is the cache capacity per database
-	CapacityPerDB int
-
-	// MemoryLimit is the maximum memory in bytes (0 = unlimited)
-	MemoryLimit int64
-
 	// Password for AUTH command (empty = no auth required)
 	// Deprecated: use ACLFile instead
 	Password string
@@ -110,10 +101,7 @@ type ServerConfig struct {
 // DefaultServerConfig returns a default server configuration
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		Address:       ":6379",
-		NumDatabases:  shared.DefaultNumDatabases,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024, // 64MB
+		Address: ":6379",
 	}
 }
 
@@ -207,13 +195,10 @@ func NewServer(config ServerConfig) (*Server, error) {
 
 	{
 		handlerCfg := HandlerConfig{
-			NumDatabases:  config.NumDatabases,
-			CapacityPerDB: config.CapacityPerDB,
-			MemoryLimit:   config.MemoryLimit,
-			Password:      config.Password,
-			ACLFile:       config.ACLFile,
-			RequireAuth:   config.Password != "" || config.ACLFile != "",
-			DebugLogging:  config.DebugLogging,
+			Password:     config.Password,
+			ACLFile:      config.ACLFile,
+			RequireAuth:  config.Password != "" || config.ACLFile != "",
+			DebugLogging: config.DebugLogging,
 		}
 		handler = NewHandler(handlerCfg)
 		slog.Info("storage backend initialized", "type", "CloxCache")
@@ -504,7 +489,6 @@ func (s *Server) getConnState(conn net.Conn, ctx context.Context) *connState {
 	cs.writer = bufio.NewWriterSize(conn, writeBufSz)
 	cs.parser = shared.NewParserWithReader(cs.reader)
 	cs.conn = &shared.Connection{
-		SelectedDB: 0,
 		User:       nil, // Will be set on first command if default user has nopass
 		RemoteAddr: conn.RemoteAddr().String(),
 		Ctx:        ctx,

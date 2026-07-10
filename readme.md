@@ -255,7 +255,6 @@ Prometheus metrics for connections, per-command counts, cache hits/misses/evicti
 | `--port`        | 6379      | TCP port                                |
 | `--bind`        | 127.0.0.1 | Bind address                            |
 | `--maxmemory`   | 64mb      | Memory limit (b/kb/mb/gb/tb)            |
-| `--databases`   | 16        | Number of databases                     |
 | `--threads`     | 0         | Worker threads (0 = all CPUs)           |
 | `--requirepass` |           | AUTH password (use `--aclfile` instead) |
 | `--aclfile`     |           | ACL configuration file                  |

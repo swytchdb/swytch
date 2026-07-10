@@ -36,7 +36,6 @@ type ClientInfo struct {
 	Name       string
 	CreatedAt  time.Time
 	LastActive time.Time
-	DB         int
 	Flags      string
 	LastCmd    atomic.Pointer[string]
 	Conn       *shared.Connection
@@ -68,7 +67,6 @@ func (r *ClientRegistry) Register(conn *shared.Connection) *ClientInfo {
 		Addr:       conn.RemoteAddr,
 		CreatedAt:  now,
 		LastActive: now,
-		DB:         conn.SelectedDB,
 		Conn:       conn,
 	}
 
@@ -157,12 +155,6 @@ func (r *ClientRegistry) FormatClientList() string {
 			name = info.Conn.ClientName
 		}
 
-		// Get current DB
-		db := info.DB
-		if info.Conn != nil {
-			db = info.Conn.SelectedDB
-		}
-
 		// Number of queued commands in MULTI
 		multi := -1
 		watch := 0
@@ -171,8 +163,8 @@ func (r *ClientRegistry) FormatClientList() string {
 			watch = len(info.Conn.WatchedKeys)
 		}
 
-		fmt.Fprintf(&sb, "id=%d addr=%s fd=%d name=%s age=%d idle=%d flags=%s db=%d sub=0 psub=0 multi=%d watch=%d qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=%s\r\n",
-			info.ID, info.Addr, 0, name, age, idle, flags, db, multi, watch, lastCmd)
+		fmt.Fprintf(&sb, "id=%d addr=%s fd=%d name=%s age=%d idle=%d flags=%s db=0 sub=0 psub=0 multi=%d watch=%d qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=%s\r\n",
+			info.ID, info.Addr, 0, name, age, idle, flags, multi, watch, lastCmd)
 	}
 
 	return sb.String()
@@ -219,12 +211,6 @@ func (r *ClientRegistry) formatClientInfo(info *ClientInfo) string {
 		name = info.Conn.ClientName
 	}
 
-	// Get current DB
-	db := info.DB
-	if info.Conn != nil {
-		db = info.Conn.SelectedDB
-	}
-
 	// Number of queued commands in MULTI
 	multi := -1
 	watch := 0
@@ -233,8 +219,8 @@ func (r *ClientRegistry) formatClientInfo(info *ClientInfo) string {
 		watch = len(info.Conn.WatchedKeys)
 	}
 
-	return fmt.Sprintf("id=%d addr=%s fd=%d name=%s age=%d idle=%d flags=%s db=%d sub=0 psub=0 multi=%d watch=%d qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=%s\r\n",
-		info.ID, info.Addr, 0, name, age, idle, flags, db, multi, watch, lastCmd)
+	return fmt.Sprintf("id=%d addr=%s fd=%d name=%s age=%d idle=%d flags=%s db=0 sub=0 psub=0 multi=%d watch=%d qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=%s\r\n",
+		info.ID, info.Addr, 0, name, age, idle, flags, multi, watch, lastCmd)
 }
 
 // GetByID returns the ClientInfo for a client ID

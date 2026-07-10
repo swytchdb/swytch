@@ -39,7 +39,6 @@ const (
 
 // Connection represents the state of a client connection
 type Connection struct {
-	SelectedDB    int             // Currently selected database index
 	User          *ACLUser        // nil = unauthenticated
 	Username      string          // Cached username for logging
 	Protocol      ProtocolVersion // RESP protocol version (default RESP2)
@@ -253,9 +252,6 @@ type CommandHandler interface {
 
 	// RequiresAuth returns true if authentication is required
 	RequiresAuth() bool
-
-	// NumDatabases returns the number of databases available
-	NumDatabases() int
 
 	// DebugEnabled returns true if debug logging is enabled
 	DebugEnabled() bool

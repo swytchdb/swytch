@@ -50,31 +50,19 @@ import (
 	_ "github.com/swytchdb/swytch/redis/zset"   // Register zset module commands via init()
 )
 
-const (
-	// defaultMemoryLimit is the default memory limit (64MB)
-	defaultMemoryLimit = 64 * 1024 * 1024
-)
-
 // HandlerConfig contains configuration for the handler
 type HandlerConfig struct {
-	NumDatabases  int
-	CapacityPerDB int
-	MemoryLimit   int64
-	Password      string // Deprecated: use ACLFile instead
-	RequireAuth   bool   // Deprecated: use ACLFile instead
-	ACLFile       string // Path to ACL file for user authentication
-	DebugLogging  bool
+	Password     string // Deprecated: use ACLFile instead
+	RequireAuth  bool   // Deprecated: use ACLFile instead
+	ACLFile      string // Path to ACL file for user authentication
+	DebugLogging bool
 	// Engine, if set, enables effects-based data access for migrated modules
 	Engine *effects.Engine
 }
 
 // DefaultHandlerConfig returns a default configuration
 func DefaultHandlerConfig() HandlerConfig {
-	return HandlerConfig{
-		NumDatabases:  shared.DefaultNumDatabases,
-		CapacityPerDB: 100000,
-		MemoryLimit:   defaultMemoryLimit,
-	}
+	return HandlerConfig{}
 }
 
 // Handler processes Redis commands using CloxCache as the backend
@@ -111,18 +99,7 @@ type Handler struct {
 
 // NewHandler creates a new Redis command handler
 func NewHandler(cfg HandlerConfig) *Handler {
-	if cfg.NumDatabases <= 0 {
-		cfg.NumDatabases = shared.DefaultNumDatabases
-	}
-	if cfg.CapacityPerDB <= 0 {
-		cfg.CapacityPerDB = 100000
-	}
-
-	dbManager := shared.NewDatabaseManagerWithConfig(shared.DatabaseManagerConfig{
-		NumDBs:        cfg.NumDatabases,
-		TotalCapacity: cfg.CapacityPerDB,
-		MemoryLimit:   cfg.MemoryLimit,
-	})
+	dbManager := shared.NewDatabaseManager()
 
 	aclMgr := NewACLManager()
 
@@ -175,21 +152,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	// Build command dispatch table
 	h.initRegistry()
 
-	// Register callback to notify blocking commands when keys change
-	subs := dbManager.Subscriptions
-	dbManager.SetOnChange(func(dbIndex int, key string, event shared.KeyEvent) {
-		switch event {
-		case shared.KeyEventSet:
-			// Set: data added to list/zset/stream, or key type changed
-			// Wake oldest waiter (normal data flow)
-			subs.Enqueue([]byte(key), struct{}{})
-		case shared.KeyEventDelete:
-			// Delete: key removed, ALL blocked clients should wake up and return errors
-			subs.NotifyAllWaiters([]byte(key))
-		}
-	})
-
 	// Wire effects engine notification callbacks for blocking command wake-up
+	subs := dbManager.Subscriptions
 	if cfg.Engine != nil {
 		cfg.Engine.OnKeyDataAdded = func(key string) {
 			subs.Notify([]byte(key))
@@ -205,10 +169,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	return h
 }
 
-// NewHandlerWithDefaults creates a handler with default configuration
 // Close releases resources used by the handler
 func (h *Handler) Close() {
-	h.dbManager.Close()
 	if h.scriptEngine != nil {
 		h.scriptEngine.Close()
 		shared.ClearScriptingEngine()
@@ -320,11 +282,6 @@ func (h *Handler) RequiresAuth() bool {
 	return h.aclManager.RequiresAuth()
 }
 
-// NumDatabases returns the number of databases available
-func (h *Handler) NumDatabases() int {
-	return h.dbManager.NumDatabases()
-}
-
 // DebugEnabled returns true if debug logging is enabled
 func (h *Handler) DebugEnabled() bool {
 	return h.logger.IsDebug()
@@ -352,7 +309,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	}
 
 	// Log command if debug mode is enabled
-	h.logger.LogCommand(cmd, conn.SelectedDB, conn.RemoteAddr)
+	h.logger.LogCommand(cmd, conn.RemoteAddr)
 
 	// Log response when done
 	defer h.logger.LogResponse(conn.RemoteAddr, w.Buffer())
@@ -436,12 +393,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		}
 	}
 
-	// Get the selected database
-	db := h.dbManager.GetDB(conn.SelectedDB)
-	if db == nil {
-		w.WriteError("ERR invalid DB index")
-		return
-	}
+	db := h.dbManager.DB()
 
 	// Populate effects engine fields if available (must happen before dispatch and queueing).
 	// Read-only, non-transactional commands use the read-only context so a
@@ -727,20 +679,13 @@ func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer, conn *shar
 		return
 	}
 
+	// There is a single database; only SELECT 0 is valid.
 	index, ok := shared.ParseInt64(cmd.Args[0])
-	if !ok || index < 0 || index >= int64(h.dbManager.NumDatabases()) {
-		w.WriteError("ERR invalid DB index")
+	if !ok || index != 0 {
+		w.WriteError("ERR DB index is out of range")
 		return
 	}
 
-	// In effects mode, all data lives in database 0 for replication.
-	// Accept the SELECT but pin to db 0.
-	if effectsSelectOverride() {
-		w.WriteOK()
-		return
-	}
-
-	conn.SelectedDB = int(index)
 	w.WriteOK()
 }
 
@@ -1151,10 +1096,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 		return &pb.ForwardedResponse{Error: true, ErrorMessage: "empty transaction"}
 	}
 
-	db := h.dbManager.GetDB(0)
-	if db == nil {
-		return &pb.ForwardedResponse{Error: true, ErrorMessage: "database unavailable"}
-	}
+	db := h.dbManager.DB()
 
 	// Create a synthetic connection with InScript=true (non-blocking, no pubsub)
 	conn := &shared.Connection{

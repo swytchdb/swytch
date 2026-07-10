@@ -259,7 +259,7 @@ func (h *Handler) handleFlushAll(cmd *shared.Command, w *shared.Writer) {
 }
 
 func (h *Handler) handleSwapDB(cmd *shared.Command, w *shared.Writer) {
-	w.WriteError("ERR SWAPDB is not supported with the effects engine")
+	w.WriteError("ERR SWAPDB is not supported: there is only one database")
 }
 
 func (h *Handler) handleTime(cmd *shared.Command, w *shared.Writer) {

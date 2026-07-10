@@ -437,11 +437,8 @@ func sortCSV(s string) string {
 func startRedisTestServer(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
 	cfg := ServerConfig{
-		Address:      "127.0.0.1:0",
-		NumDatabases: 16,
+		Address: "127.0.0.1:0",
 	}
-
-	cfg.CapacityPerDB = 10000
 
 	eng := effects.NewTestEngine()
 
@@ -471,9 +468,7 @@ func startRedisTestServerWithEffects(t *testing.T) (addr string, cleanup func())
 	eng := effects.NewTestEngine()
 
 	cfg := ServerConfig{
-		Address:       "127.0.0.1:0",
-		NumDatabases:  16,
-		CapacityPerDB: 10000,
+		Address: "127.0.0.1:0",
 	}
 
 	server, err := NewServer(cfg)
@@ -562,21 +557,20 @@ func TestCorrectness_Select(t *testing.T) {
 		c := newRedisClient(t, addr)
 		defer c.close()
 
-		// SELECT succeeds but pins to DB 0 — effects engine disables multi-DB
-		if resp := c.selectDB(1); resp != "OK" {
+		// There is a single database: SELECT 0 succeeds, anything else errors.
+		if resp := c.selectDB(0); resp != "OK" {
 			t.Errorf("expected OK, got %q", resp)
 		}
 
-		// Store after SELECT 1 — should still be in DB 0
-		c.set("db1key", "value1")
-
-		// SELECT 0 — still DB 0, key should be visible
-		c.selectDB(0)
-		if val := c.get("db1key"); val != "value1" {
-			t.Errorf("effects mode pins to DB 0, expected value1, got %q", val)
+		c.set("db0key", "value0")
+		if val := c.get("db0key"); val != "value0" {
+			t.Errorf("expected value0, got %q", val)
 		}
 
-		// Select invalid DB
+		if resp := c.selectDB(1); !strings.HasPrefix(resp, "-ERR") {
+			t.Errorf("expected error for SELECT 1, got %q", resp)
+		}
+
 		c.sendCommand("SELECT", "999")
 		resp := c.readReply()
 		if !strings.HasPrefix(resp, "-ERR") {
@@ -1412,47 +1406,40 @@ func TestCorrectness_FiveKeysInFiveKeysOut(t *testing.T) {
 		c := newRedisClient(t, addr)
 		defer c.close()
 
-		// Test on both db0 and db9 (like Redis correctness tests)
-		for _, dbNum := range []int{0, 9} {
-			// Switch to database
-			c.selectDB(dbNum)
+		// Flush to start clean
+		c.flushdb()
 
-			// Flush to start clean
-			c.flushdb()
+		// Create 5 keys: a (with TTL), t, e, s, foo (no TTL)
+		c.set("a", "c")
+		c.expire("a", 5)
+		c.set("t", "c")
+		c.set("e", "c")
+		c.set("s", "c")
+		c.set("foo", "b")
 
-			// Create 5 keys: a (with TTL), t, e, s, foo (no TTL)
-			c.set("a", "c")
-			c.expire("a", 5)
-			c.set("t", "c")
-			c.set("e", "c")
-			c.set("s", "c")
-			c.set("foo", "b")
+		// Get all keys
+		keysResult := c.keys("*")
 
-			// Get all keys
-			keysResult := c.keys("*")
-
-			// Parse the comma-separated result and sort
-			keysList := strings.Split(keysResult, ",")
-			if len(keysList) != 5 {
-				t.Errorf("db%d: expected 5 keys, got %d: %q", dbNum, len(keysList), keysResult)
-				continue
-			}
-
-			// Check all expected keys are present (without db prefix)
-			expectedKeys := map[string]bool{"a": true, "e": true, "foo": true, "s": true, "t": true}
-			for _, k := range keysList {
-				if !expectedKeys[k] {
-					t.Errorf("db%d: unexpected key: %q (keys: %q)", dbNum, k, keysResult)
-				}
-				delete(expectedKeys, k)
-			}
-			if len(expectedKeys) > 0 {
-				t.Errorf("db%d: missing keys: %v", dbNum, expectedKeys)
-			}
-
-			// Cleanup
-			c.del("a")
+		// Parse the comma-separated result and sort
+		keysList := strings.Split(keysResult, ",")
+		if len(keysList) != 5 {
+			t.Fatalf("expected 5 keys, got %d: %q", len(keysList), keysResult)
 		}
+
+		// Check all expected keys are present
+		expectedKeys := map[string]bool{"a": true, "e": true, "foo": true, "s": true, "t": true}
+		for _, k := range keysList {
+			if !expectedKeys[k] {
+				t.Errorf("unexpected key: %q (keys: %q)", k, keysResult)
+			}
+			delete(expectedKeys, k)
+		}
+		if len(expectedKeys) > 0 {
+			t.Errorf("missing keys: %v", expectedKeys)
+		}
+
+		// Cleanup
+		c.del("a")
 	}
 }
 
@@ -2625,24 +2612,15 @@ func TestCorrectness_FlushAll(t *testing.T) {
 		c := newRedisClient(t, addr)
 		defer c.close()
 
-		// Set keys in multiple DBs
 		c.set("key0", "value0")
-		c.selectDB(1)
 		c.set("key1", "value1")
 
 		if resp := c.flushall(); resp != "OK" {
 			t.Errorf("expected OK, got %q", resp)
 		}
 
-		// Check DB 1
 		if size := c.dbsize(); size != 0 {
-			t.Errorf("expected 0 in DB 1, got %d", size)
-		}
-
-		// Check DB 0
-		c.selectDB(0)
-		if size := c.dbsize(); size != 0 {
-			t.Errorf("expected 0 in DB 0, got %d", size)
+			t.Errorf("expected 0 keys after FLUSHALL, got %d", size)
 		}
 	}
 }
@@ -3406,320 +3384,30 @@ func TestCorrectness_RESP3PersistsAcrossCommands(t *testing.T) {
 // SWAPDB Tests
 // =============================================================================
 
-func TestCorrectness_SwapDB_Basic(t *testing.T) {
-	t.Skip("SWAPDB is not supported with the effects engine")
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
+func TestCorrectness_SwapDB(t *testing.T) {
+	addr, cleanup := startRedisTestServer(t)
+	defer cleanup()
 
-		c := newRedisClient(t, addr)
-		defer c.close()
+	c := newRedisClient(t, addr)
+	defer c.close()
 
-		// Set data in DB 0
-		c.selectDB(0)
-		c.set("key0", "value0")
-
-		// Set data in DB 1
-		c.selectDB(1)
-		c.set("key1", "value1")
-
-		// Verify initial state
-		c.selectDB(0)
-		if val := c.get("key0"); val != "value0" {
-			t.Errorf("DB0 before swap: expected value0, got %q", val)
-		}
-		if val := c.get("key1"); val != "(nil)" {
-			t.Errorf("DB0 before swap: key1 should not exist, got %q", val)
-		}
-
-		c.selectDB(1)
-		if val := c.get("key1"); val != "value1" {
-			t.Errorf("DB1 before swap: expected value1, got %q", val)
-		}
-		if val := c.get("key0"); val != "(nil)" {
-			t.Errorf("DB1 before swap: key0 should not exist, got %q", val)
-		}
-
-		// Swap DB 0 and DB 1
-		if resp := c.swapDB(0, 1); resp != "OK" {
-			t.Errorf("SWAPDB: expected OK, got %q", resp)
-		}
-
-		// Verify swapped state - DB 0 now has DB 1's data
-		c.selectDB(0)
-		if val := c.get("key1"); val != "value1" {
-			t.Errorf("DB0 after swap: expected value1, got %q", val)
-		}
-		if val := c.get("key0"); val != "(nil)" {
-			t.Errorf("DB0 after swap: key0 should not exist, got %q", val)
-		}
-
-		// DB 1 now has DB 0's data
-		c.selectDB(1)
-		if val := c.get("key0"); val != "value0" {
-			t.Errorf("DB1 after swap: expected value0, got %q", val)
-		}
-		if val := c.get("key1"); val != "(nil)" {
-			t.Errorf("DB1 after swap: key1 should not exist, got %q", val)
-		}
+	// There is a single database, so SWAPDB is never valid.
+	if resp := c.swapDB(0, 1); !strings.HasPrefix(resp, "-ERR") {
+		t.Errorf("SWAPDB: expected error, got %q", resp)
 	}
-}
-
-func TestCorrectness_SwapDB_SameDB(t *testing.T) {
-	t.Skip("SWAPDB is not supported with the effects engine")
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Set data in DB 0
-		c.selectDB(0)
-		c.set("mykey", "myvalue")
-
-		// Swap DB 0 with itself (should be a no-op)
-		if resp := c.swapDB(0, 0); resp != "OK" {
-			t.Errorf("SWAPDB same db: expected OK, got %q", resp)
-		}
-
-		// Data should still be there
-		if val := c.get("mykey"); val != "myvalue" {
-			t.Errorf("after swap same db: expected myvalue, got %q", val)
-		}
+	if resp := c.swapDB(0, 0); !strings.HasPrefix(resp, "-ERR") {
+		t.Errorf("SWAPDB same db: expected error, got %q", resp)
 	}
-}
-
-func TestCorrectness_SwapDB_InvalidDB(t *testing.T) {
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Try to swap with invalid DB index
-		resp := c.swapDB(0, 999)
-		if !strings.HasPrefix(resp, "-ERR") {
-			t.Errorf("SWAPDB invalid db: expected error, got %q", resp)
-		}
-
-		// Try negative DB index
-		c.sendCommand("SWAPDB", "-1", "0")
-		resp = c.readReply()
-		if !strings.HasPrefix(resp, "-ERR") {
-			t.Errorf("SWAPDB negative db: expected error, got %q", resp)
-		}
+	c.sendCommand("SWAPDB", "a", "b")
+	if resp := c.readReply(); !strings.HasPrefix(resp, "-ERR") {
+		t.Errorf("SWAPDB non-numeric: expected error, got %q", resp)
 	}
-}
 
-func TestCorrectness_SwapDB_WrongArgs(t *testing.T) {
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Too few args
-		c.sendCommand("SWAPDB", "0")
-		resp := c.readReply()
-		if !strings.HasPrefix(resp, "-ERR") {
-			t.Errorf("SWAPDB one arg: expected error, got %q", resp)
-		}
-
-		// Too many args
-		c.sendCommand("SWAPDB", "0", "1", "2")
-		resp = c.readReply()
-		if !strings.HasPrefix(resp, "-ERR") {
-			t.Errorf("SWAPDB three args: expected error, got %q", resp)
-		}
-
-		// Non-numeric args
-		c.sendCommand("SWAPDB", "a", "b")
-		resp = c.readReply()
-		if !strings.HasPrefix(resp, "-ERR") {
-			t.Errorf("SWAPDB non-numeric: expected error, got %q", resp)
-		}
-	}
-}
-
-func TestCorrectness_SwapDB_MultipleSwaps(t *testing.T) {
-	t.Skip("SWAPDB is not supported with the effects engine")
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Set data in DB 0, 1, 2
-		c.selectDB(0)
-		c.set("k", "db0")
-		c.selectDB(1)
-		c.set("k", "db1")
-		c.selectDB(2)
-		c.set("k", "db2")
-
-		// Swap 0 and 1
-		c.swapDB(0, 1)
-
-		// Now: DB0=db1, DB1=db0, DB2=db2
-		c.selectDB(0)
-		if val := c.get("k"); val != "db1" {
-			t.Errorf("after first swap DB0: expected db1, got %q", val)
-		}
-		c.selectDB(1)
-		if val := c.get("k"); val != "db0" {
-			t.Errorf("after first swap DB1: expected db0, got %q", val)
-		}
-
-		// Swap 1 and 2
-		c.swapDB(1, 2)
-
-		// Now: DB0=db1, DB1=db2, DB2=db0
-		c.selectDB(0)
-		if val := c.get("k"); val != "db1" {
-			t.Errorf("after second swap DB0: expected db1, got %q", val)
-		}
-		c.selectDB(1)
-		if val := c.get("k"); val != "db2" {
-			t.Errorf("after second swap DB1: expected db2, got %q", val)
-		}
-		c.selectDB(2)
-		if val := c.get("k"); val != "db0" {
-			t.Errorf("after second swap DB2: expected db0, got %q", val)
-		}
-
-		// Swap back 0 and 2
-		c.swapDB(0, 2)
-
-		// Now: DB0=db0, DB1=db2, DB2=db1
-		c.selectDB(0)
-		if val := c.get("k"); val != "db0" {
-			t.Errorf("after third swap DB0: expected db0, got %q", val)
-		}
-	}
-}
-
-func TestCorrectness_SwapDB_WithDifferentTypes(t *testing.T) {
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Set string in DB 0
-		c.selectDB(0)
-		c.set("strkey", "stringvalue")
-
-		// Set list in DB 1
-		c.selectDB(1)
-		c.sendCommand("LPUSH", "listkey", "item1", "item2")
-		c.readReply()
-
-		// Set hash in DB 2
-		c.selectDB(2)
-		c.sendCommand("HSET", "hashkey", "field", "value")
-		c.readReply()
-
-		// Swap 0 and 1
-		c.swapDB(0, 1)
-
-		// Verify types are correct after swap
-		c.selectDB(0)
-		if typ := c.typeCmd("listkey"); typ != "list" {
-			t.Errorf("DB0 after swap: expected list type, got %q", typ)
-		}
-
-		c.selectDB(1)
-		if typ := c.typeCmd("strkey"); typ != "string" {
-			t.Errorf("DB1 after swap: expected string type, got %q", typ)
-		}
-
-		// Verify actual values
-		c.selectDB(0)
-		c.sendCommand("LRANGE", "listkey", "0", "-1")
-		listResp := c.readReply()
-		if !strings.Contains(listResp, "item1") || !strings.Contains(listResp, "item2") {
-			t.Errorf("DB0 list content mismatch: %q", listResp)
-		}
-
-		c.selectDB(1)
-		if val := c.get("strkey"); val != "stringvalue" {
-			t.Errorf("DB1 string value mismatch: %q", val)
-		}
-	}
-}
-
-func TestCorrectness_SwapDB_EmptyDB(t *testing.T) {
-	t.Skip("SWAPDB is not supported with the effects engine")
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c := newRedisClient(t, addr)
-		defer c.close()
-
-		// Set data only in DB 0
-		c.selectDB(0)
-		c.set("onlykey", "onlyvalue")
-
-		// DB 1 is empty
-		c.selectDB(1)
-		if size := c.dbsize(); size != 0 {
-			t.Errorf("DB1 should be empty, has %d keys", size)
-		}
-
-		// Swap
-		c.swapDB(0, 1)
-
-		// DB 0 should now be empty
-		c.selectDB(0)
-		if val := c.get("onlykey"); val != "(nil)" {
-			t.Errorf("DB0 after swap should be empty, got %q", val)
-		}
-
-		// DB 1 should have the data
-		c.selectDB(1)
-		if val := c.get("onlykey"); val != "onlyvalue" {
-			t.Errorf("DB1 after swap: expected onlyvalue, got %q", val)
-		}
-	}
-}
-
-func TestCorrectness_SwapDB_ConnectionPersistence(t *testing.T) {
-	t.Skip("SWAPDB is not supported with the effects engine")
-	{
-		addr, cleanup := startRedisTestServer(t)
-		defer cleanup()
-
-		c1 := newRedisClient(t, addr)
-		defer c1.close()
-		c2 := newRedisClient(t, addr)
-		defer c2.close()
-
-		// c1 selects DB 0, c2 selects DB 1
-		c1.selectDB(0)
-		c2.selectDB(1)
-
-		// Set data
-		c1.set("key", "from_db0")
-		c2.set("key", "from_db1")
-
-		// Swap from c1's perspective
-		c1.swapDB(0, 1)
-
-		// c1 is still on DB 0 (by index), but DB 0 now contains what was DB 1's data
-		if val := c1.get("key"); val != "from_db1" {
-			t.Errorf("c1 on DB0 after swap: expected from_db1, got %q", val)
-		}
-
-		// c2 is still on DB 1 (by index), which now contains what was DB 0's data
-		if val := c2.get("key"); val != "from_db0" {
-			t.Errorf("c2 on DB1 after swap: expected from_db0, got %q", val)
-		}
+	// Data is untouched by a rejected SWAPDB
+	c.set("mykey", "myvalue")
+	c.swapDB(0, 1)
+	if val := c.get("mykey"); val != "myvalue" {
+		t.Errorf("after rejected swap: expected myvalue, got %q", val)
 	}
 }
 

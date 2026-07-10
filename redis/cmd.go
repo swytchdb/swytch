@@ -53,7 +53,6 @@ func Main(args []string) {
 	bind := fs.String("bind", "127.0.0.1", "Bind address")
 	unixSocket := fs.String("unixsocket", "", "Unix socket path")
 	unixSocketPerm := fs.Int("unixsocketperm", 0700, "Unix socket permissions")
-	databases := fs.Int("databases", 16, "Number of databases")
 	maxMemoryStr := fs.String("maxmemory", "64mb", "Max memory (e.g., 256mb, 4gb)")
 	requirePass := fs.String("requirepass", "", "Require password for AUTH (deprecated, use --aclfile)")
 	aclFile := fs.String("aclfile", "", "Path to ACL file for user authentication")
@@ -103,7 +102,6 @@ Options:
   --bind=<addr>             Bind address (default: 127.0.0.1)
   --unixsocket=<path>       Unix socket path
   --unixsocketperm=<perm>   Unix socket permissions (default: 0700)
-  --databases=<num>         Number of databases (default: 16)
   --maxmemory=<size>        Max memory, e.g., 256mb, 4gb (default: 64mb)
   --requirepass=<pass>      Require password for AUTH (deprecated, use --aclfile)
   --aclfile=<path>          Path to ACL file for user authentication
@@ -221,18 +219,11 @@ Examples:
 	// Build address
 	address := fmt.Sprintf("%s:%d", *bind, *port)
 
-	// Calculate capacity per database
-	// Rough estimate: 256 bytes per item average
-	capacityPerDB := max(int(maxMemory/256/int64(*databases)), 1000)
-
 	// Create server config
 	config := ServerConfig{
 		Address:        address,
 		UnixSocket:     *unixSocket,
 		UnixSocketMode: os.FileMode(*unixSocketPerm),
-		NumDatabases:   *databases,
-		CapacityPerDB:  capacityPerDB,
-		MemoryLimit:    maxMemory,
 		Password:       *requirePass,
 		ACLFile:        *aclFile,
 		MaxConnections: *maxClients,
@@ -374,7 +365,6 @@ Examples:
 	if *unixSocket != "" {
 		fmt.Printf("  Unix Socket: %s\n", *unixSocket)
 	}
-	fmt.Printf("  Databases: %d\n", *databases)
 	fmt.Printf("  Max Memory: %s\n", formatBytes(uint64(maxMemory)))
 	fmt.Printf("  Threads: %d\n", runtime.GOMAXPROCS(0))
 	if *requirePass != "" {

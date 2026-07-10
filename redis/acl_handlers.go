@@ -451,7 +451,7 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command, conn *shared.Connection
 	// Create a discard buffer for the null writer
 	var discardBuf bytes.Buffer
 	nullWriter := shared.NewWriter(&discardBuf)
-	db := h.dbManager.GetDB(conn.SelectedDB)
+	db := h.dbManager.DB()
 
 	var keys []string
 

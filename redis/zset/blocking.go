@@ -98,13 +98,10 @@ func handleBlockingZPop(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 
 	// Main loop: try pop, if empty wait for wake signal
 	for {
-		// Get current database (may change after SWAPDB)
-		currentDB := db.Manager().GetDB(conn.SelectedDB)
-
 		// Try to pop from each key in order
 		for _, key := range keys {
 			keyStr := string(key)
-			entry, found, err := tryZPop(cmd, keyStr, currentDB, popMin, reg)
+			entry, found, err := tryZPop(cmd, keyStr, db, popMin, reg)
 			if err != nil {
 				w.WriteError(err.Error())
 				return
@@ -290,10 +287,6 @@ func handleBZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 
 	// Main loop: try pop, if empty wait for wake signal
 	for {
-		// Get current database (may change after SWAPDB)
-		currentDB := db.Manager().GetDB(conn.SelectedDB)
-		_ = currentDB
-
 		// Try to pop from each key in order
 		for _, key := range keyStrs {
 			entries, found, err := tryZMPop(cmd, key, popMin, count, reg)

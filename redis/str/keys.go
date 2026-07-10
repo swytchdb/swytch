@@ -670,7 +670,6 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	dstKey := string(cmd.Args[1])
 
 	// Parse optional arguments
-	destDB := db
 	replace := false
 
 	for i := 2; i < len(cmd.Args); i++ {
@@ -686,13 +685,9 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				w.WriteNotInteger()
 				return
 			}
-			if dbIndex < 0 || dbIndex >= int64(db.Manager().NumDatabases()) {
-				w.WriteError("ERR invalid DB index")
-				return
-			}
-			destDB = db.Manager().GetDB(int(dbIndex))
-			if destDB == nil {
-				w.WriteError("ERR invalid DB index")
+			// There is a single database; only DB 0 is valid.
+			if dbIndex != 0 {
+				w.WriteError("ERR DB index is out of range")
 				return
 			}
 			i++
@@ -767,88 +762,25 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 // handleMove implements the MOVE command
 // MOVE key db
-func handleMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+// There is a single database, so a move can never succeed: any index other
+// than 0 is out of range, and 0 is the database the key is already in.
+func handleMove(cmd *shared.Command, w *shared.Writer, _ *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("move")
 		return
 	}
 
-	key := string(cmd.Args[0])
 	dbIndex, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
 		return
 	}
-	if dbIndex < 0 || dbIndex >= int64(db.Manager().NumDatabases()) {
-		w.WriteError("ERR invalid DB index")
+	if dbIndex != 0 {
+		w.WriteError("ERR DB index is out of range")
 		return
 	}
 
-	destDB := db.Manager().GetDB(int(dbIndex))
-	if destDB == nil {
-		w.WriteError("ERR invalid DB index")
-		return
-	}
-
-	// Can't move to the same database
-	if destDB == db {
-		w.WriteError("ERR source and destination objects are the same")
-		return
-	}
-
-	keys = []string{key}
-	valid = true
-
-	runner = func() {
-		snap, tips, err := getAnySnapshotWithTips(cmd, key)
-		if err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if snap == nil {
-			w.WriteZero()
-			return
-		}
-
-		// Check if dest key exists in dest DB (keys are namespaced by DB internally)
-		destSnap, destTips, err := getAnySnapshotWithTips(cmd, key)
-		if err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if destSnap != nil {
-			w.WriteZero()
-			return
-		}
-
-		cmd.Context.BeginTx()
-		if err := cmd.Context.Emit(&pb.Effect{
-			Key:  []byte(key),
-			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-		}, tips); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if len(destTips) > 0 {
-			if err := cmd.Context.Emit(&pb.Effect{
-				Key:  []byte(key),
-				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-			}, destTips); err != nil {
-				w.WriteError(err.Error())
-				return
-			}
-		}
-
-		if err := emitDeleteKey(cmd, key); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if err := emitSnapshotAtKey(cmd, key, snap); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		w.WriteOne()
-	}
+	w.WriteError("ERR source and destination objects are the same")
 	return
 }
 
