@@ -2,6 +2,8 @@
 
 Redis-compatible distributed cache. No leaders, no quorums, no clock sync.
 
+> **Join us on [Discord](https://discord.gg/ZdKsCkBbne)** to discuss the hardest parts of computer science, physics, and — when those get too easy — the weather.
+
 ## The short version
 
 Swytch speaks the Redis wire protocol. Your existing client connects, your existing commands run. Strings, hashes, sets, sorted sets, streams, pub/sub, scripting, transactions, ACLs — 463 commands across all the data types you'd expect.
