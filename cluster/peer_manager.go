@@ -458,9 +458,11 @@ func (pm *PeerManager) SetCDNFetcher(f CDNFetcher) {
 // preferred one actually failed — never raced: racing turned every cold-key
 // hydration into a per-effect CDN GET storm from one address, which the
 // edge's per-IP protection blocks (accept-TLS-then-reset), stalling reads
-// cluster-wide. Each leg runs under its own 10s timeout; peer legs fail fast
-// (every conn answers not-found in ~1 RTT), so the fallback adds latency only
-// when the preferred source genuinely missed.
+// cluster-wide. The peer leg runs under a 10s timeout — every conn answers
+// not-found in ~1 RTT, so slow there means dead. The CDN leg gets the
+// generous cloud backstop instead: slow is not down for the cloud (a cold
+// origin legitimately takes seconds), and connection death is keepalive's
+// job to surface.
 func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint) ([]byte, error) {
 	token := pm.mu.RLock()
 	cdnFetcher := pm.cdnFetcher
@@ -477,7 +479,7 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint
 	}
 
 	fetchCDN := func() ([]byte, error) {
-		ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(pm.ctx, cloudBackstopTimeout)
 		defer cancel()
 		return cdnFetcher.FetchFromCDN(ctx, offset)
 	}

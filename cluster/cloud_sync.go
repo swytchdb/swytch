@@ -68,9 +68,16 @@ const (
 	// key melted down for real: a proxy request-per-connection budget was
 	// spent on reconcile churn, GOAWAYing everything else on the connection.
 	cloudReconcileBatch = 256
-	// cloudReconcileTipsTimeout bounds one reconcile GetTips round-trip. Per
-	// batch, so it's generous: the server walks a closure per key.
-	cloudReconcileTipsTimeout = 30 * time.Second
+	// cloudBackstopTimeout caps any single cloud round-trip: GetTips (read
+	// consult and reconcile batches) and CDN blob fetches. Liveness is
+	// keepalive's job — both cloud connections ping, so a dead or half-open
+	// path errors out of the RPC on its own. This exists only for the case
+	// keepalive cannot see: a wedged-but-alive stream (healthy connection,
+	// stuck handler). Deliberately generous, because a tight per-RPC deadline
+	// treats slow as down — a cold dataplane rebuilding its store legitimately
+	// answers in seconds, and failing at 5s manufactured errors for reads that
+	// were about to succeed.
+	cloudBackstopTimeout = 60 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
 	// cloudProgressInterval paces the outbox drain log line: pending/queued/
@@ -181,7 +188,7 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 		authKey:     authKey,
 		target:      CloudEndpoint,
 		folder:      CloudFolder(authKey),
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		httpClient:  &http.Client{Timeout: cloudBackstopTimeout},
 		pending:     make(map[effects.Tip]*pb.Effect),
 		pendingKeys: make(map[string]*pendingKeyEntry),
 		reconcile:   make(map[string]struct{}),
@@ -943,7 +950,7 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 		byName[string(name)] = key
 	}
 
-	ctx, cancel := context.WithTimeout(cs.ctx, cloudReconcileTipsTimeout)
+	ctx, cancel := context.WithTimeout(cs.ctx, cloudBackstopTimeout)
 	defer cancel()
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{AuthKey: cs.authKey, Keys: names})
 	if err != nil {

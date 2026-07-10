@@ -400,9 +400,16 @@ func NewEngine(cfg EngineConfig) *Engine {
 	e.memTarget = memTarget
 	e.startMemoryGovernor(memTarget)
 
+	// System keys ("__swytch:*": membership, flush, ...) are commutative
+	// protocol metadata and must never be quorum-gated — a node has to be able
+	// to register itself into a minority partition (you can't reach a majority
+	// until you've joined, and can't join if joining needs a majority). Pin it
+	// as the first rule so first-match-wins makes it an invariant no config can
+	// override; the anchored pattern won't match user keys like "_foo".
+	rules := append([]KeyRangeRule{{Pattern: "__swytch:*", Mode: UnsafeMode}}, cfg.KeyRangeRules...)
 	e.safety.Store(&safetyMap{
 		defaultMode: cfg.DefaultMode,
-		rules:       cfg.KeyRangeRules,
+		rules:       rules,
 	})
 
 	if cfg.Broadcaster != nil {
@@ -597,10 +604,15 @@ func (e *Engine) SetCloudReader(r CloudReader) {
 	e.cloudReader = r
 }
 
-// cloudTipsTimeout bounds a read-miss's Cloud GetTips round-trip so a slow or
-// unreachable Cloud fails the read promptly (ErrCloudUnavailable) instead of
-// hanging it. The blob fetches that follow carry their own CDN-race timeout.
-const cloudTipsTimeout = 5 * time.Second
+// cloudTipsBackstop caps a read-miss's Cloud GetTips round-trip. Liveness is
+// keepalive's job — the cloud client pings both directions, so a dead or
+// half-open connection errors out of the RPC on its own. This exists only for
+// the case keepalive cannot see: a wedged-but-alive stream (healthy
+// connection, stuck handler). It is deliberately generous because a tight
+// deadline here treats slow as down — a cold dataplane rebuilding its store
+// legitimately answers in seconds, and failing the read at 5s manufactured
+// ErrCloudUnavailable errors for reads that were about to succeed.
+const cloudTipsBackstop = 60 * time.Second
 
 // ErrCloudUnavailable marks a read that could not be answered because the
 // Cloud consult failed or returned a frontier we could not fully fetch. It
@@ -627,7 +639,7 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 	if e.cloudReader == nil {
 		return false, false, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsBackstop)
 	defer cancel()
 	tips, sidecar, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
