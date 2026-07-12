@@ -230,6 +230,10 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 			closeEngineOnError(engine),
 		)
 	}
+	// Key filters ride the peer connections: our filter is advertised at
+	// connection establishment, and a peer counts as "holds everything"
+	// until its filter arrives.
+	pm.SetKeyFilterProvider(engine)
 	if err := pm.Start(context.Background()); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("failed to start peer manager: %w", err),

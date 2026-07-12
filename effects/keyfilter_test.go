@@ -224,7 +224,8 @@ func TestReadOnlyMinorityUnsafeReadsThrough(t *testing.T) {
 }
 
 // TestOwnFilterPopulatedOnWrite: writing data adds the key to the own filter,
-// which then serializes with a bumped version for shipping on NACKs.
+// which then serializes with a bumped version for shipping to peers at
+// connection establishment.
 func TestOwnFilterPopulatedOnWrite(t *testing.T) {
 	e := newTestEngine(nil)
 
@@ -236,7 +237,7 @@ func TestOwnFilterPopulatedOnWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data, ver := e.ownFilterSnapshot()
+	data, ver := e.OwnKeyFilterSnapshot()
 	if len(data) == 0 || ver == 0 {
 		t.Fatalf("own filter should be populated after a write: bytes=%d ver=%d", len(data), ver)
 	}
@@ -250,8 +251,8 @@ func TestOwnFilterPopulatedOnWrite(t *testing.T) {
 }
 
 // TestPeerFilterBulkPropagation: a node decodes a peer's bulk filter (as
-// delivered on a NACK) and thereafter answers clusterMaybeHasKey for the
-// peer's keys — the join/bootstrap path.
+// delivered at connection establishment) and thereafter answers
+// clusterMaybeHasKey for the peer's keys — the join/bootstrap path.
 func TestPeerFilterBulkPropagation(t *testing.T) {
 	// Peer builds its own filter by writing keys.
 	peer := newTestEngine(nil)
@@ -264,11 +265,11 @@ func TestPeerFilterBulkPropagation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	data, ver := peer.ownFilterSnapshot()
+	data, ver := peer.OwnKeyFilterSnapshot()
 
-	// Local node receives that bulk filter (as on a membership NACK).
+	// Local node receives that bulk filter at connection establishment.
 	local := newTestEngine(nil)
-	local.cachePeerFilter(pb.NodeID(2), data, ver)
+	local.CachePeerFilter(pb.NodeID(2), data, ver)
 
 	for _, k := range []string{"alpha", "beta", "gamma"} {
 		if !local.clusterMaybeHasKey(k) {
@@ -280,7 +281,36 @@ func TestPeerFilterBulkPropagation(t *testing.T) {
 	}
 
 	// A stale (older-version) bulk must not be re-applied.
-	local.cachePeerFilter(pb.NodeID(2), data, ver-1)
+	local.CachePeerFilter(pb.NodeID(2), data, ver-1)
+}
+
+// TestUnfilteredPeerPresumedToHoldEverything: a connected peer whose bulk
+// filter hasn't arrived forces clusterMaybeHasKey true for any key — absence
+// of knowledge must read as "must ask", never as an authoritative miss. The
+// filter's arrival (even an empty one) releases the default.
+func TestUnfilteredPeerPresumedToHoldEverything(t *testing.T) {
+	local := newTestEngine(nil)
+	local.NotePeerConnected(pb.NodeID(2))
+
+	if !local.clusterMaybeHasKey("anything-at-all") {
+		t.Fatal("a connected peer without a filter must be presumed to hold every key")
+	}
+
+	// An empty filter is a legitimate "I hold nothing" statement.
+	fresh := newTestEngine(nil)
+	data, ver := fresh.OwnKeyFilterSnapshot()
+	local.CachePeerFilter(pb.NodeID(2), data, ver)
+
+	if local.clusterMaybeHasKey("anything-at-all") {
+		t.Fatal("an empty bulk filter must release the presumed-everything default")
+	}
+
+	// Disconnect forgets the filter; a reconnect re-enters as presumed-everything.
+	local.removePeerKeyFilter(pb.NodeID(2))
+	local.NotePeerConnected(pb.NodeID(2))
+	if !local.clusterMaybeHasKey("anything-at-all") {
+		t.Fatal("a reconnected peer must re-enter as presumed-everything")
+	}
 }
 
 // TestPeerFilterBulkReplacePreservesRealtime: a newer bulk replaces the old
@@ -295,16 +325,16 @@ func TestPeerFilterBulkReplacePreservesRealtime(t *testing.T) {
 	if err := pctx.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	data, ver := peer.ownFilterSnapshot()
+	data, ver := peer.OwnKeyFilterSnapshot()
 
 	local := newTestEngine(nil)
-	local.cachePeerFilter(pb.NodeID(2), data, ver)
+	local.CachePeerFilter(pb.NodeID(2), data, ver)
 	// A real-time announcement arrives for a key not yet in any bulk.
 	local.peerFilterAdd(pb.NodeID(2), "realtime-key")
 
 	// A newer bulk arrives (still only contains bulk-key). It must replace the
 	// old bulk without dropping the real-time key.
-	local.cachePeerFilter(pb.NodeID(2), data, ver+10)
+	local.CachePeerFilter(pb.NodeID(2), data, ver+10)
 
 	if !local.clusterMaybeHasKey("bulk-key") {
 		t.Fatal("bulk key lost after bulk replace")
@@ -314,10 +344,9 @@ func TestPeerFilterBulkReplacePreservesRealtime(t *testing.T) {
 	}
 }
 
-// TestEnrichedNackCarriesFilter: the NACK for a system key (e.g. membership)
-// advertises this node's own key filter so subscribers can bulk-cache it.
-// NACKs for ordinary keys do not, to bound bandwidth.
-func TestEnrichedNackCarriesFilter(t *testing.T) {
+// TestEnrichedNackCarriesNoFilter: bulk filters ride connection
+// establishment, not NACKs — no key inspects the NACK path.
+func TestEnrichedNackCarriesNoFilter(t *testing.T) {
 	e := newTestEngine(&mockBroadcaster{})
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("advertised")); err != nil {
@@ -327,22 +356,10 @@ func TestEnrichedNackCarriesFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Ordinary-key NACK: no filter (bandwidth).
-	if plain := e.buildEnrichedNack("advertised", nil, nil); len(plain.NodeKeyFilter) != 0 {
-		t.Fatal("ordinary-key NACK must not carry the filter")
+	if nack := e.buildEnrichedNack("advertised", nil, nil); len(nack.NodeKeyFilter) != 0 {
+		t.Fatal("NACKs must not carry the bulk filter")
 	}
-
-	// System-key NACK: carries the bulk filter.
-	nack := e.buildEnrichedNack("__swytch:members", nil, nil)
-	if len(nack.NodeKeyFilter) == 0 || nack.FilterVersion == 0 {
-		t.Fatalf("system-key NACK should carry the own filter: bytes=%d ver=%d",
-			len(nack.NodeKeyFilter), nack.FilterVersion)
-	}
-	var chain CuckooChain
-	if err := chain.UnmarshalBinary(nack.NodeKeyFilter); err != nil {
-		t.Fatalf("NACK filter did not decode: %v", err)
-	}
-	if !chain.MaybeContains("advertised") {
-		t.Fatal("NACK filter should contain the advertised key")
+	if nack := e.buildEnrichedNack("__swytch:members", nil, nil); len(nack.NodeKeyFilter) != 0 {
+		t.Fatal("membership NACKs must not carry the bulk filter either")
 	}
 }

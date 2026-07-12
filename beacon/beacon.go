@@ -198,33 +198,13 @@ func (b *Beacon) primeSubscription() {
 	ctx.Flush()
 }
 
-// registerSelf publishes this node's membership entry. Two processes
-// cannot bind the same host:port, so any pre-existing entry at our
-// advertise address belongs to a dead predecessor — sweep it from the
-// roster in the same flush so peers see the takeover atomically.
+// registerSelf publishes this node's membership entry. Dead predecessors at
+// our address are not handled here: refreshTopology's collision sweep
+// evaluates that predicate on every membership change, so it fires whenever
+// the stale entry becomes visible — a one-shot sweep at registration would
+// silently miss an entry that hasn't bootstrapped in yet.
 func (b *Beacon) registerSelf() error {
 	ctx := b.engine.NewContext()
-
-	snapshot, _, err := ctx.GetSnapshot(MembershipKey)
-	if err != nil {
-		// Snapshot read failure (no symmetric peers, partition, etc.) —
-		// proceed with just our own insert. If a stale entry shares our
-		// address, a later sync will surface it and we'll re-register
-		// then.
-		slog.Debug("beacon: registerSelf snapshot read failed, skipping collision sweep", "error", err)
-	} else {
-		selfID := uint64(b.cfg.NodeID)
-		for _, m := range parseMembership(snapshot) {
-			if m.Addr == b.cfg.AdvertiseAddr && m.NodeID != selfID {
-				slog.Info("beacon: evicting stale predecessor at our address",
-					"old_node_id", m.NodeID, "addr", m.Addr)
-				if err := ctx.Emit(buildMemberRemove(m.NodeID)); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
 	if err := ctx.Emit(buildMemberInsert(uint64(b.cfg.NodeID), b.cfg.AdvertiseAddr)); err != nil {
 		return err
 	}
@@ -279,17 +259,42 @@ func (b *Beacon) NotifyMembershipChanged() {
 }
 
 // refreshTopology reads the current membership and projects it onto the
-// PeerManager. Read-only with respect to membership — it never emits a member
-// effect (a GetSnapshot may still compact the chain, which is normal for any
-// key).
+// PeerManager. Its only membership write is the collision sweep: an entry at
+// our advertise address under another node id. Two processes cannot bind the
+// same host:port, so that entry is a dead predecessor (e.g. our own previous
+// incarnation before a restart minted a fresh ephemeral id) — waiting on it
+// would hold every write open forever, and dialing it loops back to
+// ourselves. Emit its REMOVE_OP here rather than one-shot at registration:
+// this runs on every membership change, so the sweep fires whenever the
+// stale entry becomes visible (bootstrap, NACK backfill, anti-entropy,
+// partition heal) with no ordering assumptions. Idempotent — once the REMOVE
+// commits the entry leaves the projection and the predicate goes false. Only
+// the live owner of the address ever evaluates it true, so this cannot
+// ping-pong the way compensating re-inserts did.
 func (b *Beacon) refreshTopology() {
 	ctx := b.engine.NewContext()
 	snapshot, _, err := ctx.GetSnapshot(MembershipKey)
-	ctx.Flush()
 	if err != nil {
+		ctx.Flush()
 		slog.Debug("beacon: membership snapshot read failed", "error", err)
 		return
 	}
+
+	selfID := uint64(b.cfg.NodeID)
+	for _, m := range parseMembership(snapshot) {
+		if m.Addr == b.cfg.AdvertiseAddr && m.NodeID != selfID {
+			slog.Info("beacon: evicting dead predecessor at our address",
+				"old_node_id", m.NodeID, "addr", m.Addr)
+			if err := ctx.Emit(buildMemberRemove(m.NodeID)); err != nil {
+				slog.Error("beacon: predecessor eviction emit failed",
+					"old_node_id", m.NodeID, "error", err)
+			}
+		}
+	}
+	if err := ctx.Flush(); err != nil {
+		slog.Error("beacon: topology refresh flush failed", "error", err)
+	}
+
 	b.syncMembership(snapshot)
 }
 

@@ -37,6 +37,7 @@ const (
 	PacketTypeNotifyACK byte = 0x04
 	PacketTypeNack      byte = 0x05
 	PacketTypeClockTick byte = 0x06
+	PacketTypeKeyFilter byte = 0x07
 )
 
 // Clock tick protocol constants.
@@ -191,7 +192,16 @@ func (hm *HeartbeatManager) Stop() {
 
 // ProcessInboundTick handles a received clock tick (already decrypted by
 // Noise and validated against the sender's connection identity).
+//
+// Ticks from our own NodeID are dropped — the mirror of registerInboundConn's
+// self-check. A loopback connection (e.g. dialing a dead predecessor's
+// membership entry at our own address) must never let a node mark itself an
+// alive replication target: writes would then wait on an ACK from self that
+// the replicator can never deliver.
 func (hm *HeartbeatManager) ProcessInboundTick(peerID NodeId, tick *ClockTick) {
+	if peerID == hm.nodeID {
+		return
+	}
 	now := time.Now()
 	ph := hm.healthTable.GetOrCreate(peerID)
 	RecordClockTickReceived(peerID)

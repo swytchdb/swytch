@@ -687,12 +687,10 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	// Never skip the announce; only skip the wait. The local install above is
 	// synchronous (so a subsequent Emit dep-references our SubscriptionEffect),
 	// but the network send is off the critical path: fire it in the background
-	// so the calling SET/GET returns immediately. QUIC delivers reliably on a
-	// live connection, and peer-recovery re-announce heals downed peers.
-	// System keys are exempt: they're excluded from the cluster key filters
-	// (so clusterMaybeHasKey is always false for them) and are how a node
-	// bootstraps cluster state — they must always do the blocking bootstrap.
-	if allowAsync && !isSystemKey([]byte(key)) &&
+	// so the calling SET/GET returns immediately. A connected peer whose bulk
+	// filter hasn't arrived yet forces clusterMaybeHasKey true, so a fresh
+	// node always takes the blocking bootstrap below.
+	if allowAsync &&
 		(e.inMajorityPartition() || unsafe) && !e.clusterMaybeHasKey(key) {
 		go e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		succeeded = true
@@ -742,7 +740,6 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 				// returns them as the ReplicateTo response.
 				mu.Lock()
 				for _, nack := range nacks {
-					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}
@@ -813,7 +810,6 @@ done:
 				}
 				mu.Lock()
 				for _, nack := range nacks {
-					e.cachePeerFilter(pid, nack.NodeKeyFilter, nack.FilterVersion)
 					for _, tp := range nack.Tips {
 						allTipOffsets = append(allTipOffsets, r(tp))
 					}

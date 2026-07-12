@@ -42,6 +42,24 @@ type CDNFetcher interface {
 	FetchFromCDN(ctx context.Context, offset *pb.EffectRef) ([]byte, error)
 }
 
+// KeyFilterProvider is the engine-side surface for cluster key filters: the
+// local filter advertised to peers at connection establishment, and the cache
+// of peers' filters. A peer with no cached filter is presumed to hold every
+// key, so delivery here is what activates free read-misses — never what
+// gates correctness.
+type KeyFilterProvider interface {
+	// NotePeerConnected marks a peer as connected-but-unfiltered until its
+	// bulk filter arrives.
+	NotePeerConnected(peer pb.NodeID)
+	// CachePeerFilter applies a peer's bulk filter (replace-if-newer).
+	CachePeerFilter(peer pb.NodeID, data []byte, version uint64)
+	// OwnKeyFilterSnapshot returns the serialized local filter and its version.
+	OwnKeyFilterSnapshot() ([]byte, uint64)
+	// DropPeer forgets a departed peer's filter; on reconnect the peer
+	// re-enters as presumed-everything.
+	DropPeer(peer pb.NodeID)
+}
+
 // PeerManager manages all peer connections and the local QUIC listener.
 type PeerManager struct {
 	config *ClusterConfig
@@ -72,6 +90,11 @@ type PeerManager struct {
 
 	onPeerAdded   func(NodeId)
 	onPeerRemoved func(NodeId)
+
+	// keyFilter, when set, receives peer filter lifecycle events and provides
+	// the local filter to advertise. Written once during wiring (before
+	// Start); nil in tests that don't exercise filters.
+	keyFilter KeyFilterProvider
 
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
@@ -201,6 +224,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				if pm.heartbeat != nil {
 					pm.heartbeat.SendTickTo(peerID)
 				}
+				pm.sendKeyFilterTo(peerID)
 			},
 		)
 
@@ -232,6 +256,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendTickTo(peerID)
 			}
+			pm.sendKeyFilterTo(peerID)
 		})
 		pm.peers[peer.ID] = pc
 		pc.Start(pm.ctx)
@@ -278,6 +303,9 @@ func (pm *PeerManager) registerPeer(peer NodeConfig) {
 	if pm.replicator != nil {
 		pm.replicator.AddPeer(peer.ID, peer.Region)
 	}
+	if pm.keyFilter != nil {
+		pm.keyFilter.NotePeerConnected(peer.ID)
+	}
 	if pm.onPeerAdded != nil {
 		pm.onPeerAdded(peer.ID)
 	}
@@ -291,8 +319,34 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 	if pm.replicator != nil {
 		pm.replicator.RemovePeer(peerID)
 	}
+	if pm.keyFilter != nil {
+		pm.keyFilter.DropPeer(peerID)
+	}
 	if pm.onPeerRemoved != nil {
 		pm.onPeerRemoved(peerID)
+	}
+}
+
+// SetKeyFilterProvider wires the engine's key filter surface. Must be called
+// before Start.
+func (pm *PeerManager) SetKeyFilterProvider(p KeyFilterProvider) {
+	pm.keyFilter = p
+}
+
+// sendKeyFilterTo ships our own key filter to a peer whose connection just
+// came up. Fire-and-forget: on loss the peer keeps treating us as holding
+// everything, which is safe (needless subscribes, never wrong misses).
+func (pm *PeerManager) sendKeyFilterTo(peerID NodeId) {
+	if pm.keyFilter == nil || pm.quicTransport == nil {
+		return
+	}
+	b, ver := pm.keyFilter.OwnKeyFilterSnapshot()
+	if b == nil && ver == 0 {
+		// Marshal failure — the peer keeps the presumed-everything default.
+		return
+	}
+	if err := pm.quicTransport.SendDirect(peerID, MarshalKeyFilterPacket(ver, b)); err != nil {
+		slog.Debug("failed to send key filter", "peer", peerID, "error", err)
 	}
 }
 
@@ -635,6 +689,7 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendTickTo(peerID)
 			}
+			pm.sendKeyFilterTo(peerID)
 		})
 	}
 
@@ -764,6 +819,13 @@ func (pm *PeerManager) HandleNackNotify(peerID NodeId, nack *pb.NackNotify) {
 		if err := pm.handler.HandleNack(nack); err != nil {
 			slog.Debug("failed to handle NACK", "peer", peerID, "error", err)
 		}
+	}
+}
+
+// HandleKeyFilter routes an inbound bulk key filter to the engine's cache.
+func (pm *PeerManager) HandleKeyFilter(peerID NodeId, version uint64, filter []byte) {
+	if pm.keyFilter != nil {
+		pm.keyFilter.CachePeerFilter(peerID, filter, version)
 	}
 }
 

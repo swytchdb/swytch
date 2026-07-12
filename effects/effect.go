@@ -44,9 +44,13 @@ import (
 )
 
 // systemKeyPrefix is the reserved namespace for cluster-operational
-// keys (membership, pubsub routing, etc.). Effects on these keys are
-// pinned in the effect cache and bypass the inbound authority gate
-// because they're load-bearing for protocol operation, not user data.
+// keys (membership, pubsub routing, etc.). The ONLY thing this prefix
+// governs is cache pinning (see vertexpool.go): system-key vertices are
+// never reclaim or eviction victims, because losing the membership chain
+// under memory pressure would sever the node from the cluster. Everywhere
+// else — filters, authority gates, bootstrap, flush — system keys are
+// ordinary keys; per-key prefix scans on hot paths are how isSystemKey
+// once ate half a CPU.
 var systemKeyPrefix = []byte("__swytch:")
 
 func isSystemKey(key []byte) bool {
@@ -62,9 +66,6 @@ func isSystemKey(key []byte) bool {
 // keeps the invariant "an owned, creation-ref'd vertex is reachable from a tip we
 // serve", so reclaim never strands an un-served fetch as a permanent leak.
 func (e *Engine) isServed(key []byte) bool {
-	if isSystemKey(key) {
-		return true
-	}
 	_, sub := e.subscriptions.Load(string(key))
 	return sub
 }
@@ -129,17 +130,21 @@ type Engine struct {
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
 
 	// Per-node cluster key filters powering free read-misses. ownKeyFilter
-	// holds the keys this node has data for; it's shipped on NACKs so peers
-	// can answer a read-miss without subscribing. peerKeyFilters caches each
-	// peer's keys — bulk from NACKs, real-time from inbound
-	// SubscriptionEffects (see cuckoo.go and keyfilter.go). Guarded by
-	// keyFilterMu (plain map + mutex, never sync.Map).
+	// holds the keys this node has data for; the cluster layer ships it to
+	// each peer at connection establishment so peers can answer a read-miss
+	// without subscribing. peerKeyFilters caches each peer's keys — bulk from
+	// the connection handshake, real-time from inbound SubscriptionEffects
+	// (see cuckoo.go and keyfilter.go). unfilteredPeers counts connected
+	// peers whose bulk filter hasn't arrived: until it does, the peer is
+	// presumed to hold every key. Guarded by keyFilterMu (plain map + mutex,
+	// never sync.Map).
 	keyFilterMu       sync.RWMutex
 	ownKeyFilter      CuckooChain
 	ownFilterVer      uint64
 	ownFilterBytes    []byte // cached marshal of ownKeyFilter at ownFilterBytesVer
 	ownFilterBytesVer uint64
 	peerKeyFilters    map[pb.NodeID]*peerKeyFilter
+	unfilteredPeers   int
 
 	// Deserialized effect store — effects are immutable once written.
 	// Replaces the per-offset CloxCache; eviction is driven by the engine
@@ -314,9 +319,8 @@ func (e *Engine) nextOffset() Tip {
 }
 
 // FlushKey is the special key used to signal a full index wipe (FLUSHDB/FLUSHALL).
-// Lives under the __swytch: namespace so isSystemKey recognizes it as
-// cluster-operational and the authority gate bypasses it on inbound,
-// and so it can't collide with a user-chosen key.
+// Lives under the __swytch: namespace so it's pinned in the cache and can't
+// collide with a user-chosen key.
 const FlushKey = "__swytch:flush"
 
 // FlushIndex deletes all keys from the index and evicts all cache entries.
@@ -1034,8 +1038,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// track — which are exactly the keys a read-only handler needs the filter
 	// to know about (a peer's brand-new key). Recording the originator's
 	// effect on K here is a safe over-approximation: worst case a needless
-	// subscribe, never a wrong free-miss. peerFilterAdd skips self and system
-	// keys.
+	// subscribe, never a wrong free-miss. peerFilterAdd skips self.
 	if origin := pb.NodeID(eff.NodeId); origin != e.nodeID {
 		if bind := eff.GetTxnBind(); bind != nil {
 			for _, kb := range bind.Keys {
@@ -1050,19 +1053,19 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	// Authority gate: accept the effect only if we already track the
 	// key locally — either subscribed to it, or the index already has
-	// tips (a previous local write installed them). System keys are
-	// exempt because cluster bootstrap depends on them arriving before
-	// any subscription exists.
+	// tips (a previous local write installed them).
 	//
 	// SubscriptionEffects are exempt and respond with an empty ACK so
 	// ensureSubscribed isn't deadlocked when nobody yet has authority
-	// for a brand-new key.
+	// for a brand-new key. Flush-all is likewise exempt: it's a cluster
+	// control message — nobody subscribes to FlushKey, and a flush must
+	// reach every node regardless (the handler below wipes the index).
 	//
 	// TxnBinds touch multiple keys; collectSubscribers replicates them
 	// to peers subscribed to any touched key, so the gate must accept
 	// the bind when authority holds for any key in bind.Keys (not just
 	// eff.Key, the canonical first key).
-	if !isSystemKey(eff.Key) {
+	{
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		authoritative := subscribed || e.index.Contains(key) != nil
@@ -1077,6 +1080,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 					}
 				}
 			}
+		}
+		if !authoritative && key == FlushKey {
+			authoritative = true
 		}
 
 		if !authoritative {
@@ -1139,8 +1145,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	initialTips := e.index.Contains(key)
 
-	_, subscribedCanonical := e.subscriptions.Load(key)
-	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+	_, canonicalIndexable := e.subscriptions.Load(key)
 
 	// Consume deps: any dep that is a current tip becomes an ancestor.
 	deps := eff.Deps
@@ -1362,7 +1367,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		}
 	}
 
-	if !isSystemKey(eff.Key) {
+	{
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		authoritative := subscribed || e.index.Contains(key) != nil
@@ -1405,8 +1410,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 	}
 
 	key := string(eff.Key)
-	_, subscribedCanonical := e.subscriptions.Load(key)
-	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+	_, canonicalIndexable := e.subscriptions.Load(key)
 
 	deps := eff.Deps
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -1827,20 +1831,6 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 	}
 
 	nack.CausalChain = e.collectCausalChain(key, tips)
-
-	// Advertise our held keys so the subscriber can answer future read-misses
-	// without subscribing. Attaching the (potentially large) filter to every
-	// NACK is too much bandwidth, so the bulk transfer rides only on
-	// system-key NACKs — every node subscribes to the membership key on join,
-	// so that one rendezvous distributes the full set. Ongoing freshness is
-	// the real-time peerFilterAdd push on each SubscriptionEffect. The
-	// subscriber applies the bulk replace-if-newer.
-	if isSystemKey([]byte(key)) {
-		if b, ver := e.ownFilterSnapshot(); b != nil {
-			nack.NodeKeyFilter = b
-			nack.FilterVersion = ver
-		}
-	}
 
 	return nack
 }

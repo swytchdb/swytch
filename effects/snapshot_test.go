@@ -1315,13 +1315,10 @@ func TestHandleRemote_SubscriptionEffect_NoAuthority_EmptyAck(t *testing.T) {
 
 // TestHandleRemote_FlushKey_BypassesAuthorityGate asserts that an
 // inbound flush-all effect propagates even though the receiver has no
-// prior subscription or index entry for FlushKey. Pre-fix FlushKey was
-// "\x00" which did not match the __swytch: system-key prefix, so the
-// authority gate dropped inbound flushes with ErrAuthorityDropped and
-// cluster-wide FLUSHDB/FLUSHALL stopped at any peer that hadn't
-// independently observed a prior flush. Moving FlushKey into the
-// __swytch: namespace bypasses the gate via isSystemKey and lets the
-// flush handler downstream wipe the local index.
+// prior subscription or index entry for FlushKey. Flush-all is a cluster
+// control message: nobody subscribes to FlushKey, so without the gate's
+// explicit exemption a cluster-wide FLUSHDB/FLUSHALL would stop at any
+// peer that hadn't independently observed a prior flush.
 func TestHandleRemote_FlushKey_BypassesAuthorityGate(t *testing.T) {
 	log := newSnapshotLog()
 	bc := &mockBroadcaster{}
