@@ -1644,6 +1644,13 @@ func (c *Critbit[T]) reap() int {
 	return reaped
 }
 
+// Closed reports whether Close has been called. Mutations on a closed trie
+// fail unconditionally, so CAS retry loops must check this to avoid spinning
+// forever during shutdown.
+func (c *Critbit[T]) Closed() bool {
+	return c.closed.Load()
+}
+
 func (c *Critbit[T]) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil

@@ -1655,6 +1655,11 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 			// refcount call here.
 			return
 		}
+		if e.index.Closed() {
+			// Not a CAS race: Insert fails unconditionally on a closed trie,
+			// so retrying would spin forever during shutdown.
+			return
+		}
 	}
 }
 
@@ -1675,6 +1680,11 @@ func (e *Engine) installTips(key string, tips []Tip) {
 		offsets = append(offsets, tips...)
 		newTips := keytrie.NewTipSet(offsets...)
 		if _, ok := e.index.Insert(key, current, newTips); ok {
+			return
+		}
+		if e.index.Closed() {
+			// Not a CAS race: Insert fails unconditionally on a closed trie,
+			// so retrying would spin forever during shutdown.
 			return
 		}
 	}
