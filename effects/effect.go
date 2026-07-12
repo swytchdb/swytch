@@ -210,6 +210,7 @@ type Engine struct {
 	// effects and never wire-only probes (discovery subscriptions, ephemeral
 	// pub/sub, PUBLISH payloads — those bypass the mint path entirely). Called
 	// synchronously on the emit path; implementations must not block.
+	localEffectMu sync.RWMutex
 	OnLocalEffect func(offset Tip, eff *pb.Effect)
 
 	// Ephemeral pub/sub callbacks — fired from HandleRemote on
@@ -694,9 +695,20 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 
 // fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.
 func (e *Engine) fireLocalEffect(offset Tip, eff *pb.Effect) {
+	e.localEffectMu.RLock()
+	defer e.localEffectMu.RUnlock()
 	if e.OnLocalEffect != nil {
 		e.OnLocalEffect(offset, eff)
 	}
+}
+
+// SetOnLocalEffect replaces the local-mint hook. It waits for callbacks already
+// in flight, which gives lifecycle owners a clean boundary before draining or
+// tearing down the hook's resources.
+func (e *Engine) SetOnLocalEffect(hook func(offset Tip, eff *pb.Effect)) {
+	e.localEffectMu.Lock()
+	e.OnLocalEffect = hook
+	e.localEffectMu.Unlock()
 }
 
 // UpdateSafetyRules atomically replaces the key-range safety configuration.

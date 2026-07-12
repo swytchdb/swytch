@@ -342,10 +342,10 @@ Examples:
 				slog.Error("Error stopping metrics server", "error", err)
 			}
 		}
-		StopCluster()
 		if err := server.Stop(); err != nil {
 			slog.Error("Error during shutdown", "error", err)
 		}
+		StopCluster()
 	}()
 
 	// Start pprof server if enabled

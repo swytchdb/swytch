@@ -22,11 +22,81 @@ package cluster
 import (
 	"context"
 	"testing"
+	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	dp "github.com/swytchdb/swytch/cluster/proto/dataplane"
 	"github.com/swytchdb/swytch/effects"
 )
+
+// TestStopWaitsForInflightEnqueue pins the shutdown boundary: Stop must not
+// observe an empty outbox and cancel the sender while a synchronous local-mint
+// callback is already in flight but has not enqueued its effect yet.
+func TestStopWaitsForInflightEnqueue(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs := &CloudSync{
+		engine:      engine,
+		keyNameKey:  DeriveKeyNameKey("shutdown-test-secret"),
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]*pendingKeyEntry),
+		wake:        make(chan struct{}, 1),
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	enqueued := make(chan effects.Tip, 1)
+	engine.SetOnLocalEffect(func(tip effects.Tip, eff *pb.Effect) {
+		close(entered)
+		<-release
+		cs.handleLocalEffect(tip, eff)
+		enqueued <- tip
+	})
+
+	emitDone := make(chan error, 1)
+	go func() {
+		ctx := engine.NewContext()
+		if err := ctx.Emit(&pb.Effect{
+			Key: []byte("shutdown-key"),
+			Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+				Op:    pb.EffectOp_INSERT_OP,
+				Value: &pb.DataEffect_Raw{Raw: []byte("value")},
+			}},
+		}); err != nil {
+			emitDone <- err
+			return
+		}
+		emitDone <- ctx.Flush()
+	}()
+	<-entered
+
+	stopped := make(chan struct{})
+	go func() {
+		cs.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a local-effect callback was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	tip := <-enqueued
+	cs.retire(tip) // stand in for the cloud ack so the drain can complete
+	if err := <-emitDone; err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not finish after the in-flight enqueue drained")
+	}
+}
 
 // filterFrame builds the bloom wire bytes a KeyFilter frame carries over the
 // given PRF names.

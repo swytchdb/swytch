@@ -166,7 +166,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	// Embedder seams go in before anything can emit or arrive, so their
 	// installation can never race a live goroutine.
 	if cfg.OnLocalEffect != nil {
-		engine.OnLocalEffect = cfg.OnLocalEffect
+		engine.SetOnLocalEffect(cfg.OnLocalEffect)
 	}
 	if cfg.OnKeyDataAdded != nil {
 		engine.OnKeyDataAdded = cfg.OnKeyDataAdded
@@ -190,7 +190,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if cfg.ClusterPort == 0 {
 		return nil, errors.Join(
 			fmt.Errorf("cluster mode requires a non-zero ClusterPort"),
-			closeEngineOnError(engine),
+			closeRuntimeOnError(rt),
 		)
 	}
 
@@ -227,9 +227,10 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("failed to create peer manager: %w", err),
-			closeEngineOnError(engine),
+			closeRuntimeOnError(rt),
 		)
 	}
+	rt.PeerManager = pm
 	// Key filters ride the peer connections: our filter is advertised at
 	// connection establishment, and a peer counts as "holds everything"
 	// until its filter arrives.
@@ -237,10 +238,9 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if err := pm.Start(context.Background()); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("failed to start peer manager: %w", err),
-			closeEngineOnError(engine),
+			closeRuntimeOnError(rt),
 		)
 	}
-	rt.PeerManager = pm
 
 	// Engine replicates outbound via the PeerManager.
 	engine.SetBroadcaster(pm)

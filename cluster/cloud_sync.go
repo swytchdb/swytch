@@ -229,7 +229,7 @@ func NewCloudSync(engine *effects.Engine, connectionSecret string) (*CloudSync, 
 // Start installs the engine's OnLocalEffect hook and launches the upload loop.
 func (cs *CloudSync) Start() error {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
-	cs.engine.OnLocalEffect = cs.handleLocalEffect
+	cs.engine.SetOnLocalEffect(cs.handleLocalEffect)
 	cs.wg.Add(3)
 	go cs.run()
 	go cs.reconcileLoop()
@@ -264,6 +264,10 @@ func (cs *CloudSync) progressLoop() {
 // from, so an abandoned tail is lost — run 2841213 abandoned 217 effects this
 // way and every key in them missed forever).
 func (cs *CloudSync) Stop() {
+	// Detach first, waiting for any callback already inside handleLocalEffect.
+	// Once this returns, pending is a closed producer set and an empty outbox
+	// cannot race with a late enqueue while the sender is being cancelled.
+	cs.engine.SetOnLocalEffect(nil)
 	cs.waitDrained(cloudDrainTimeout)
 	if cs.cancel != nil {
 		cs.cancel()
