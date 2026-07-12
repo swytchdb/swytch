@@ -289,10 +289,10 @@ jobs:
 
       - name: Add cluster API host entry
         env:
-          # The kubeconfig points the API server at internal.bottled.codes,
+          # The kubeconfig points the API server at cameo.bottled.codes,
           # which has no public DNS record. Pin it to the cluster IP so
           # kubectl on the runner can reach the control plane.
-          CLUSTER_HOST: internal.bottled.codes
+          CLUSTER_HOST: cameo.bottled.codes
           CLUSTER_IP: 65.108.75.198
         run: |
           echo "$CLUSTER_IP $CLUSTER_HOST" | sudo tee -a /etc/hosts
