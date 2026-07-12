@@ -256,18 +256,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	victims := make([]evicted, 0, len(cands))
 	for _, cd := range cands {
 		leaf := cd.leaf
-		// Claim: deleted=false means a live, linked leaf, so a successful CAS
-		// false→true is an atomic claim. A lost CAS means a concurrent delete won.
-		if !leaf.deleted.CompareAndSwap(false, true) {
-			continue
-		}
-		// Pin/claim race, resolved Dekker-style: Pin increments then re-reads
-		// deleted (undoing if set); the sweep claims then re-reads pins. With
-		// seq-cst atomics exactly one side observes the other, so a pin can
-		// never be stranded on an evicted leaf and a pinned leaf can never be
-		// evicted — whichever write lands second detects the first.
-		if leaf.pins.Load() != 0 {
-			leaf.deleted.Store(false)
+		if !c.claimForEviction(leaf) {
 			continue
 		}
 		tips := leaf.tips.Load()
@@ -306,7 +295,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			// previously-cold key) so the adaptive-k clock keeps advancing — without
 			// this, k freezes exactly when ghost reclaims dominate (cold-scarce).
 			c.evictedUnprot.Add(1)
-		} else if fbVictim != nil && fbVictim.deleted.CompareAndSwap(false, true) {
+		} else if fbVictim != nil && c.claimForEviction(fbVictim) {
 			tips := fbVictim.tips.Load()
 			data := fbVictim.data.Load()
 			fbVictim.tips.Store(nil)
@@ -342,6 +331,25 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		return 1
 	}
 	return len(victims)
+}
+
+// claimForEviction atomically claims a live leaf as an eviction victim and
+// revalidates its dynamic pins. Claim: deleted=false means a live, linked
+// leaf, so a successful CAS false→true is an atomic claim (a lost CAS means a
+// concurrent delete won). The pin/claim race is resolved Dekker-style: Pin
+// increments then re-reads deleted (undoing if set); the claimer claims then
+// re-reads pins. With seq-cst atomics exactly one side observes the other, so
+// a pin can never be stranded on an evicted leaf and a pinned leaf can never
+// be evicted — whichever write lands second detects the first.
+func (c *Critbit[T]) claimForEviction(leaf *critNode[T]) bool {
+	if !leaf.deleted.CompareAndSwap(false, true) {
+		return false
+	}
+	if leaf.pins.Load() != 0 {
+		leaf.deleted.Store(false)
+		return false
+	}
+	return true
 }
 
 // ghostCap bounds how many ghosts (freq-only memory of evicted keys) the trie

@@ -67,6 +67,13 @@ type leafState struct {
 	// reclaims the leaf and the marker with it, re-arming the rehydrate.
 	cloudConsulted atomic.Bool
 
+	// cloudMu single-flights the Cloud consult for this leaf: concurrent
+	// missers of the same key queue here instead of each paying the WAN
+	// GetTips round-trip, then re-check cloudConsulted and serve the winner's
+	// install. A failed consult leaves the marker false, so the next miss
+	// retries.
+	cloudMu sync.Mutex
+
 	// subscribers is the set of peer node IDs subscribed to this key, used by
 	// flushTx to address bind broadcast without re-deriving it from the DAG
 	// (reconstruct's Subscribers accumulator can return empty for legitimate
@@ -379,31 +386,41 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
 		ls, _ := e.index.LoadOrStoreData(key, &leafState{})
 		if ls == nil || !ls.cloudConsulted.Load() {
-			installed, consulted, hydrateErr := e.hydrateFromCloud(key)
-			if hydrateErr != nil {
-				// Cloud may hold this key and we couldn't get a complete
-				// answer: the read fails (client retries) rather than
-				// fabricating a miss for data that exists.
-				return nil, nil, 0, hydrateErr
+			if ls != nil {
+				ls.cloudMu.Lock()
+				defer ls.cloudMu.Unlock()
 			}
-			if installed {
-				// The hydrate made this node a holder of the key: subscribe
-				// (idempotent when the read already did) so peer writes route
-				// to us and the returned tips include our SubscriptionEffect
-				// for RMW deps.
-				if err := e.ensureSubscribed(key); err != nil {
-					return nil, nil, 0, err
+			if ls == nil || !ls.cloudConsulted.Load() {
+				installed, consulted, hydrateErr := e.hydrateFromCloud(key)
+				if hydrateErr != nil {
+					// Cloud may hold this key and we couldn't get a complete
+					// answer: the read fails (client retries) rather than
+					// fabricating a miss for data that exists.
+					return nil, nil, 0, hydrateErr
 				}
+				if installed {
+					// The hydrate made this node a holder of the key: subscribe
+					// (idempotent when the read already did) so peer writes route
+					// to us and the returned tips include our SubscriptionEffect
+					// for RMW deps.
+					if err := e.ensureSubscribed(key); err != nil {
+						return nil, nil, 0, err
+					}
+					result, tips, chainLen = e.reconstructLocal(key)
+				}
+				if consulted {
+					if ls == nil {
+						// The hydrate may have just created the leaf.
+						ls, _ = e.index.LoadOrStoreData(key, &leafState{})
+					}
+					if ls != nil {
+						ls.cloudConsulted.Store(true)
+					}
+				}
+			} else {
+				// Lost the single-flight race: a concurrent reader consulted
+				// and installed while we waited on cloudMu. Serve its result.
 				result, tips, chainLen = e.reconstructLocal(key)
-			}
-			if consulted {
-				if ls == nil {
-					// The hydrate may have just created the leaf.
-					ls, _ = e.index.LoadOrStoreData(key, &leafState{})
-				}
-				if ls != nil {
-					ls.cloudConsulted.Store(true)
-				}
 			}
 		}
 	}
@@ -1286,6 +1303,12 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			}
 		}
 	}
+
+	// A walk that adopted a snapshot with no reduction after it would return
+	// the pooled effect's State itself; callers hand the result to
+	// filterSnapshot, which writes fields. No-op when reductions already own
+	// the result, so the single-clone invariant holds.
+	ensureResultOwned()
 
 	slog.Debug("reconstruct: done", "key", key, "txn_id", txID,
 		"count", count, "cross_key_walked", crossKeyWalked,

@@ -1658,6 +1658,28 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 	}
 }
 
+// installTips merges a whole tip frontier into the key's index in one CAS
+// transition, so a concurrent reader observes either the prior frontier or the
+// full merged one — never a partial install. Same accounting as updateIndex:
+// Insert fires the trie's refDelta hook for the diff, and NewTipSet dedupes
+// tips the index already holds.
+func (e *Engine) installTips(key string, tips []Tip) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			slog.Debug("installTips: CAS retry", "key", key, "attempt", attempt)
+		}
+		current := e.index.Contains(key)
+		cur := current.Tips()
+		offsets := make([]Tip, 0, len(cur)+len(tips))
+		offsets = append(offsets, cur...)
+		offsets = append(offsets, tips...)
+		newTips := keytrie.NewTipSet(offsets...)
+		if _, ok := e.index.Insert(key, current, newTips); ok {
+			return
+		}
+	}
+}
+
 // BuildOffsetNotify constructs a single-effect notification.
 // EffectData is wire format: [4-byte LE keyLen][key][protoData].
 // traceCtx is optional; when non-nil, OTel trace context is injected into the notification.

@@ -96,7 +96,11 @@ func (s *swytchStore) attemptAcquire(ctx context.Context, lockKey string) (bool,
 		return false, err
 	}
 	cctx := s.engine().NewContext()
-	cctx.Watch(lockKey)
+	if err := cctx.Watch(lockKey); err != nil {
+		// No watch registered — proceeding would acquire without the
+		// write-skew guard the lock's safety rests on.
+		return false, err
+	}
 	cctx.BeginTx()
 	if !cctx.CheckWatches() {
 		return false, nil
@@ -203,7 +207,9 @@ func (s *swytchStore) Unlock(_ context.Context, name string) error {
 	s.stopRefresh(lockKey)
 
 	cctx := s.engine().NewContext()
-	cctx.Watch(lockKey)
+	if err := cctx.Watch(lockKey); err != nil {
+		return err
+	}
 	cctx.BeginTx()
 	if !cctx.CheckWatches() {
 		// Watched key was modified between Watch and now — somebody
@@ -302,7 +308,9 @@ func (s *swytchStore) refreshLoop(lockCtx context.Context, lockKey string, stop 
 // write IS a steal). Other errors come from the engine.
 func (s *swytchStore) renewLease(lockKey string, ttl time.Duration) error {
 	cctx := s.engine().NewContext()
-	cctx.Watch(lockKey)
+	if err := cctx.Watch(lockKey); err != nil {
+		return err
+	}
 	cctx.BeginTx()
 	if !cctx.CheckWatches() {
 		cctx.Abort()

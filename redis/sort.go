@@ -262,12 +262,11 @@ func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, p
 		if snap.Collection != pb.CollectionKind_KEYED {
 			return nil, false, nil
 		}
-		for _, elem := range snap.OrderedElements {
-			if string(elem.Data.GetId()) == field {
-				return elem.Data.Decompress(), true, nil
-			}
+		elem, ok := snap.NetAdds[field]
+		if !ok {
+			return nil, false, nil
 		}
-		return nil, false, nil
+		return elem.Data.Decompress(), true, nil
 	}
 
 	if snap.Scalar == nil {

@@ -213,13 +213,17 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			if snap == nil {
 				continue
 			}
-			if err := emitDeleteKey(cmd, key); err != nil {
+			// Always attempt stream sub-key cleanup — the key might have been
+			// overwritten (e.g. SET) but stream sub-keys could still exist.
+			// Cleanup runs before the key delete: a cleanup failure then
+			// leaves the key intact for a retry, whereas the reverse order
+			// leaks sub-keys that resurface as stale groups if the key is
+			// ever recreated as a stream.
+			if err := cleanupStreamGroups(cmd, key); err != nil {
 				w.WriteError(err.Error())
 				return
 			}
-			// Always attempt stream sub-key cleanup — the key might have been
-			// overwritten (e.g. SET) but stream sub-keys could still exist.
-			if err := cleanupStreamGroups(cmd, key); err != nil {
+			if err := emitDeleteKey(cmd, key); err != nil {
 				w.WriteError(err.Error())
 				return
 			}
@@ -445,10 +449,12 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
+			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
 		}
 		if err := emitDeleteKey(cmd, key); err != nil {
+			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
 		}
@@ -514,63 +520,60 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		}
 
 		cmd.Context.BeginTx()
-		if err := cmd.Context.Emit(&pb.Effect{
-			Key:  []byte(key),
-			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-		}, tips); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		destSnap, destTips, err := getAnySnapshotWithTips(cmd, newKey)
-		if err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if len(destTips) > 0 {
+		if err := func() error {
 			if err := cmd.Context.Emit(&pb.Effect{
-				Key:  []byte(newKey),
+				Key:  []byte(key),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-			}, destTips); err != nil {
-				w.WriteError(err.Error())
-				return
+			}, tips); err != nil {
+				return err
 			}
-		}
-
-		if err := emitDeleteKey(cmd, key); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if err := emitDeleteKey(cmd, newKey); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		// Move stream consumer group sub-keys from old key to new key
-		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
-			// Clean up dest groups (in case newKey was also a stream)
-			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
-				if err := cleanupStreamGroups(cmd, newKey); err != nil {
-					w.WriteError(err.Error())
-					return
+			destSnap, destTips, err := getAnySnapshotWithTips(cmd, newKey)
+			if err != nil {
+				return err
+			}
+			if len(destTips) > 0 {
+				if err := cmd.Context.Emit(&pb.Effect{
+					Key:  []byte(newKey),
+					Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+				}, destTips); err != nil {
+					return err
 				}
 			}
-			if err := copyStreamGroups(cmd, key, newKey); err != nil {
-				w.WriteError(err.Error())
-				return
+
+			if err := emitDeleteKey(cmd, key); err != nil {
+				return err
 			}
-			if err := cleanupStreamGroups(cmd, key); err != nil {
-				w.WriteError(err.Error())
-				return
+			if err := emitDeleteKey(cmd, newKey); err != nil {
+				return err
 			}
-		} else if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
-			// Dest was a stream but source isn't — clean up dest's groups
-			if err := cleanupStreamGroups(cmd, newKey); err != nil {
-				w.WriteError(err.Error())
-				return
+			if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
+				return err
 			}
+			// Move stream consumer group sub-keys from old key to new key
+			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+				// Clean up dest groups (in case newKey was also a stream)
+				if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+					if err := cleanupStreamGroups(cmd, newKey); err != nil {
+						return err
+					}
+				}
+				if err := copyStreamGroups(cmd, key, newKey); err != nil {
+					return err
+				}
+				return cleanupStreamGroups(cmd, key)
+			}
+			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+				// Dest was a stream but source isn't — clean up dest's groups
+				return cleanupStreamGroups(cmd, newKey)
+			}
+			return nil
+		}(); err != nil {
+			// The tx buffer holds a half-built rename; the post-runner Flush
+			// would commit it anyway (key moved, groups lost) while the
+			// client sees an error. Abort so nothing moves.
+			cmd.Context.Abort()
+			w.WriteError(err.Error())
+			return
 		}
 
 		w.WriteOK()
@@ -616,41 +619,42 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		}
 
 		cmd.Context.BeginTx()
-		if err := cmd.Context.Emit(&pb.Effect{
-			Key:  []byte(key),
-			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-		}, tips); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		if len(destTips) > 0 {
+		if err := func() error {
 			if err := cmd.Context.Emit(&pb.Effect{
-				Key:  []byte(newKey),
+				Key:  []byte(key),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-			}, destTips); err != nil {
-				w.WriteError(err.Error())
-				return
+			}, tips); err != nil {
+				return err
 			}
-		}
+			if len(destTips) > 0 {
+				if err := cmd.Context.Emit(&pb.Effect{
+					Key:  []byte(newKey),
+					Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+				}, destTips); err != nil {
+					return err
+				}
+			}
 
-		if err := emitDeleteKey(cmd, key); err != nil {
+			if err := emitDeleteKey(cmd, key); err != nil {
+				return err
+			}
+			if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
+				return err
+			}
+			// Move stream consumer group sub-keys from old key to new key
+			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+				if err := copyStreamGroups(cmd, key, newKey); err != nil {
+					return err
+				}
+				return cleanupStreamGroups(cmd, key)
+			}
+			return nil
+		}(); err != nil {
+			// Same as handleRename: abort so the post-runner Flush can't
+			// commit a half-built rename behind the reported error.
+			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
-		}
-		if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
-			w.WriteError(err.Error())
-			return
-		}
-		// Move stream consumer group sub-keys from old key to new key
-		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
-			if err := copyStreamGroups(cmd, key, newKey); err != nil {
-				w.WriteError(err.Error())
-				return
-			}
-			if err := cleanupStreamGroups(cmd, key); err != nil {
-				w.WriteError(err.Error())
-				return
-			}
 		}
 
 		w.WriteOne()
@@ -725,35 +729,39 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		}
 
-		if replace {
-			// Check dest type before deleting so we can clean up stream groups
-			destSnap, _, err := getAnySnapshotWithTips(cmd, dstKey)
-			if err != nil {
-				w.WriteError(err.Error())
-				return
-			}
-			if err := emitDeleteKey(cmd, dstKey); err != nil {
-				w.WriteError(err.Error())
-				return
-			}
-			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
-				if err := cleanupStreamGroups(cmd, dstKey); err != nil {
-					w.WriteError(err.Error())
-					return
+		// Transactional like handleRename: the copy touches the destination
+		// key plus its stream-group sub-keys, and a partial commit would
+		// surface a replaced destination without its groups (or vice versa).
+		cmd.Context.BeginTx()
+		if err := func() error {
+			if replace {
+				// Check dest type before deleting so we can clean up stream groups
+				destSnap, _, err := getAnySnapshotWithTips(cmd, dstKey)
+				if err != nil {
+					return err
+				}
+				if err := emitDeleteKey(cmd, dstKey); err != nil {
+					return err
+				}
+				if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+					if err := cleanupStreamGroups(cmd, dstKey); err != nil {
+						return err
+					}
 				}
 			}
-		}
 
-		if err := emitSnapshotAtKey(cmd, dstKey, snap); err != nil {
+			if err := emitSnapshotAtKey(cmd, dstKey, snap); err != nil {
+				return err
+			}
+			// Copy stream consumer group sub-keys to dest
+			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+				return copyStreamGroups(cmd, srcKey, dstKey)
+			}
+			return nil
+		}(); err != nil {
+			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
-		}
-		// Copy stream consumer group sub-keys to dest
-		if snap.TypeTag == pb.ValueType_TYPE_STREAM {
-			if err := copyStreamGroups(cmd, srcKey, dstKey); err != nil {
-				w.WriteError(err.Error())
-				return
-			}
 		}
 		w.WriteOne()
 	}

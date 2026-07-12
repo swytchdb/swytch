@@ -39,6 +39,7 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -689,9 +690,7 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 				ErrCloudUnavailable, tip, key, walkErr)
 		}
 	}
-	for _, tip := range tips {
-		e.updateIndex(key, nil, tip)
-	}
+	e.installTips(key, tips)
 	return nil
 }
 
@@ -1985,12 +1984,24 @@ func (e *Engine) prefetchEffects(refs []Tip) {
 	}
 	results := make(chan fetchResult, len(refs))
 
+	// Bound the fan-out: a causal chain can name thousands of refs, and one
+	// in-flight fetch per ref would dogpile peers/CDN. results is buffered to
+	// len(refs), so a worker never blocks sending and always frees its slot.
+	const prefetchParallelism = 16
+	sem := semaphore.NewWeighted(prefetchParallelism)
 	for _, off := range refs {
 		if _, ok := e.effectCache.Get(off); ok {
 			continue
 		}
+		if err := sem.Acquire(context.Background(), 1); err != nil {
+			// Unreachable with a Background context; stop dispatching rather
+			// than fetch unbounded.
+			slog.Error("prefetchEffects: semaphore acquire failed", "error", err)
+			break
+		}
 		pending++
 		go func(ref *pb.EffectRef) {
+			defer sem.Release(1)
 			data, err := e.broadcaster.FetchFromAny(ref, PreferPeers)
 			if err != nil {
 				results <- fetchResult{}

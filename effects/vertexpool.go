@@ -488,7 +488,10 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 				continue
 			}
 			avgPerKey := max(live/keys, 64)
-			e.evictBudget.Store(min(over/avgPerKey, maxDrainPerTick))
+			// Round a positive deficit up to at least one key: an overage
+			// smaller than avgPerKey would otherwise divide to a zero budget
+			// and park the node permanently over target.
+			e.evictBudget.Store(min(max(over/avgPerKey, 1), maxDrainPerTick))
 		}
 	}
 }

@@ -34,6 +34,10 @@ import (
 // hashing is fixed: a filter built on one process and queried on another must
 // agree. Unlike CuckooChain it cannot grow; the holder rebuilds at a larger
 // size when Fill crosses BloomResizeFill.
+//
+// Not internally synchronized: a holder either treats a built filter as
+// immutable (build fully, then publish by pointer swap — the frame path) or
+// guards Set/Has under its own lock (CloudSync.filterMu).
 type Bloom struct {
 	bits    []byte
 	mask    uint64 // m-1, where m = len(bits)*8 (a power of two)

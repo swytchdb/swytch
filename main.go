@@ -21,6 +21,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -83,6 +84,9 @@ func runGenPassphrase(args []string) error {
 	cloud := fs.Bool("cloud", false, "generate a cloud connection secret and its derived cloud secret")
 	asJSON := fs.Bool("json", false, "with --cloud, emit the secrets as a JSON object")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // -h/--help: usage already printed, a successful invocation
+		}
 		return err
 	}
 

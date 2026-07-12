@@ -95,14 +95,14 @@ func (s *swytchStore) Load(ctx context.Context, key string) ([]byte, error) {
 	if !scalarExists(snap) {
 		return nil, fs.ErrNotExist
 	}
-	raw, ok := snap.Scalar.Value.(*pb.DataEffect_Raw)
-	if !ok || raw == nil {
+	raw := snap.Scalar.Decompress()
+	if raw == nil {
 		return nil, fs.ErrNotExist
 	}
 	// Copy so callers can't observe later mutation if any caching reuses
 	// the underlying slice.
-	out := make([]byte, len(raw.Raw))
-	copy(out, raw.Raw)
+	out := make([]byte, len(raw))
+	copy(out, raw)
 	return out, nil
 }
 

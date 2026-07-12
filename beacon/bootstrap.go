@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/swytchdb/swytch/cluster"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
 )
 
@@ -86,13 +87,14 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 }
 
 // cloudCandidates discovers peer addresses from the cloud's membership
-// roster. Discovery failure means solo start, same as a DNS miss — the cloud
-// roster may be stale or empty (fresh cluster) and any one live address is
-// enough to join.
+// roster. A discovery *error* is retried with capped backoff, same as the DNS
+// path — a transient cloud hiccup at startup must not strand this node solo
+// while the rest of the fleet joins. A *successful* read that yields no
+// members is authoritative (fresh cluster, or we're first) and starts solo.
 func (b *Beacon) cloudCandidates(ctx context.Context) []string {
-	reduced, err := b.cfg.Cloud.DiscoverMembers(ctx, MembershipKey)
+	reduced, err := b.discoverMembersWithRetry(ctx)
 	if err != nil {
-		slog.Warn("beacon: cloud member discovery failed, starting solo", "error", err)
+		slog.Warn("beacon: cloud member discovery failed after retries, starting solo", "error", err)
 		return nil
 	}
 	members := parseMembership(reduced)
@@ -105,6 +107,41 @@ func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 		addrs = append(addrs, m.Addr)
 	}
 	return addrs
+}
+
+// discoverMembersWithRetry reads the cloud membership roster, retrying on
+// error with capped backoff until it succeeds or the deadline passes. Same
+// rationale as resolveJoinAddrWithRetry: an error means "the cloud isn't
+// reachable yet", not "there is no cluster", and conceding solo on the first
+// error is what strands nodes in a split-brain membership.
+func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffect, error) {
+	const (
+		perAttemptTimeout = 10 * time.Second
+		discoverDeadline  = 30 * time.Second
+		backoffStart      = 250 * time.Millisecond
+		backoffMax        = 3 * time.Second
+	)
+
+	deadlineCtx, cancel := context.WithTimeout(ctx, discoverDeadline)
+	defer cancel()
+
+	backoff := backoffStart
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(deadlineCtx, perAttemptTimeout)
+		reduced, err := b.cfg.Cloud.DiscoverMembers(attemptCtx, MembershipKey)
+		attemptCancel()
+		if err == nil {
+			return reduced, nil
+		}
+		slog.Debug("beacon: cloud member discovery failed, retrying", "error", err, "backoff", backoff)
+
+		select {
+		case <-deadlineCtx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, backoffMax)
+	}
 }
 
 // resolveJoinAddrWithRetry resolves JoinAddr, retrying on error with capped

@@ -80,7 +80,13 @@ func loadView(ctx *effects.Context, name string) (*viewSchema, error) {
 	if !ok || el.Data == nil {
 		return nil, fmt.Errorf("sql: view %q missing sql field", name)
 	}
-	return &viewSchema{Name: name, Body: string(el.Data.Decompress())}, nil
+	body := el.Data.Decompress()
+	if len(body) == 0 {
+		// emitView never stores an empty body — nil here means the stored
+		// value failed to decompress.
+		return nil, fmt.Errorf("sql: view %q missing or invalid sql field", name)
+	}
+	return &viewSchema{Name: name, Body: string(body)}, nil
 }
 
 // listViews returns every view name currently present in the

@@ -137,6 +137,7 @@ func (b *Beacon) Start(ctx context.Context) error {
 		"node_id", b.cfg.NodeID,
 		"advertise", b.cfg.AdvertiseAddr,
 		"join", b.cfg.JoinAddr,
+		"cloud", b.cfg.Cloud != nil,
 	)
 	return nil
 }

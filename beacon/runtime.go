@@ -142,6 +142,12 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	cloudEnabled := cfg.ConnectionSecret != ""
 	var cloudSync *cluster.CloudSync
 	if cloudEnabled {
+		if cfg.ClusterPassphrase != "" {
+			return nil, errors.Join(
+				fmt.Errorf("ConnectionSecret is exclusive with ClusterPassphrase: the mTLS passphrase derives from the secret"),
+				closeEngineOnError(engine),
+			)
+		}
 		if cfg.OnLocalEffect != nil || cfg.CloudReader != nil || cfg.CDNFetcher != nil {
 			return nil, errors.Join(
 				fmt.Errorf("ConnectionSecret is exclusive with the embedder durability seams"),

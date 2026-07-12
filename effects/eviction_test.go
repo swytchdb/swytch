@@ -672,15 +672,14 @@ func TestBroadcastUnsubscribe_HookSeesResidentVertex(t *testing.T) {
 	}
 	// The hook's holder is now the sole owner (broadcastUnsubscribe dropped
 	// the creation ref after firing); releasing must reach zero cleanly.
+	// Drain the reclaim queue (no governor in tests) and assert the vertex is
+	// gone: a leaked reference keeps refs > 0, the reclaim claim fails, and
+	// the vertex survives — which an Incref probe could not distinguish from
+	// a clean refs==0.
 	e.effectCache.Decref(hookTip)
+	e.reclaimUnreferenced()
 	if _, ok := e.effectCache.Get(hookTip); ok {
-		// Still resident is fine (reclaim is async) — but it must be sitting
-		// at refs 0, which Incref-then-restore verifies without racing the
-		// reclaimer: a second Incref succeeding means refs was >= 0.
-		if !e.effectCache.Incref(hookTip) {
-			return // claimed by the reclaimer already — also correct
-		}
-		e.effectCache.Decref(hookTip)
+		t.Fatal("unsub vertex survived reclaim after its last ref was released — a reference leaked")
 	}
 }
 

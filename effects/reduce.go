@@ -231,13 +231,7 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 		if r.Merge == pb.MergeRule_ADDITIVE_INT {
 			r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: r.Scalar.GetIntVal() + d.GetIntVal()}
 		} else if r.Merge == pb.MergeRule_LAST_WRITE_WINS {
-			var base int64
-			if _, ok := r.Scalar.Value.(*pb.DataEffect_IntVal); ok {
-				base = r.Scalar.GetIntVal()
-			} else {
-				base = rawToInt(r.Scalar.Decompress())
-			}
-			r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: base + d.GetIntVal()}
+			r.Scalar.Value = &pb.DataEffect_IntVal{IntVal: scalarIntBase(r.Scalar) + d.GetIntVal()}
 			r.Scalar.Merge = pb.MergeRule_LAST_WRITE_WINS
 			r.Merge = pb.MergeRule_LAST_WRITE_WINS
 			r.Commutative = false
@@ -247,13 +241,7 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 		if r.Merge == pb.MergeRule_ADDITIVE_FLOAT {
 			r.Scalar.Value = &pb.DataEffect_FloatVal{FloatVal: r.Scalar.GetFloatVal() + d.GetFloatVal()}
 		} else if r.Merge == pb.MergeRule_LAST_WRITE_WINS {
-			var base float64
-			if _, ok := r.Scalar.Value.(*pb.DataEffect_FloatVal); ok {
-				base = r.Scalar.GetFloatVal()
-			} else {
-				base = rawToFloat(r.Scalar.Decompress())
-			}
-			r.Scalar.Value = &pb.DataEffect_FloatVal{FloatVal: base + d.GetFloatVal()}
+			r.Scalar.Value = &pb.DataEffect_FloatVal{FloatVal: scalarFloatBase(r.Scalar) + d.GetFloatVal()}
 			r.Scalar.Merge = pb.MergeRule_LAST_WRITE_WINS
 			r.Merge = pb.MergeRule_LAST_WRITE_WINS
 			r.Commutative = false
@@ -273,38 +261,21 @@ func reduceScalar(r *pb.ReducedEffect, _ *pb.Effect, d *pb.DataEffect) {
 		}
 
 	case pb.MergeRule_MAX_BYTES:
-		if r.Scalar == nil {
-			// First data effect — clone and make our own copy of the bytes
-			r.Scalar = cloneData(d)
-			src := d.Decompress()
-			owned := make([]byte, len(src))
-			copy(owned, src)
-			r.Scalar.Value = &pb.DataEffect_Raw{Raw: owned}
-		} else {
-			a := r.Scalar.Decompress()
-			b := d.Decompress()
-			if len(a) >= len(b) {
-				// Mutate in-place — we own this slice (the first-effect branch
-				// copied it, or Decompress freshly inflated it). Re-point the
-				// value at it: when the scalar held a compressed arm, a is a
-				// new slice the mutation would otherwise be lost from.
-				for i := range b {
-					if b[i] > a[i] {
-						a[i] = b[i]
-					}
-				}
-				r.Scalar.Value = &pb.DataEffect_Raw{Raw: a}
-			} else {
-				result := make([]byte, len(b))
-				copy(result, a)
-				for i := range b {
-					if b[i] > result[i] {
-						result[i] = b[i]
-					}
-				}
-				r.Scalar.Value = &pb.DataEffect_Raw{Raw: result}
+		a := r.Scalar.Decompress()
+		b := d.Decompress()
+		// a may alias the stored effect's bytes (cloneData shares byte
+		// slices, and Decompress returns the raw arm as-is), so never fold
+		// b into it in place — that would rewrite pooled DAG history this
+		// observer alone sees. Build the combined value in a fresh buffer;
+		// bytes missing from the shorter side reduce as zero.
+		result := make([]byte, max(len(a), len(b)))
+		copy(result, a)
+		for i := range b {
+			if b[i] > result[i] {
+				result[i] = b[i]
 			}
 		}
+		r.Scalar.Value = &pb.DataEffect_Raw{Raw: result}
 	}
 }
 
@@ -339,10 +310,7 @@ func reduceKeyed(r *pb.ReducedEffect, e *pb.Effect, d *pb.DataEffect) {
 	// avoid mutating shared pointers (e.g. snapshot state in the effect cache).
 	switch d.Merge {
 	case pb.MergeRule_ADDITIVE_INT:
-		base := existing.Data.GetIntVal()
-		if raw := existing.Data.Decompress(); raw != nil {
-			base = rawToInt(raw)
-		}
+		base := scalarIntBase(existing.Data)
 		newElem := &pb.ReducedElement{
 			Data:      cloneData(existing.Data),
 			Hlc:       existing.Hlc,
@@ -352,10 +320,7 @@ func reduceKeyed(r *pb.ReducedEffect, e *pb.Effect, d *pb.DataEffect) {
 		newElem.Data.Value = &pb.DataEffect_IntVal{IntVal: base + d.GetIntVal()}
 		r.NetAdds[key] = newElem
 	case pb.MergeRule_ADDITIVE_FLOAT:
-		base := existing.Data.GetFloatVal()
-		if raw := existing.Data.Decompress(); raw != nil {
-			base = rawToFloat(raw)
-		}
+		base := scalarFloatBase(existing.Data)
 		newElem := &pb.ReducedElement{
 			Data:      cloneData(existing.Data),
 			Hlc:       existing.Hlc,
@@ -531,6 +496,24 @@ func elementFromData(e *pb.Effect, d *pb.DataEffect) *pb.ReducedElement {
 		NodeId:         e.NodeId,
 		ForkChoiceHash: e.ForkChoiceHash,
 	}
+}
+
+// scalarIntBase returns d's value as an additive integer base: the typed
+// IntVal arm when present, otherwise the parsed byte value (absent or
+// unparsable reads as zero — deterministic on every observer).
+func scalarIntBase(d *pb.DataEffect) int64 {
+	if _, ok := d.GetValue().(*pb.DataEffect_IntVal); ok {
+		return d.GetIntVal()
+	}
+	return rawToInt(d.Decompress())
+}
+
+// scalarFloatBase is scalarIntBase for float bases.
+func scalarFloatBase(d *pb.DataEffect) float64 {
+	if _, ok := d.GetValue().(*pb.DataEffect_FloatVal); ok {
+		return d.GetFloatVal()
+	}
+	return rawToFloat(d.Decompress())
 }
 
 func rawToInt(b []byte) int64 {

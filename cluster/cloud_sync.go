@@ -557,9 +557,20 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 		}
 		env, err := cs.buildEnvelope(tip, eff)
 		if err != nil {
-			slog.Error("cloud sync: envelope build failed, dropping effect",
+			// Seal/marshal failures are transient (rand.Read) — the effect
+			// already marshaled once for cluster broadcast. Keep it in the
+			// outbox and re-queue after backoff; retiring here would silently
+			// drop cloud durability for an effect the cluster still owes it.
+			slog.Error("cloud sync: envelope build failed, will retry",
 				"tip", tip, "error", err)
-			cs.retire(tip)
+			time.AfterFunc(cloudNackRetry, func() {
+				cs.mu.Lock()
+				if _, ok := cs.pending[tip]; ok {
+					cs.sendQ = append(cs.sendQ, tip)
+				}
+				cs.mu.Unlock()
+				cs.wakeSender()
+			})
 			continue
 		}
 		cloudEffectsSentTotal.Inc()
@@ -764,6 +775,8 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 // only yields candidate addresses; the authoritative state arrives through
 // the normal join path.
 func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) (*pb.ReducedEffect, error) {
+	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
+	defer cancel()
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
 		Keys:    [][]byte{CloudKeyName(cs.keyNameKey, []byte(membershipKey))},
@@ -844,6 +857,8 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 	}
 	tips := cs.pendingTipsFor(key)
 
+	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
+	defer cancel()
 	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
 		Keys:    [][]byte{name},
