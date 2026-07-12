@@ -45,8 +45,8 @@ import (
 // Swytch Cloud endpoints. Deliberately constants: first-party service URLs are
 // not configurable (host entries are the local-testing path).
 const (
-	CloudEndpoint    = "ingest.next.swytch.earth:443"
-	CloudCDNEndpoint = "https://next.swytch.earth"
+	CloudEndpoint    = "ingress.swytch.earth:443"
+	CloudCDNEndpoint = "https://swytch.earth"
 )
 
 // cloudEffectInfo is the domain-separation info for sealed effect payloads.
