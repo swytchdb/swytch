@@ -94,7 +94,7 @@ func TestCompact_EvacuatesSparseLeafChunk(t *testing.T) {
 	}
 	// The relocated leaves must remain fully mutable through the tree.
 	for i, k := range survivors {
-		if _, ok := c.Insert(k, c.Contains(k), NewTipSet(tip(uint64(1000 + i)))); !ok {
+		if _, ok := c.Insert(k, c.Contains(k), NewTipSet(tip(uint64(1000+i)))); !ok {
 			t.Fatalf("post-compaction tip CAS on %s failed", k)
 		}
 		c.RemoveTips(k, []EffectRef{tip(uint64(1000 + i))})
@@ -206,14 +206,12 @@ func TestOrphanSlots_DontPinChunks(t *testing.T) {
 	const perWorker = 8192
 	var wg sync.WaitGroup
 	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range perWorker {
 				k := fmt.Sprintf("w%02d-%05d", w, i)
 				c.Insert(k, nil, NewTipSet(tip(uint64(i+1))))
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -278,9 +276,7 @@ func TestCompact_UnderConcurrentTraffic(t *testing.T) {
 
 	var writers sync.WaitGroup
 	for w := range workers {
-		writers.Add(1)
-		go func() {
-			defer writers.Done()
+		writers.Go(func() {
 			for i := range perWorker {
 				k := fmt.Sprintf("w%d-%05d", w, i)
 				ts := NewTipSet(tip(uint64(i + 1)))
@@ -297,7 +293,7 @@ func TestCompact_UnderConcurrentTraffic(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	writers.Wait()
 	close(stop)

@@ -75,11 +75,11 @@ type critNode[T any] struct {
 	// leaf it visits. The verdict is a pure function of the immutable key; key
 	// updates reuse the leaf, so it never needs recomputing. Written once before
 	// publish, so no atomic is needed (same discipline as key).
-	pinned bool    // 1 byte,   offset 22 (leaf)
-	_      [1]byte //           offset 23
-	key       string                         // 16 bytes, offset 24 (leaf)
-	tips      atomic.Pointer[TipSet]         // 8 bytes,  offset 40 (leaf)
-	deleted   atomic.Bool                    // 4 bytes,  offset 44 (leaf)
+	pinned  bool                   // 1 byte,   offset 22 (leaf)
+	_       [1]byte                //           offset 23
+	key     string                 // 16 bytes, offset 24 (leaf)
+	tips    atomic.Pointer[TipSet] // 8 bytes,  offset 40 (leaf)
+	deleted atomic.Bool            // 4 bytes,  offset 44 (leaf)
 	// Eviction metadata (leaf). A leaf spans a second cache line now;
 	// these are written on the hot read path (freq bump) so they sit
 	// apart from the structural fields above. freq < 0 marks a ghost:
@@ -1652,6 +1652,9 @@ func (c *Critbit[T]) Closed() bool {
 }
 
 func (c *Critbit[T]) Close() error {
+	c.reapMu.Lock()
+	defer c.reapMu.Unlock()
+
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
