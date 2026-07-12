@@ -117,11 +117,6 @@ type Engine struct {
 	pendingTxTips *xsync.Map[keytrie.EffectRef, []Tip]
 	txAbortCounts *xsync.Map[string, *atomic.Int32]
 
-	// In-flight tx snapshots, keyed by txnID. Populated by Context.BeginTx
-	// so reconstruct can bound bind discovery / verdict harvest to the
-	// caller's pre-tx view without round-tripping through the Context.
-	txSnapshots *xsync.Map[string, keytrie.KeyIndex]
-
 	// Adaptive serialization state (§5)
 	rttProvider        PeerRTTProvider
 	serializationState *xsync.Map[string, *keySerializationState]
@@ -377,7 +372,6 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxns:        xsync.NewMap[keytrie.EffectRef, *pendingTxn](),
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
-		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
 		peerKeyFilters:     make(map[pb.NodeID]*peerKeyFilter),
 		effectCache:        newVertexPool(),
@@ -788,19 +782,6 @@ func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
 		return tips
 	}
 	return resolved
-}
-
-// txCutoff returns the snapshot bounding bind-discovery walks for a
-// tx-context reconstruct. Walks ask the snapshot per-(key, tip) whether
-// a tip is in the caller's pre-tx view; if yes, the tip is a boundary
-// (walk doesn't descend past it). Returns nil if no tx is registered,
-// in which case walks proceed unbounded back to snapshot LCAs.
-func (e *Engine) txCutoff(txID string) keytrie.KeyIndex {
-	if txID == "" || e.txSnapshots == nil {
-		return nil
-	}
-	snap, _ := e.txSnapshots.Load(txID)
-	return snap
 }
 
 // emitSnapshot writes a verdict-carrying SnapshotEffect on `key`, chained

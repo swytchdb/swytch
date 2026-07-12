@@ -2528,7 +2528,7 @@ func TestLosersOnKey_TwoConcurrentBindsLowerHashWins(t *testing.T) {
 
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(bindHi, bindLo))
 
-	losers, _ := e.losersOnKey("el-2", nil, nil, nil)
+	losers, _ := e.losersOnKey("el-2", nil, nil)
 	if _, ok := losers["txn-hi"]; !ok {
 		t.Fatalf("expected higher-hash bind 'txn-hi' to be in losers, got %v", losers)
 	}
@@ -2679,7 +2679,7 @@ func TestLosersOnKey_XDependsOnYsAncestorsButNotNewTip(t *testing.T) {
 	// consume it because X.ConsumedTips on el-2 didn't include it), nodeA:28=xBind}.
 	e.index.Insert("el-2", nil, keytrie.NewTipSet(Tip{nodeB, 10}, yBind, x26, xBind))
 
-	losers, _ := e.losersOnKey("el-2", nil, nil, nil)
+	losers, _ := e.losersOnKey("el-2", nil, nil)
 	t.Logf("losersOnKey(el-2) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("expected X (txn-X) to be marked as loser; production observed 53 surfacing on el-3 means X must be a loser on el-2. Got losers=%v", losers)
@@ -2804,7 +2804,7 @@ func TestLosersOnKey_SharedAncestorConcurrentBinds(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers, _ := e.losersOnKey("el-1", nil, nil, nil)
+	losers, _ := e.losersOnKey("el-1", nil, nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if _, ok := losers["txn-X"]; !ok {
 		t.Fatalf("BUG: expected X (higher hash) to be marked as loser. X and Y are concurrent siblings around shared non-tx ancestor — neither reaches the other. Got losers=%v", losers)
@@ -2934,7 +2934,7 @@ func TestLosersOnKey_SideChannelMakesSequential(t *testing.T) {
 
 	e.index.Insert("el-1", nil, keytrie.NewTipSet(xBind, yBind))
 
-	losers, _ := e.losersOnKey("el-1", nil, nil, nil)
+	losers, _ := e.losersOnKey("el-1", nil, nil)
 	t.Logf("losersOnKey(el-1) returned: %v", losers)
 	if len(losers) != 0 {
 		t.Fatalf("X reaches Y via side-channel noop — they are sequential, not concurrent. losersOnKey must return no losers. Got %v", losers)
@@ -3096,7 +3096,7 @@ func TestBindKeyClosure_ExpandsViaBindKeysField(t *testing.T) {
 	})
 	e.index.Insert("el-3", nil, keytrie.NewTipSet(bind))
 
-	closure, _, _, err := e.bindKeyClosure("el-3", nil)
+	closure, _, _, err := e.bindKeyClosure("el-3")
 	if err != nil {
 		t.Fatalf("bindKeyClosure: %v", err)
 	}
@@ -3343,5 +3343,108 @@ func TestContextGetSnapshot_NilResultDoesNotPanicCompaction(t *testing.T) {
 	}
 	if r != nil {
 		t.Fatalf("expected nil result; got %+v", r)
+	}
+}
+
+// Regression for Jepsen run 29208760413. A transaction which appended 77 to
+// el-2 also touched el-1, where it lost fork choice to a lower-hash
+// transaction. A later transaction captured per-key noops as its snapshot
+// boundary. Fork-choice discovery stopped at those cutoff tips, while the
+// reconstruction DAG continued below them and reduced the losing bind.
+//
+// Verdict snapshots deliberately do not appear here: verdicts may accelerate
+// reconstruction, but the underlying fork choice must remain sufficient for
+// correctness when no verdict is available.
+func TestReconstruct_TxCutoffDoesNotHideCrossKeyForkLoser(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+
+	putAt := func(tip Tip, eff *pb.Effect) Tip {
+		data, err := proto.Marshal(eff)
+		if err != nil {
+			t.Fatalf("marshal effect at %v: %v", tip, err)
+		}
+		log.entries[tip] = data
+		log.effectCache.Put(tip, proto.Clone(eff).(*pb.Effect))
+		return tip
+	}
+
+	const (
+		loserNode  uint64 = 7661756236367424020
+		winnerNode uint64 = 7661756235913149987
+		readerNode uint64 = 7661756235913149987
+	)
+	loserHash := []byte{0xb4, 0x37, 0xd4, 0xa6}
+	winnerHash := []byte{0xb1, 0x40, 0x1e, 0x49}
+	if !ForkChoiceLess(winnerHash, loserHash) {
+		t.Fatal("test setup: winner hash must sort before loser hash")
+	}
+
+	loserTxn := "7661756236367424020:1783891641596379001:3"
+	loserEl1 := putAt(Tip{loserNode, 27}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(100), NodeId: loserNode,
+		TxnId: loserTxn, ForkChoiceHash: loserHash,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "loser-el1", []byte("loser-el1"))},
+	})
+	loserEl2 := putAt(Tip{loserNode, 29}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(101), NodeId: loserNode,
+		TxnId: loserTxn, ForkChoiceHash: loserHash,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "77", []byte("77"))},
+	})
+	loserBind := putAt(Tip{loserNode, 30}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(102), NodeId: loserNode,
+		TxnId: loserTxn, ForkChoiceHash: loserHash,
+		Deps: []*pb.EffectRef{toPbRef(loserEl1), toPbRef(loserEl2)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(102), OriginatorNodeId: loserNode,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(loserEl1)},
+				{Key: []byte("el-2"), NewTip: toPbRef(loserEl2)},
+			},
+		}},
+	})
+
+	winnerTxn := "7661756235913149987:1783891641595592128:3"
+	winnerEl1 := putAt(Tip{winnerNode, 16}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(103), NodeId: winnerNode,
+		TxnId: winnerTxn, ForkChoiceHash: winnerHash,
+		Kind: &pb.Effect_Data{Data: orderedInsert(pb.Placement_PLACE_TAIL, "winner-el1", []byte("winner-el1"))},
+	})
+	winnerBind := putAt(Tip{winnerNode, 17}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(104), NodeId: winnerNode,
+		TxnId: winnerTxn, ForkChoiceHash: winnerHash,
+		Deps: []*pb.EffectRef{toPbRef(winnerEl1)},
+		Kind: &pb.Effect_TxnBind{TxnBind: &pb.TransactionalBindEffect{
+			TxnHlc: sTs(104), OriginatorNodeId: winnerNode,
+			Keys: []*pb.TransactionalBindEffect_KeyBind{
+				{Key: []byte("el-1"), NewTip: toPbRef(winnerEl1)},
+			},
+		}},
+	})
+
+	// These noops are the exact boundary shape from the failing read: the next
+	// transaction sees only its captured tips, but reconstruct still walks their
+	// dependencies to produce the pre-transaction value.
+	boundaryEl1 := putAt(Tip{readerNode, 21}, &pb.Effect{
+		Key: []byte("el-1"), Hlc: sTs(105), NodeId: readerNode,
+		Deps: []*pb.EffectRef{toPbRef(loserBind), toPbRef(winnerBind)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	boundaryEl2 := putAt(Tip{readerNode, 22}, &pb.Effect{
+		Key: []byte("el-2"), Hlc: sTs(106), NodeId: readerNode,
+		Deps: []*pb.EffectRef{toPbRef(loserBind)},
+		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	})
+	e.index.Insert("el-1", nil, keytrie.NewTipSet(boundaryEl1))
+	e.index.Insert("el-2", nil, keytrie.NewTipSet(boundaryEl2))
+
+	reader := e.NewContext()
+	reader.BeginTx()
+	r, _, err := reader.GetSnapshot("el-2")
+	if err != nil {
+		t.Fatalf("reconstruct el-2: %v", err)
+	}
+	if got := orderedValues(r); slices.Contains(got, "77") {
+		t.Fatalf("G1a: losing append 77 crossed the transaction cutoff: %v", got)
 	}
 }

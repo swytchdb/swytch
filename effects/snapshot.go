@@ -32,7 +32,6 @@ import (
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/keytrie"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -999,12 +998,6 @@ func (e *Engine) retryBootstrap(key string, state *subscriptionState, nackTips [
 func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon bool) (*pb.ReducedEffect, int, error) {
 	slog.Debug("reconstruct: start", "key", key, "tips", tips, "txn_id", txID, "wait_for_horizon", waitForHorizon)
 
-	// Bind discovery + verdict harvest only need to walk back to the
-	// caller's pre-tx view. For a tx-context reconstruct the engine's
-	// per-tx snapshot supplies per-key cutoff tips; outside a tx, no
-	// cutoff (walk is bounded only by snapshot LCA in dag.walk).
-	cutoff := e.txCutoff(txID)
-
 	var (
 		result           *pb.ReducedEffect
 		subRootEffects   []*pb.Effect
@@ -1050,7 +1043,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 		crossKeyWalked = 0
 		resultFromSnapshot = false
 
-		expandKeys, bindsByKey, snapshotVerdicts, err = e.bindKeyClosure(key, cutoff)
+		expandKeys, bindsByKey, snapshotVerdicts, err = e.bindKeyClosure(key)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1061,7 +1054,7 @@ func (e *Engine) reconstruct(key string, tips []Tip, txID string, waitForHorizon
 			}
 		}
 		for k := range expandKeys {
-			losers, walked := e.losersOnKey(k, bindsByKey[k], snapshotVerdicts, cutoff)
+			losers, walked := e.losersOnKey(k, bindsByKey[k], snapshotVerdicts)
 			if k != key {
 				crossKeyWalked += walked
 			}
@@ -1360,7 +1353,7 @@ func bindsShareBase(a, b *forkChoiceBindEntry) bool {
 // losersOnKey(K') so the per-key walk reaches those binds even when an
 // intervening snapshot on K' would otherwise truncate the walk before
 // them.
-func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map[string]struct{}, map[string][]Tip, verdictMap, error) {
+func (e *Engine) bindKeyClosure(startKey string) (map[string]struct{}, map[string][]Tip, verdictMap, error) {
 	keys := map[string]struct{}{startKey: {}}
 	bindsByKey := make(map[string][]Tip)
 	seenBindTip := make(map[string]map[Tip]struct{})
@@ -1409,14 +1402,6 @@ func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map
 			eff, err := e.getEffect(k, t)
 			if err != nil {
 				continue
-			}
-			// Pre-tx cutoff: if this tip is in the caller's tx snapshot
-			// view for this effect's key, anything below it is already
-			// in our pre-tx state and can't compete. Don't descend.
-			if txCutoff != nil {
-				if ts := txCutoff.Contains(string(eff.Key)); ts != nil && ts.Contains(t) {
-					continue
-				}
 			}
 			bind := eff.GetTxnBind()
 			if bind != nil {
@@ -1474,7 +1459,7 @@ func (e *Engine) bindKeyClosure(startKey string, txCutoff keytrie.KeyIndex) (map
 // entirely. The unadjudicated tail still runs pairwise hash + predicate
 // refinement. extraTips augments the starting set with NewTip[key] offsets
 // the caller harvested on other closure keys.
-func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdictMap, txCutoff keytrie.KeyIndex) (map[string]struct{}, int) {
+func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdictMap) (map[string]struct{}, int) {
 	losers := make(map[string]struct{})
 	tipSet := e.index.Contains(key)
 	if tipSet == nil && len(extraTips) == 0 {
@@ -1534,11 +1519,6 @@ func (e *Engine) losersOnKey(key string, extraTips []Tip, snapshotVerdicts verdi
 		eff, err := e.getEffect(key, t)
 		if err != nil {
 			continue
-		}
-		if txCutoff != nil {
-			if ts := txCutoff.Contains(string(eff.Key)); ts != nil && ts.Contains(t) {
-				continue
-			}
 		}
 		walked++
 

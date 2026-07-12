@@ -355,7 +355,6 @@ func newInBindReadReplayEngine(t *testing.T) *Engine {
 		txAbortCounts:     xsync.NewMap[string, *atomic.Int32](),
 		pendingBootstraps: xsync.NewMap[string, *bootstrapCollector](),
 		spokenBinds:       clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(256)),
-		txSnapshots:       xsync.NewMap[string, keytrie.KeyIndex](),
 	}
 	e.safety.Store(&safetyMap{defaultMode: UnsafeMode})
 	e.horizon = newHorizonSet(e)

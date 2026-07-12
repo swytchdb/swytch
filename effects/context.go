@@ -29,7 +29,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 	"github.com/swytchdb/swytch/tracing"
@@ -445,7 +444,6 @@ func (c *Context) Watch(key string) error {
 func (c *Context) ClearWatches() {
 	clear(c.watchedKeys)
 	if !c.inTx {
-		c.dropTxRegistration()
 		c.txnID = ""
 	}
 }
@@ -468,31 +466,6 @@ func (c *Context) BeginTx() {
 	// the txn sees a consistent committed state.
 	if c.txSnapshot == nil {
 		c.txSnapshot = c.engine.index.Snapshot()
-	}
-	// Register the snapshot with the engine so reconstruct can derive
-	// the pre-tx walk cutoff from txID alone.
-	if c.txSnapshots() != nil && c.txnID != "" {
-		c.txSnapshots().Store(c.txnID, c.txSnapshot)
-	}
-}
-
-// txSnapshots is a tiny wrapper to make the engine-side per-tx snapshot
-// map easier to access from Context.
-func (c *Context) txSnapshots() *xsync.Map[string, keytrie.KeyIndex] {
-	if c.engine == nil {
-		return nil
-	}
-	return c.engine.txSnapshots
-}
-
-// dropTxRegistration removes this Context's tx snapshot from the engine.
-// Safe to call with empty txnID. Call before clearing c.txnID.
-func (c *Context) dropTxRegistration() {
-	if c.txnID == "" {
-		return
-	}
-	if m := c.txSnapshots(); m != nil {
-		m.Delete(c.txnID)
 	}
 }
 
@@ -529,7 +502,6 @@ func (c *Context) CheckWatches() bool {
 		// Key was modified — abort
 		clear(c.watchedKeys)
 		c.inTx = false
-		c.dropTxRegistration()
 		c.txnID = ""
 		c.txSnapshot = nil
 		return false
@@ -546,7 +518,6 @@ func (c *Context) CheckWatches() bool {
 			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
 			clear(c.watchedKeys)
 			c.inTx = false
-			c.dropTxRegistration()
 			c.txnID = ""
 			c.txSnapshot = nil
 			return false
@@ -566,7 +537,6 @@ func (c *Context) Abort() {
 	clear(c.keys)
 	clear(c.watchedKeys)
 	c.inTx = false
-	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
@@ -1625,7 +1595,6 @@ func (c *Context) emitSerializationEffect(key string) {
 func (c *Context) reset() {
 	clear(c.keys)
 	c.inTx = false
-	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
