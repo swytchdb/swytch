@@ -59,7 +59,7 @@ func (l *Logger) IsDebug() bool {
 }
 
 // LogCommand logs a command execution at debug level
-func (l *Logger) LogCommand(cmd *shared.Command, db int, clientAddr string) {
+func (l *Logger) LogCommand(cmd *shared.Command, clientAddr string) {
 	if l == nil || !l.debug {
 		return
 	}
@@ -80,7 +80,6 @@ func (l *Logger) LogCommand(cmd *shared.Command, db int, clientAddr string) {
 
 	l.Debug("command",
 		slog.String("cmd", cmdName),
-		slog.Int("db", db),
 		slog.String("client", clientAddr),
 		slog.String("args", argsPreview.String()),
 		slog.Int("argc", len(cmd.Args)),

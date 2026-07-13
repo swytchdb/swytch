@@ -184,12 +184,12 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	case pb.CollectionKind_ORDERED:
 		// Lists
 		for _, elem := range snap.OrderedElements {
-			elements = append(elements, elem.Data.GetRaw())
+			elements = append(elements, elem.Data.Decompress())
 		}
 	case pb.CollectionKind_KEYED:
 		// Sets and sorted sets
 		for _, elem := range snap.NetAdds {
-			elements = append(elements, elem.Data.GetRaw())
+			elements = append(elements, elem.Data.Decompress())
 		}
 	default:
 		w.WriteWrongType()
@@ -197,7 +197,11 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build sort items with weights
-	items := h.buildSortItems(cmd.Context, db, elements, opts)
+	items, err := h.buildSortItems(cmd.Context, db, elements, opts)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
 
 	// Sort unless BY nosort
 	if !opts.noSort {
@@ -210,7 +214,11 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build results (applies GET patterns if any)
-	results := h.buildResults(cmd.Context, db, items, opts)
+	results, err := h.buildResults(cmd.Context, db, items, opts)
+	if err != nil {
+		w.WriteError(err.Error())
+		return
+	}
 
 	// STORE or return
 	if opts.store != "" {
@@ -236,37 +244,39 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 // entries and empty-collection tombstones — direct Engine.GetSnapshot would
 // return stale data here, since BY/GET patterns commonly hit ephemeral hash
 // fields whose parent key may already be past its TTL.
-func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, pattern string, element []byte) ([]byte, bool) {
+func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, pattern string, element []byte) ([]byte, bool, error) {
 	key, field, isHash := substitutePattern(pattern, element)
 
 	if h.engine == nil || ectx == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	snap, _, err := ectx.GetSnapshot(key)
-	if err != nil || snap == nil {
-		return nil, false
+	if err != nil {
+		return nil, false, err
+	}
+	if snap == nil {
+		return nil, false, nil
 	}
 
 	if isHash {
 		if snap.Collection != pb.CollectionKind_KEYED {
-			return nil, false
+			return nil, false, nil
 		}
-		for _, elem := range snap.OrderedElements {
-			if string(elem.Data.GetId()) == field {
-				return elem.Data.GetRaw(), true
-			}
+		elem, ok := snap.NetAdds[field]
+		if !ok {
+			return nil, false, nil
 		}
-		return nil, false
+		return elem.Data.Decompress(), true, nil
 	}
 
 	if snap.Scalar == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	return snap.Scalar.GetRaw(), true
+	return snap.Scalar.Decompress(), true, nil
 }
 
 // buildSortItems creates sortItems from elements with computed weights
-func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, elements [][]byte, opts *sortOptions) []sortItem {
+func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, elements [][]byte, opts *sortOptions) ([]sortItem, error) {
 	items := make([]sortItem, 0, len(elements))
 
 	for _, elem := range elements {
@@ -274,7 +284,10 @@ func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, ele
 
 		if opts.byPattern != "" && !opts.noSort {
 			// Get weight from external key
-			weightData, ok := h.getExternalValue(ectx, db, opts.byPattern, elem)
+			weightData, ok, err := h.getExternalValue(ectx, db, opts.byPattern, elem)
+			if err != nil {
+				return nil, err
+			}
 			if ok {
 				if opts.alpha {
 					item.strWeight = string(weightData)
@@ -301,7 +314,7 @@ func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, ele
 		items = append(items, item)
 	}
 
-	return items
+	return items, nil
 }
 
 // sortItems sorts the items based on options
@@ -333,14 +346,14 @@ func applyLimit(items []sortItem, offset, count int) []sortItem {
 }
 
 // buildResults builds the result slice, applying GET patterns if specified
-func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items []sortItem, opts *sortOptions) [][]byte {
+func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items []sortItem, opts *sortOptions) ([][]byte, error) {
 	if len(opts.getPatterns) == 0 {
 		// No GET patterns - return elements
 		results := make([][]byte, len(items))
 		for i, item := range items {
 			results[i] = item.element
 		}
-		return results
+		return results, nil
 	}
 
 	// With GET patterns - each element produces len(getPatterns) results
@@ -351,12 +364,15 @@ func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items
 				// Special pattern # returns the element itself
 				results = append(results, item.element)
 			} else {
-				val, _ := h.getExternalValue(ectx, db, pattern, item.element)
+				val, _, err := h.getExternalValue(ectx, db, pattern, item.element)
+				if err != nil {
+					return nil, err
+				}
 				results = append(results, val) // nil if not found
 			}
 		}
 	}
-	return results
+	return results, nil
 }
 
 // emitSortDelete emits a delete effect for a key, reading current tips for proper dep chaining.

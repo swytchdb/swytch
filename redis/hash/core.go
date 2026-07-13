@@ -653,15 +653,19 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		var current int64
 		if snap != nil && snap.NetAdds != nil {
 			if elem, has := snap.NetAdds[field]; has {
-				// Could be Raw (LWW) or IntVal (additive)
-				if raw := elem.Data.GetRaw(); raw != nil {
-					current, ok = shared.ParseInt64(raw)
+				switch v := elem.Data.GetValue().(type) {
+				case *pb.DataEffect_IntVal:
+					// Additive (HINCRBY-produced) value reads directly.
+					current = v.IntVal
+				default:
+					// Byte-shaped (LWW) value must parse. Decompress returns
+					// nil for a corrupt compressed value — that parses as
+					// not-an-integer rather than silently reading as zero.
+					current, ok = shared.ParseInt64(elem.Data.Decompress())
 					if !ok {
 						w.WriteNotInteger()
 						return
 					}
-				} else {
-					current = elem.Data.GetIntVal()
 				}
 			}
 		}
@@ -730,16 +734,23 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		var current float64
 		if snap != nil && snap.NetAdds != nil {
 			if elem, has := snap.NetAdds[field]; has {
-				// Could be Raw (LWW) or FloatVal (additive)
-				if raw := elem.Data.GetRaw(); raw != nil {
+				switch v := elem.Data.GetValue().(type) {
+				case *pb.DataEffect_FloatVal:
+					// Additive (HINCRBYFLOAT-produced) value reads directly.
+					current = v.FloatVal
+				case *pb.DataEffect_IntVal:
+					// An integer counter is a valid float base.
+					current = float64(v.IntVal)
+				default:
+					// Byte-shaped (LWW) value must parse. Decompress returns
+					// nil for a corrupt compressed value — that parses as
+					// not-a-float rather than silently reading as zero.
 					var parseErr error
-					current, parseErr = strconv.ParseFloat(string(raw), 64)
+					current, parseErr = strconv.ParseFloat(string(elem.Data.Decompress()), 64)
 					if parseErr != nil {
 						w.WriteError("ERR hash value is not a float")
 						return
 					}
-				} else {
-					current = elem.Data.GetFloatVal()
 				}
 			}
 		}

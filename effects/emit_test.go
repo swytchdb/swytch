@@ -101,7 +101,9 @@ func (m *mockBroadcaster) SendNack(nack *pb.NackNotify, targetNodeID pb.NodeID) 
 	defer m.mu.Unlock()
 	m.sentNacks = append(m.sentNacks, nack)
 }
-func (m *mockBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) { return nil, nil }
+func (m *mockBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
+	return nil, nil
+}
 func (m *mockBroadcaster) Fetch(ref *pb.EffectRef) ([]byte, error) {
 	return nil, nil
 }
@@ -118,6 +120,13 @@ func (m *mockBroadcaster) broadcastCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.broadcasts)
+}
+
+// replicateCount is broadcastCount's counterpart for Replicate/ReplicateTo.
+func (m *mockBroadcaster) replicateCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.replicates)
 }
 
 // waitForBroadcast blocks until at least one async broadcast lands or the
@@ -155,6 +164,18 @@ func newTestEngine(bc Broadcaster) *Engine {
 	return e
 }
 
+// preSubscribe marks keys as already subscribed (bootstrap complete) so a
+// test can exercise emit/flush mechanics without Emit's subscribe-on-write
+// minting a SubscriptionEffect that perturbs index, dep, and broadcast
+// expectations.
+func preSubscribe(e *Engine, keys ...string) {
+	for _, k := range keys {
+		st := &subscriptionState{ready: make(chan struct{})}
+		st.markReady()
+		e.subscriptions.Store(k, st)
+	}
+}
+
 func dataEffect(key string) *pb.Effect {
 	return &pb.Effect{
 		Key: []byte(key),
@@ -178,6 +199,7 @@ func metaEffect(key string) *pb.Effect {
 
 func TestEmitSingle(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "foo")
 	ctx := e.NewContext()
 
 	eff := dataEffect("foo")
@@ -203,6 +225,7 @@ func TestEmitSingle(t *testing.T) {
 
 func TestEmitTwoSameKey(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 	ctx := e.NewContext()
 
 	// First effect: data
@@ -237,6 +260,7 @@ func TestEmitTwoSameKey(t *testing.T) {
 
 func TestEmitForkResolution(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	// Pre-populate index with 2 tips (simulating fork)
 	e.index.Insert("k", nil, keytrie.NewTipSet(Tip{0, 10}, Tip{0, 20}))
@@ -311,11 +335,11 @@ func TestFlushSafeMode_DowngradesWhenKeyHeldNowhere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(bc.replicates) != 0 {
-		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", len(bc.replicates))
-	}
-	if len(bc.broadcasts) == 0 {
-		t.Fatal("key held nowhere: SafeMode should downgrade to async BroadcastWithData")
+	// The downgrade path is fire-and-forget, so observe it through the locked
+	// accessors after the announce goroutine has had a chance to land.
+	waitForBroadcast(t, bc)
+	if got := bc.replicateCount(); got != 0 {
+		t.Fatalf("key held nowhere: SafeMode should not block on Replicate, got %d calls", got)
 	}
 }
 
@@ -396,6 +420,7 @@ func TestFlushTx_SafeMode_RejectsWhenPeersUnreachable(t *testing.T) {
 func TestFlushUnsafeMode(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "k") // pin the broadcast count to the data effect alone
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -464,6 +489,7 @@ func TestBeginTxSetsFlag(t *testing.T) {
 
 func TestAbort(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	ctx.BeginTx()
@@ -488,8 +514,11 @@ func TestAbortClearsWatchedKeys(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k1")
-	ctx.Watch("k2")
+	for _, k := range []string{"k1", "k2"} {
+		if err := ctx.Watch(k); err != nil {
+			t.Fatalf("Watch(%q): %v", k, err)
+		}
+	}
 
 	if len(ctx.watchedKeys) != 2 {
 		t.Fatalf("expected 2 watchedKeys before Abort, got %d", len(ctx.watchedKeys))
@@ -507,7 +536,9 @@ func TestAbortClearsWatchedKeysWithoutTx(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k")
+	if err := ctx.Watch("k"); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
 
 	if len(ctx.watchedKeys) != 1 {
 		t.Fatalf("expected 1 watchedKey before Abort, got %d", len(ctx.watchedKeys))
@@ -525,7 +556,9 @@ func TestAbortAllowsCleanReuse(t *testing.T) {
 	e := newTestEngine(nil)
 
 	ctx := e.NewContext()
-	ctx.Watch("k")
+	if err := ctx.Watch("k"); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
 	ctx.BeginTx()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
 		t.Fatal(err)
@@ -553,6 +586,7 @@ func TestAbortAllowsCleanReuse(t *testing.T) {
 
 func TestCASRetry(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -582,6 +616,7 @@ func TestCASRetry(t *testing.T) {
 func TestNotifyEffectData(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -620,6 +655,7 @@ func TestNotifyEffectData(t *testing.T) {
 func TestMultipleKeys(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
+	preSubscribe(e, "a", "b")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("a")); err != nil {
@@ -649,6 +685,7 @@ func TestMultipleKeys(t *testing.T) {
 
 func TestIndexInvisibleBeforeFlush(t *testing.T) {
 	e := newTestEngine(nil)
+	preSubscribe(e, "k")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("k")); err != nil {
@@ -1050,6 +1087,7 @@ func TestFlushTx_VerdictSnapshotEmittedOnLoserOnlyKeys(t *testing.T) {
 
 func TestEmit_ExcludesInProgressTxTips(t *testing.T) {
 	e := newTxnTestEngine(nil)
+	preSubscribe(e, "k")
 
 	// Simulate an in-progress tx tip at offset 500 with pre-tx deps [200]
 	e.pendingTxTips.Store(Tip{42, 500}, []Tip{{42, 200}})
@@ -1091,6 +1129,7 @@ func TestFlushNonTx_Unchanged(t *testing.T) {
 	// Regression: non-tx flush should work identically to before
 	bc := &mockBroadcaster{}
 	e := newTxnTestEngine(bc)
+	preSubscribe(e, "a", "b")
 
 	ctx := e.NewContext()
 	if err := ctx.Emit(dataEffect("a")); err != nil {

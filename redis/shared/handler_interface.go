@@ -39,7 +39,6 @@ const (
 
 // Connection represents the state of a client connection
 type Connection struct {
-	SelectedDB    int             // Currently selected database index
 	User          *ACLUser        // nil = unauthenticated
 	Username      string          // Cached username for logging
 	Protocol      ProtocolVersion // RESP protocol version (default RESP2)
@@ -229,8 +228,14 @@ type CommandHandler interface {
 	// GetCacheBytes returns current bytes used by cached items
 	GetCacheBytes() int64
 
-	// GetItemCount returns current number of items in cache
+	// GetItemCount returns the number of keys resident in the index (the set
+	// eviction operates on), distinct from GetVertexCount
 	GetItemCount() int
+
+	// GetReleaseQueueDepth returns the number of cold-evicted keys whose
+	// deferred ref-release walk has not yet run; a persistently deep queue
+	// means reclaim is falling behind eviction
+	GetReleaseQueueDepth() int
 
 	// GetArenaBytes returns the critbit index's slot-array footprint (trie
 	// skeleton), distinct from GetCacheBytes (vertex pool effect bytes)
@@ -247,9 +252,6 @@ type CommandHandler interface {
 
 	// RequiresAuth returns true if authentication is required
 	RequiresAuth() bool
-
-	// NumDatabases returns the number of databases available
-	NumDatabases() int
 
 	// DebugEnabled returns true if debug logging is enabled
 	DebugEnabled() bool

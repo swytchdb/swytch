@@ -190,7 +190,7 @@ func snapshotToEntries(snap *pb.ReducedEffect) []*shared.StreamEntry {
 				continue
 			}
 			id := decodeStreamElementID(elem.Data.Id)
-			fields := decodeStreamFields(elem.Data.GetRaw())
+			fields := decodeStreamFields(elem.Data.Decompress())
 			entries = append(entries, &shared.StreamEntry{
 				ID:     id,
 				Fields: fields,
@@ -214,7 +214,7 @@ func snapshotToEntries(snap *pb.ReducedEffect) []*shared.StreamEntry {
 			continue
 		}
 		id := decodeStreamElementID([]byte(elemID))
-		fields := decodeStreamFields(elem.Data.GetRaw())
+		fields := decodeStreamFields(elem.Data.Decompress())
 		entries = append(entries, &shared.StreamEntry{
 			ID:     id,
 			Fields: fields,
@@ -242,7 +242,7 @@ func streamMetadata(snap *pb.ReducedEffect) (lastID shared.StreamID, entriesAdde
 	// Legacy KEYED path: check for __meta__ element
 	if snap.Collection == pb.CollectionKind_KEYED && snap.NetAdds != nil {
 		if meta, ok := snap.NetAdds["__meta__"]; ok {
-			raw := meta.Data.GetRaw()
+			raw := meta.Data.Decompress()
 			if len(raw) >= 40 {
 				lastID.Ms = binary.BigEndian.Uint64(raw[0:8])
 				lastID.Seq = binary.BigEndian.Uint64(raw[8:16])
@@ -639,7 +639,7 @@ func getGroupMeta(snap *pb.ReducedEffect) (lastDeliveredID shared.StreamID, entr
 	if !ok {
 		return
 	}
-	lastDeliveredID, entriesRead, createdAt = decodeGroupMeta(elem.Data.GetRaw())
+	lastDeliveredID, entriesRead, createdAt = decodeGroupMeta(elem.Data.Decompress())
 	found = true
 	return
 }
@@ -719,7 +719,7 @@ func pelToEntries(pelSnap *pb.ReducedEffect) []*shared.PendingEntry {
 			continue
 		}
 		id := decodeStreamElementID([]byte(elemID))
-		consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.GetRaw())
+		consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.Decompress())
 		entries = append(entries, &shared.PendingEntry{
 			ID:            id,
 			Consumer:      consumer,
@@ -742,7 +742,7 @@ func consumerPendingCount(pelSnap *pb.ReducedEffect, consumer string) int64 {
 	}
 	var count int64
 	for _, elem := range pelSnap.NetAdds {
-		c, _, _ := decodePELEntry(elem.Data.GetRaw())
+		c, _, _ := decodePELEntry(elem.Data.Decompress())
 		if c == consumer {
 			count++
 		}
@@ -760,7 +760,7 @@ func getStreamEntriesAdded(cmd *shared.Command, streamKey string) int64 {
 		return -1
 	}
 	if elem, ok := snap.NetAdds["entries-added"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
@@ -786,7 +786,7 @@ func getIdmpGeneration(cmd *shared.Command, streamKey string) int64 {
 		return 0
 	}
 	if elem, ok := snap.NetAdds["idmp-generation"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
@@ -839,7 +839,7 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 				if s == seq {
 					continue // skip the entry we just inserted
 				}
-				r := elem.Data.GetRaw()
+				r := elem.Data.Decompress()
 				if len(r) >= 32 {
 					entryGen := int64(binary.LittleEndian.Uint64(r[24:32]))
 					if entryGen != gen {
@@ -929,7 +929,7 @@ func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq s
 	if !exists {
 		return shared.StreamID{}, false
 	}
-	raw := entry.Data.GetRaw()
+	raw := entry.Data.Decompress()
 	// Support both old 16-byte format and new 24-byte format
 	if len(raw) < 16 {
 		return shared.StreamID{}, false
@@ -984,14 +984,14 @@ func getStreamConfig(cmd *shared.Command, streamKey string) (duration int64, max
 		return
 	}
 	if elem, ok := snap.NetAdds["idmp-duration"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			duration = int64(binary.LittleEndian.Uint64(raw))
 			durationExplicit = true
 		}
 	}
 	if elem, ok := snap.NetAdds["idmp-maxsize"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			maxsize = int64(binary.LittleEndian.Uint64(raw))
 		}
@@ -1006,7 +1006,7 @@ func getIidsAdded(cmd *shared.Command, streamKey string) int64 {
 		return 0
 	}
 	if elem, ok := snap.NetAdds["iids-added"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
@@ -1027,7 +1027,7 @@ func getIidsDuplicates(cmd *shared.Command, streamKey string) int64 {
 		return 0
 	}
 	if elem, ok := snap.NetAdds["iids-duplicates"]; ok {
-		raw := elem.Data.GetRaw()
+		raw := elem.Data.Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}

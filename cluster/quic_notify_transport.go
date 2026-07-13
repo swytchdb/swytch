@@ -264,6 +264,16 @@ func (t *QUICNotifyTransport) dispatchPlaintext(peerID NodeId, plaintext []byte)
 			t.handler.HandleNackNotify(peerID, nack)
 		}
 
+	case PacketTypeKeyFilter:
+		version, filter, err := parseKeyFilterPacket(plaintext)
+		if err != nil {
+			slog.Debug("invalid key filter packet", "peer", peerID, "error", err)
+			return
+		}
+		if t.handler != nil {
+			t.handler.HandleKeyFilter(peerID, version, filter)
+		}
+
 	default:
 		slog.Debug("unknown packet type on QUIC uni-stream", "type", plaintext[0], "peer", peerID)
 	}

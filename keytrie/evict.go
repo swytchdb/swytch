@@ -22,6 +22,7 @@ package keytrie
 import (
 	"math"
 	"sort"
+	"unsafe"
 )
 
 // Eviction policy constants, lifted from CloxCache. The trie runs the policy
@@ -70,11 +71,20 @@ const (
 // decider vetoes a key as an eviction victim (return false to pin it, e.g.
 // system keys). notify fires after a victim leaf is soft-deleted, handing the
 // consumer the dropped key's tips and leaf payload so it can release refs and
-// tear down (e.g. unsubscribe). Both run without any trie lock the consumer
-// could re-enter; keep them prompt.
-func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T)) {
+// tear down (e.g. unsubscribe). pressure reports whether the consumer is
+// currently over its eviction target — the instantaneous condition that gates
+// graduation counting in bumpAccess (see underPressure). All three run without
+// any trie lock the consumer could re-enter; keep them prompt.
+//
+// decider must be installed before any Insert: the sweep reads each leaf's pin
+// verdict (critNode.pinned) cached at creation, so a leaf written before the
+// decider exists would carry the default (unpinned) verdict. The memory
+// governor installs the hooks inside NewEngine, before any write, so this
+// holds.
+func (c *Critbit[T]) SetEvictHooks(decider func(key string) bool, notify func(key string, tips []EffectRef, data *T), pressure func() bool) {
 	c.evictDecider = decider
 	c.evictNotify = notify
+	c.underPressure = pressure
 	// Hooks are only ever consumed by EvictBounded, so their presence marks
 	// eviction as active: bumpAccess then maintains the freq/LRU/adaptive-k
 	// bookkeeping. Without them, reads skip that bookkeeping entirely.
@@ -136,8 +146,11 @@ func (c *Critbit[T]) EvictStats() EvictStats {
 		rate = float64(grad) / float64(total)
 	}
 	var hitRate float64
-	if ops := c.windowOps.Load(); ops > 0 {
-		hitRate = float64(c.windowHits.Load()) / float64(ops)
+	if ops := c.windowOps.load(); ops > 0 {
+		// windowHits/windowOps are bumped as two separate atomics, so a reader can
+		// momentarily observe more hits than ops; clamp so the rate never exceeds 1.
+		hits := min(c.windowHits.load(), ops)
+		hitRate = float64(hits) / float64(ops)
 	}
 	return EvictStats{
 		K:                  c.evictK.Load(),
@@ -177,25 +190,6 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	c.evictMu.Lock()
 	defer c.evictMu.Unlock()
 
-	// Eviction here is bursty — driven by memory pressure, it pauses when under
-	// target and resumes when over (unlike CloxCache, where a write over capacity
-	// always precipitated an eviction, so eviction was continuous). reachedProt
-	// (the graduation_rate numerator) is bumped on the read path but only decayed
-	// by maybeAdaptK on the eviction path, so across a pause it accumulates with
-	// nothing balancing it: graduation_rate explodes on resume and rails adaptive
-	// k. When eviction resumes after a real gap (the read clock advanced past a
-	// full adapt window with no EvictBatch), reset the windowed graduation/eviction
-	// counters so the rate measures this episode from scratch. The learned k and
-	// rate thresholds persist — only the windowed measurement restarts.
-	now := c.clock.Load()
-	if last := c.lastEvictClock.Load(); last != 0 && now-last > hitRateWindowSize {
-		c.reachedProt.Store(0)
-		c.evictedUnprot.Store(0)
-		c.evictedProt.Store(0)
-		c.lastAdaptCheck.Store(0)
-	}
-	c.lastEvictClock.Store(now)
-
 	k := c.evictK.Load()
 	// Window: wide enough to choose the want oldest cold leaves with some
 	// selectivity (so recent writes are spared), but bounded to a small multiple
@@ -233,8 +227,11 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			}
 			return
 		}
-		if c.evictDecider != nil && !c.evictDecider(leaf.key) {
-			return // pinned (e.g. a system key)
+		if leaf.pinned {
+			return // pinned (e.g. a system key) — verdict cached at leaf creation
+		}
+		if leaf.pins.Load() != 0 {
+			return // dynamically pinned (e.g. cloud outbox holds un-acked uploads)
 		}
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access
@@ -259,9 +256,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	victims := make([]evicted, 0, len(cands))
 	for _, cd := range cands {
 		leaf := cd.leaf
-		// Claim: deleted=false means a live, linked leaf, so a successful CAS
-		// false→true is an atomic claim. A lost CAS means a concurrent delete won.
-		if !leaf.deleted.CompareAndSwap(false, true) {
+		if !c.claimForEviction(leaf) {
 			continue
 		}
 		tips := leaf.tips.Load()
@@ -300,7 +295,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			// previously-cold key) so the adaptive-k clock keeps advancing — without
 			// this, k freezes exactly when ghost reclaims dominate (cold-scarce).
 			c.evictedUnprot.Add(1)
-		} else if fbVictim != nil && fbVictim.deleted.CompareAndSwap(false, true) {
+		} else if fbVictim != nil && c.claimForEviction(fbVictim) {
 			tips := fbVictim.tips.Load()
 			data := fbVictim.data.Load()
 			fbVictim.tips.Store(nil)
@@ -336,6 +331,25 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		return 1
 	}
 	return len(victims)
+}
+
+// claimForEviction atomically claims a live leaf as an eviction victim and
+// revalidates its dynamic pins. Claim: deleted=false means a live, linked
+// leaf, so a successful CAS false→true is an atomic claim (a lost CAS means a
+// concurrent delete won). The pin/claim race is resolved Dekker-style: Pin
+// increments then re-reads deleted (undoing if set); the claimer claims then
+// re-reads pins. With seq-cst atomics exactly one side observes the other, so
+// a pin can never be stranded on an evicted leaf and a pinned leaf can never
+// be evicted — whichever write lands second detects the first.
+func (c *Critbit[T]) claimForEviction(leaf *critNode[T]) bool {
+	if !leaf.deleted.CompareAndSwap(false, true) {
+		return false
+	}
+	if leaf.pins.Load() != 0 {
+		leaf.deleted.Store(false)
+		return false
+	}
+	return true
 }
 
 // ghostCap bounds how many ghosts (freq-only memory of evicted keys) the trie
@@ -381,7 +395,9 @@ func (c *Critbit[T]) promoteIfGhost(leaf *critNode[T]) {
 		nf := min(-f+1, maxLeafFreq)
 		if leaf.freq.CompareAndSwap(f, nf) {
 			c.ghostCount.Add(-1)
-			c.windowOps.Add(1)
+			// A returning ghost is a window miss (op, not hit). Shard by the
+			// reactivated leaf's address, same as the live-hit path.
+			c.windowOps.add(unsafe.Pointer(leaf), 1)
 			return
 		}
 	}
@@ -424,8 +440,11 @@ func (c *Critbit[T]) maybeAdaptK() {
 
 	// Self-tune the rate thresholds from the hit-rate gradient once the
 	// window has enough samples.
-	if ops := c.windowOps.Load(); ops >= hitRateWindowSize {
-		hitRate := uint64(float64(c.windowHits.Load()) / float64(ops) * 10000)
+	if ops := c.windowOps.load(); ops >= hitRateWindowSize {
+		// Clamp: the two counters are bumped independently, so hits can briefly
+		// read above ops — never let the gradient see a rate over 1.
+		hits := min(c.windowHits.load(), ops)
+		hitRate := uint64(float64(hits) / float64(ops) * 10000)
 		prev := c.prevHitRate.Load()
 		dir := c.lastKDir.Load()
 		if prev > 0 && dir != 0 {
@@ -451,8 +470,13 @@ func (c *Critbit[T]) maybeAdaptK() {
 			}
 		}
 		c.prevHitRate.Store(hitRate)
-		c.windowHits.Store(0)
-		c.windowOps.Store(0)
+		// bumpAccess bumps hits before ops. Resetting in the same order (ops
+		// first, hits last) means a concurrent access straddling the reset has its
+		// hits increment wiped while its ops increment survives, so the residual
+		// is always ops >= hits — never a persisted windowHits > windowOps skew
+		// bleeding into the next window.
+		c.windowOps.reset()
+		c.windowHits.reset()
 	}
 
 	rate := float64(graduated) / float64(total)
@@ -509,7 +533,13 @@ func (c *Critbit[T]) sweepLeaves(base int, fn func(*critNode[T])) {
 		idx := (hand + i) % total
 		chunk := chunks[idx/chunkSize]
 		if chunk == nil {
-			continue // chunk was reclaimed (all its leaves died)
+			// Chunk was reclaimed and not recycled. Jump the hand to the next
+			// chunk boundary in one step — paying one iteration per dead slot
+			// made the sweep O(high-water mark) on a churned arena, and the
+			// sweep runs under the reap read-lock with evictMu held, so every
+			// wasted iteration is serialized against writers.
+			i += chunkSize - 1 - idx%chunkSize
+			continue
 		}
 		n := &chunk[idx%chunkSize]
 		if n.deleted.Load() {

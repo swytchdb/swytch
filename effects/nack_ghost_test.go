@@ -52,7 +52,7 @@ func (b *selectiveBroadcaster) ReplicateTo(notify *pb.OffsetNotify, _ []byte, ta
 	}}, nil
 }
 
-func (b *selectiveBroadcaster) FetchFromAny(ref *pb.EffectRef) ([]byte, error) {
+func (b *selectiveBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
 	if data, ok := b.fetchable[Tip{ref.NodeId, ref.Offset}]; ok && data != nil {
 		return data, nil
 	}
@@ -266,6 +266,7 @@ func TestEnsureSubscribed_AllTipsUnreachable_RetriesBootstrap(t *testing.T) {
 	}
 
 	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
 	defer e.closed.Store(true) // stop retryBootstrap on test exit
 
 	// Blocking variant: exercises the "all tips unreachable → retry" path.
@@ -333,6 +334,7 @@ func TestEnsureSubscribed_Partition_FailsCleanly(t *testing.T) {
 	}
 
 	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
 
 	err := e.ensureSubscribed(key)
 	if !errors.Is(err, ErrRegionPartitioned) {
@@ -340,6 +342,72 @@ func TestEnsureSubscribed_Partition_FailsCleanly(t *testing.T) {
 	}
 	if _, ok := e.subscriptions.Load(key); ok {
 		t.Fatal("subscription state not deleted after partition failure; future calls won't re-bootstrap")
+	}
+}
+
+// TestEnsureSubscribed_Partition_UnsafeProceeds: in UnsafeMode a minority
+// partition never fails the subscribe — there is no majority to gate on. The
+// bootstrap completes with whatever the reachable peers returned and the
+// subscription state stays ready so later calls don't re-bootstrap.
+func TestEnsureSubscribed_Partition_UnsafeProceeds(t *testing.T) {
+	const key = "membership"
+	bc := &selectiveBroadcaster{
+		mockBroadcaster: mockBroadcaster{
+			peerIDs:                 []pb.NodeID{7},
+			allRegionPeersReachable: false, // simulate minority partition
+		},
+		nackTips:  nil,
+		fetchable: map[Tip][]byte{},
+	}
+
+	e := newTestEngine(bc)
+
+	// Blocking variant: the async-announce fast path would trivially pass;
+	// the gate under test sits on the blocking bootstrap.
+	if err := e.ensureSubscribedBlocking(key); err != nil {
+		t.Fatalf("unsafe minority subscribe must not error, got %v", err)
+	}
+	state, ok := e.subscriptions.Load(key)
+	if !ok {
+		t.Fatal("subscription state missing after successful unsafe bootstrap")
+	}
+	select {
+	case <-state.ready:
+	default:
+		t.Fatal("subscription state not marked ready")
+	}
+	if state.incomplete.Load() {
+		t.Fatal("subscription state should not be incomplete")
+	}
+}
+
+// TestEnsureSubscribed_Unsafe_UnreachablePeersDoNotBlock: an UnsafeMode
+// engine whose only peers never respond (ghost members) proceeds immediately
+// instead of spinning the 30s bootstrap retry loop and erroring — dead
+// replicas must never block reads or writes.
+func TestEnsureSubscribed_Unsafe_UnreachablePeersDoNotBlock(t *testing.T) {
+	const key = "membership"
+	bc := &mockBroadcaster{
+		peerIDs:                 []pb.NodeID{7},
+		allRegionPeersReachable: false,
+		replicateErr:            errors.New("timeout: no recent network activity"),
+	}
+
+	e := newTestEngine(bc)
+
+	// Blocking variant: the async-announce fast path would trivially pass;
+	// the retry loop under test sits on the blocking bootstrap.
+	start := time.Now()
+	err := e.ensureSubscribedBlocking(key)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("unsafe subscribe with unreachable peers must not error, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("unsafe subscribe must not spin the bootstrap retry loop, took %v", elapsed)
+	}
+	if state, ok := e.subscriptions.Load(key); !ok || state.incomplete.Load() {
+		t.Fatal("subscription state should be present and complete")
 	}
 }
 
@@ -361,6 +429,7 @@ func TestRetryBootstrap_ShutdownUnblocksWaiters(t *testing.T) {
 	}
 
 	e := newTestEngine(bc)
+	e.safety.Store(&safetyMap{defaultMode: SafeMode})
 
 	if err := e.ensureSubscribedBlocking(key); !errors.Is(err, ErrBootstrapIncomplete) {
 		t.Fatalf("expected ErrBootstrapIncomplete, got %v", err)

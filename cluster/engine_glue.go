@@ -99,11 +99,14 @@ func (r *EngineLogReader) ReadEffect(ref *pb.EffectRef) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("effect not found at %v", ref)
 	}
-	return marshalEffectToWire(eff)
+	return MarshalEffectWire(eff)
 }
 
-// marshalEffectToWire serializes an Effect to the wire format.
-func marshalEffectToWire(eff *pb.Effect) ([]byte, error) {
+// MarshalEffectWire serializes an Effect to the peer-fetch wire format:
+// [4 bytes LE keyLen][key][proto-marshalled effect]. Exported so external
+// durability layers (the cloud dataplane's internal store) can produce blobs
+// the engine's fetch path parses directly.
+func MarshalEffectWire(eff *pb.Effect) ([]byte, error) {
 	protoData, err := effects.MarshalEffect(eff)
 	if err != nil {
 		return nil, err

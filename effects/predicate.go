@@ -62,7 +62,7 @@ func (e *Engine) collectTxnEffectsOnKey(txnID, key string, startTips ...Tip) (
 			continue
 		}
 		visited[off] = true
-		eff, err := e.getEffect(off)
+		eff, err := e.getEffect(key, off)
 		if err != nil {
 			continue
 		}

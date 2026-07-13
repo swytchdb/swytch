@@ -41,6 +41,12 @@ import (
 // on the leader's fresh view.
 const adaptiveSerializationEnabled = false
 
+// ForwardingEnabled reports whether adaptive-serialization forwarding is
+// compiled in. The redis handler checks it before extracting command keys
+// that would only feed Forward/ForwardExec's early return — as a constant,
+// the whole forwarding block dead-code-eliminates while disabled.
+func ForwardingEnabled() bool { return adaptiveSerializationEnabled }
+
 // tipSerializationThreshold is the number of tips on a key before
 // emitting a serialization request. Non-transactional writes (commutative
 // ops) don't trigger abort-count escalation, so this provides a second
@@ -221,7 +227,7 @@ func (e *Engine) selectSerializationLeader(key string) pb.NodeID {
 	contenders := make(map[pb.NodeID]struct{})
 	contenders[e.nodeID] = struct{}{} // self is always a contender
 	for _, tipOff := range tips.Tips() {
-		eff, err := e.getEffect(tipOff)
+		eff, err := e.getEffect(key, tipOff)
 		if err != nil {
 			continue
 		}

@@ -74,23 +74,24 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const keys = 64
 	names := make([]string, keys)
-	for k := 0; k < keys; k++ {
+	for k := range keys {
 		key := fmt.Sprintf("user:c%d", k)
 		names[k] = key
 		off := log.putEffect(&pb.Effect{
 			Key: []byte(key), Hlc: sTs(int64(k + 1)), NodeId: 1,
-			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d", k)))},
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d", k))},
 		})
 		e.index.Insert(key, nil, keytrie.NewTipSet(off))
 	}
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
@@ -104,9 +105,7 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 			}
 		}(g)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -115,7 +114,7 @@ func TestRefcount_ConcurrentReadsVsReclaim(t *testing.T) {
 			}
 			e.reclaimUnreferenced()
 		}
-	}()
+	})
 
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
@@ -151,10 +150,11 @@ func TestRefcount_SubscriptionLifecycleEvictAll(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const n = 200
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := fmt.Sprintf("user:s%d", i)
 		if err := e.ensureSubscribed(key); err != nil {
 			t.Fatalf("ensureSubscribed(%s): %v", key, err)
@@ -208,18 +208,19 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const keys = 100
 	const rewrites = 10
-	for k := 0; k < keys; k++ {
+	for k := range keys {
 		key := fmt.Sprintf("user:k%d", k)
 		var curTip Tip
 		hasCur := false
-		for w := 0; w < rewrites; w++ {
+		for w := range rewrites {
 			eff := &pb.Effect{
 				Key: []byte(key), Hlc: sTs(int64(k*1000 + w + 1)), NodeId: 1,
-				Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("v%d-%d", k, w)))},
+				Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d-%d", k, w))},
 			}
 			if hasCur {
 				eff.Deps = []*pb.EffectRef{toPbRef(curTip)}
@@ -254,6 +255,62 @@ func TestRefcount_ChurnEvictAllReclaimsPool(t *testing.T) {
 	}
 }
 
+// TestReleaseQueue_ZeroesDrainedEntries pins the release buffer's retention
+// contract: after drainPendingReleases, no drained evictedKey may remain
+// reachable through either buffer's backing array. A retained entry pins its
+// leafState → cached subdag → effect payloads, so a queue that holds drained
+// items (the failure mode of xsync's UMPSCQueue, which never zeroes dequeued
+// slots and pools consumed segments fully populated) keeps gigabytes of
+// evicted state live and the memory governor permanently over target.
+func TestReleaseQueue_ZeroesDrainedEntries(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	e.index.SetEvictHooks(
+		func(key string) bool { return !isSystemKey([]byte(key)) },
+		e.onLeafEvicted,
+		func() bool { return true },
+	)
+
+	const keys = 50
+	for k := range keys {
+		key := fmt.Sprintf("user:k%d", k)
+		off := log.putEffect(&pb.Effect{
+			Key: []byte(key), Hlc: sTs(int64(k + 1)), NodeId: 1,
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "v%d", k))},
+		})
+		e.updateIndex(key, nil, off)
+		if _, _, _, err := e.GetSnapshot(key); err != nil {
+			t.Fatalf("GetSnapshot(%s): %v", key, err)
+		}
+	}
+	for e.index.Size() > 0 {
+		if e.index.EvictBatch(256) == 0 {
+			break
+		}
+	}
+	if got := e.ReleaseQueueDepth(); got == 0 {
+		t.Fatal("expected pending releases after evict-all")
+	}
+
+	e.drainPendingReleases()
+
+	if got := e.ReleaseQueueDepth(); got != 0 {
+		t.Fatalf("ReleaseQueueDepth = %d after drain; want 0", got)
+	}
+	var zero evictedKey
+	for _, buf := range [][]evictedKey{
+		e.releaseItems[:cap(e.releaseItems)],
+		e.releaseSpare[:cap(e.releaseSpare)],
+	} {
+		for i, ek := range buf {
+			if ek.key != zero.key || ek.tips != nil || ek.ls != nil {
+				t.Fatalf("drained entry %d still populated (key=%q tips=%v ls=%p); "+
+					"the buffer must be cleared or it pins the evicted chain", i, ek.key, ek.tips, ek.ls)
+			}
+		}
+	}
+}
+
 // TestRefcount_EvictAllReclaimsPool is the load-bearing invariant test for the
 // vertex-pool refcount protocol. Every per-key structure that pins a vertex —
 // the index tip, the cached subdag (publishSubdag), and the reduced-result memo
@@ -269,14 +326,15 @@ func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const n = 300
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := fmt.Sprintf("user:k%d", i)
 		off := log.putEffect(&pb.Effect{
 			Key: []byte(key), Hlc: sTs(int64(10 + i)), NodeId: 1,
-			Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte(fmt.Sprintf("value-%d", i)))},
+			Kind: &pb.Effect_Data{Data: scalarInsertRaw(fmt.Appendf(nil, "value-%d", i))},
 		})
 		e.index.Insert(key, nil, keytrie.NewTipSet(off))
 		// Read it so the subdag and reduced memo are built and pin their vertices.
@@ -307,6 +365,115 @@ func TestRefcount_EvictAllReclaimsPool(t *testing.T) {
 	}
 }
 
+// TestDrainReclaim_QueueDrivenReclaim covers the governor's per-tick reclaim: a
+// vertex that reaches refs==0 (a dropped adoption, a born-at-zero cache fetch)
+// is freed by drainReclaim alone — the queue is the whole mechanism, there is no
+// full-map scan behind it — while a still-referenced vertex and a pinned system
+// key survive.
+func TestDrainReclaim_QueueDrivenReclaim(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	// Born-at-zero cache fetch: enqueued at birth, freed by the queue drain.
+	cacheTip := Tip{1, 1}
+	p.PutSizedCache(cacheTip, &pb.Effect{Key: []byte("user:c")}, 10)
+
+	// System-key cache entry: also enqueued, but pinned — drainReclaim must skip it.
+	sysTip := Tip{1, 2}
+	p.PutSizedCache(sysTip, &pb.Effect{Key: []byte("__swytch:members")}, 10)
+
+	// Owned vertex (creation ref): never enqueued, must survive the drain.
+	ownedTip := Tip{1, 3}
+	p.PutSized(ownedTip, &pb.Effect{Key: []byte("user:o")}, 10)
+
+	// Adopted then dropped: incref over the creation ref, then two decrefs drive
+	// it back to 0 — only the last transition enqueues it.
+	dropTip := Tip{1, 4}
+	p.PutSized(dropTip, &pb.Effect{Key: []byte("user:d")}, 10) // refs=1 (creation)
+	p.incref(dropTip)                                          // refs=2 (adoption)
+	p.decref(dropTip)                                          // refs=1, no enqueue
+	p.decref(dropTip)                                          // refs=0, enqueue
+
+	if freed := p.drainReclaim(); freed == 0 {
+		t.Fatal("drainReclaim freed nothing; queued refs==0 candidates were not reclaimed")
+	}
+	if _, ok := p.Get(cacheTip); ok {
+		t.Fatal("born-at-zero cache entry survived drainReclaim")
+	}
+	if _, ok := p.Get(dropTip); ok {
+		t.Fatal("dropped (refs→0) vertex survived drainReclaim")
+	}
+	if _, ok := p.Get(sysTip); !ok {
+		t.Fatal("pinned system-key entry was freed by drainReclaim")
+	}
+	if _, ok := p.Get(ownedTip); !ok {
+		t.Fatal("owned (refs>0) vertex was freed by drainReclaim")
+	}
+
+	// A second drain with nothing queued must be a no-op (and must not block on
+	// the empty UMPSCQueue).
+	if freed := p.drainReclaim(); freed != 0 {
+		t.Fatalf("second drainReclaim freed %d bytes; expected an empty-queue no-op", freed)
+	}
+}
+
+// TestPublishSubdag_PinFailureAbortsPublish pins the pin-first protocol: if any
+// topoOrder tip cannot be increfed (missing or claimed by reclaim — a racing
+// eviction), the publish must be abandoned and the refs already taken rolled
+// back. Publishing anyway would retain a pool-dead node off the pool's books —
+// heap-live, invisible to vertex_count, unreachable by eviction.
+func TestPublishSubdag_PinFailureAbortsPublish(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	resident := Tip{1, 1}
+	p.PutSized(resident, &pb.Effect{Key: []byte("user:k")}, 10) // refs=1 (creation)
+	missing := Tip{1, 2}                                        // never pooled
+
+	ls := &leafState{}
+	d := &dag{topoOrder: []Tip{resident, missing}, lcaTip: resident}
+	e.publishSubdag(ls, d, []Tip{missing})
+
+	if ls.subdag.Load() != nil {
+		t.Fatal("subdag published despite a failed pin; it would serve a node the pool no longer owns")
+	}
+	// The rollback must leave the resident vertex at its creation ref alone:
+	// releasing that one ref must make it reclaimable. A leaked pin keeps it
+	// resident; a double rollback panics decref's underflow check.
+	p.decref(resident)
+	p.drainReclaim()
+	if _, ok := p.Get(resident); ok {
+		t.Fatal("pin rollback left an extra ref on the resident vertex")
+	}
+}
+
+// TestPublishSubdag_EvictedLeafRefusesPublish pins the terminal sentinel: once
+// releaseChainRefs has swept a leafState, a racing read's publish must not
+// install a subdag there — no release walk will ever visit that leaf again, so
+// its pin would strand the vertices at refs>0 forever.
+func TestPublishSubdag_EvictedLeafRefusesPublish(t *testing.T) {
+	e := newTestEngine(&mockBroadcaster{})
+	p := e.effectCache
+
+	tip := Tip{1, 1}
+	p.PutSized(tip, &pb.Effect{Key: []byte("user:k")}, 10) // refs=1 (creation)
+
+	ls := &leafState{}
+	e.releaseChainRefs("user:k", nil, ls) // eviction already swept this leaf
+
+	d := &dag{topoOrder: []Tip{tip}, lcaTip: tip}
+	e.publishSubdag(ls, d, []Tip{tip})
+
+	if ls.subdag.Load() != evictedSubdag {
+		t.Fatal("publish displaced the evicted-leaf sentinel")
+	}
+	p.decref(tip) // creation ref; if the publish leaked its pin, refs never reach 0
+	p.drainReclaim()
+	if _, ok := p.Get(tip); ok {
+		t.Fatal("racing publish pinned a vertex on an evicted leaf (ref leaked)")
+	}
+}
+
 // TestEvictBounded_PinsSystemKey asserts the eviction sweep never selects a
 // "__swytch:" key as a victim (the registered decider pins it), while a
 // user key with the same frequency is evicted.
@@ -316,6 +483,7 @@ func TestEvictBounded_PinsSystemKey(t *testing.T) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		func() bool { return true },
 	)
 
 	const sys = "__swytch:members"
@@ -478,6 +646,43 @@ func TestBroadcastUnsubscribe_EmitsUnsub(t *testing.T) {
 	}
 }
 
+// TestBroadcastUnsubscribe_HookSeesResidentVertex pins the OnLocalEffect
+// contract on the eviction path: the hook must observe a resident, owned
+// vertex — the cloud outbox increfs it and panics on a miss, which is what
+// killed every node of the 2026-07-06 evil-trace runs on their first cold
+// eviction batch. And when the hook's holder releases, the vertex must be
+// reclaimable, not pinned forever by an unreleasable creation ref.
+func TestBroadcastUnsubscribe_HookSeesResidentVertex(t *testing.T) {
+	bc := &mockBroadcaster{}
+	e := newTestEngine(bc)
+
+	const key = "user:k"
+	e.subscriptions.Store(key, &subscriptionState{ready: make(chan struct{})})
+
+	var hookTip Tip
+	increfOK := false
+	e.OnLocalEffect = func(offset Tip, eff *pb.Effect) {
+		hookTip = offset
+		increfOK = e.effectCache.Incref(offset)
+	}
+	e.broadcastUnsubscribe(key, []Tip{{1, 42}})
+
+	if !increfOK {
+		t.Fatal("OnLocalEffect could not incref the just-emitted unsub — vertex not installed before the hook fired")
+	}
+	// The hook's holder is now the sole owner (broadcastUnsubscribe dropped
+	// the creation ref after firing); releasing must reach zero cleanly.
+	// Drain the reclaim queue (no governor in tests) and assert the vertex is
+	// gone: a leaked reference keeps refs > 0, the reclaim claim fails, and
+	// the vertex survives — which an Incref probe could not distinguish from
+	// a clean refs==0.
+	e.effectCache.Decref(hookTip)
+	e.reclaimUnreferenced()
+	if _, ok := e.effectCache.Get(hookTip); ok {
+		t.Fatal("unsub vertex survived reclaim after its last ref was released — a reference leaked")
+	}
+}
+
 // TestBroadcastUnsubscribe_ShutdownShortCircuit asserts teardown during
 // shutdown performs no state changes — the broadcaster may already be gone.
 func TestBroadcastUnsubscribe_ShutdownShortCircuit(t *testing.T) {
@@ -577,7 +782,7 @@ func TestNewEngine_PinsSystemKeysInCache(t *testing.T) {
 func TestEvictBounded_CASProtectsConcurrentWrites(t *testing.T) {
 	bc := &mockBroadcaster{}
 	e := newTestEngine(bc)
-	e.index.SetEvictHooks(func(string) bool { return true }, e.onLeafEvicted)
+	e.index.SetEvictHooks(func(string) bool { return true }, e.onLeafEvicted, func() bool { return true })
 
 	const key = "user:contended"
 	const iterations = 200

@@ -390,17 +390,12 @@ func TestACLManager_SecurityLog(t *testing.T) {
 }
 
 func TestHandler_ACLCommands(t *testing.T) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 1000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	conn := &shared.Connection{
-		SelectedDB: 0,
-		User:       testUser,
-		Ctx:        context.Background(),
+		User: testUser,
+		Ctx:  context.Background(),
 	}
 
 	buf := &bytes.Buffer{}
@@ -489,11 +484,7 @@ func TestHandler_ACLCommands(t *testing.T) {
 }
 
 func TestHandler_Authentication(t *testing.T) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 1000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	// Set up a user with a password
@@ -522,9 +513,8 @@ func TestHandler_Authentication(t *testing.T) {
 
 	// Test unauthenticated connection
 	conn := &shared.Connection{
-		SelectedDB: 0,
-		User:       nil, // Not authenticated
-		Ctx:        context.Background(),
+		User: nil, // Not authenticated
+		Ctx:  context.Background(),
 	}
 
 	// Should reject commands other than AUTH
@@ -571,11 +561,7 @@ func TestHandler_Authentication(t *testing.T) {
 }
 
 func TestHandler_CommandACL(t *testing.T) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 1000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	// Create a user with limited permissions
@@ -595,10 +581,9 @@ func TestHandler_CommandACL(t *testing.T) {
 	w := shared.NewWriter(buf)
 
 	conn := &shared.Connection{
-		SelectedDB: 0,
-		User:       limitedUser,
-		Username:   "limited",
-		Ctx:        context.Background(),
+		User:     limitedUser,
+		Username: "limited",
+		Ctx:      context.Background(),
 	}
 
 	// Should allow GET (read command)

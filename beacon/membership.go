@@ -85,7 +85,6 @@ func buildMemberRemove(nodeID uint64) *pb.Effect {
 	}
 }
 
-
 // parseMembership extracts the member list from a reduced snapshot of __swytch:members.
 func parseMembership(reduced *pb.ReducedEffect) []Member {
 	if reduced == nil || reduced.NetAdds == nil {
@@ -98,7 +97,7 @@ func parseMembership(reduced *pb.ReducedEffect) []Member {
 		if nodeID == 0 {
 			continue
 		}
-		addr := string(elem.Data.GetRaw())
+		addr := string(elem.Data.Decompress())
 		if addr == "" {
 			continue
 		}

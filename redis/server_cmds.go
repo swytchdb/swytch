@@ -259,7 +259,7 @@ func (h *Handler) handleFlushAll(cmd *shared.Command, w *shared.Writer) {
 }
 
 func (h *Handler) handleSwapDB(cmd *shared.Command, w *shared.Writer) {
-	w.WriteError("ERR SWAPDB is not supported with the effects engine")
+	w.WriteError("ERR SWAPDB is not supported: there is only one database")
 }
 
 func (h *Handler) handleTime(cmd *shared.Command, w *shared.Writer) {
@@ -723,7 +723,11 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer, db *shared
 		// ReducedEffect and would report nonzero size for a TTL-
 		// expired key.
 		snap, _, err := cmd.Context.GetSnapshot(key)
-		if err != nil || snap == nil {
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
+		if snap == nil {
 			w.WriteNullBulkString()
 			return
 		}
@@ -765,41 +769,38 @@ func snapshotMemoryUsage(snap *pb.ReducedEffect, key string) int64 {
 
 	switch snap.Collection {
 	case pb.CollectionKind_SCALAR:
-		if s := snap.GetScalar(); s != nil {
-			switch v := s.GetValue().(type) {
-			case *pb.DataEffect_Raw:
-				size += int64(len(v.Raw))
-			case *pb.DataEffect_IntVal:
-				size += 8
-			case *pb.DataEffect_FloatVal:
-				size += 8
-			}
-		}
+		size += valueMemorySize(snap.GetScalar())
 	case pb.CollectionKind_KEYED:
 		for id, elem := range snap.GetNetAdds() {
 			size += int64(len(id)) + 16 // element ID + overhead
-			if d := elem.GetData(); d != nil {
-				if raw := d.GetRaw(); raw != nil {
-					size += int64(len(raw))
-				} else {
-					size += 8
-				}
-			}
+			size += valueMemorySize(elem.GetData())
 		}
 	case pb.CollectionKind_ORDERED:
 		for _, elem := range snap.GetOrderedElements() {
 			size += 16 // per-element overhead
-			if d := elem.GetData(); d != nil {
-				if raw := d.GetRaw(); raw != nil {
-					size += int64(len(raw))
-				} else {
-					size += 8
-				}
-			}
+			size += valueMemorySize(elem.GetData())
 		}
 	}
 
 	return size
+}
+
+// valueMemorySize is one value's contribution to MEMORY USAGE: the bytes the
+// value actually occupies in reduced state — a compressed value counts its
+// stored (compressed) length, not what it would inflate to.
+func valueMemorySize(d *pb.DataEffect) int64 {
+	if d == nil {
+		return 0
+	}
+	switch v := d.Value.(type) {
+	case *pb.DataEffect_Raw:
+		return int64(len(v.Raw))
+	case *pb.DataEffect_Compressed:
+		return int64(len(v.Compressed.GetData()))
+	case *pb.DataEffect_IntVal, *pb.DataEffect_FloatVal:
+		return 8
+	}
+	return 0
 }
 
 // registerServerCommands registers server/admin commands.

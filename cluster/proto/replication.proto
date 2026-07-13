@@ -43,6 +43,27 @@ enum Placement {
 // --- Effect: the fundamental unit of state change ---
 
 // DataEffect carries a mutation to a key's value.
+// Compression identifies the codec of a CompressedValue.
+enum Compression {
+  COMPRESSION_NONE = 0;
+  COMPRESSION_ZSTD = 1;
+}
+
+// CompressedValue is a raw value stored under a compression codec: data is
+// codec output, raw_len its inflated length. A distinct value arm rather than
+// a flag on raw, so a consumer that never learned about compression sees no
+// raw value at all (loud) instead of codec bytes masquerading as the value
+// (silent). Writers compress by choice (--compress, and only when it actually
+// shrinks the value); every reader inflates unconditionally, so nodes with
+// different settings interoperate on one DAG. Travels with the effect
+// everywhere — peers, cloud, snapshots — and billing declares raw_len, not
+// the stored length.
+message CompressedValue {
+  Compression codec = 1;
+  uint64 raw_len = 2;
+  bytes data = 3;
+}
+
 message DataEffect {
   EffectOp op = 1;
   MergeRule merge = 2;
@@ -54,6 +75,7 @@ message DataEffect {
     bytes raw = 10;
     sint64 int_val = 11;
     double float_val = 12;
+    CompressedValue compressed = 13;
   }
 }
 

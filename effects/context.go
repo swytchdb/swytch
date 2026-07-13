@@ -29,7 +29,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/keytrie"
 	"github.com/swytchdb/swytch/tracing"
@@ -235,25 +234,11 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		if c.txSnapshot != nil {
 			return c.getSnapshotFromTx(key)
 		}
-		// Read-only fast path: a key we don't already hold and that no peer
-		// has announced has no committed value cluster-wide (when we're in the
-		// majority partition), so the read is a miss. We must NOT skip the
-		// subscription — staying silent means future peer writes never route to
-		// us and the key splits brain. Instead ensureSubscribed takes its
-		// async-announce path (no peer holds the key, so nothing to bootstrap;
-		// it installs locally and fire-and-forgets the SubscriptionEffect) and
-		// we return the miss without blocking. A filter false-positive, or a
-		// key we hold locally, falls through to the normal subscribe + read.
-		if c.readOnly &&
-			c.engine.index.Contains(key) == nil &&
-			c.engine.inMajorityPartition() &&
-			!c.engine.clusterMaybeHasKey(key) {
-			if err := c.engine.ensureSubscribed(key); err != nil {
-				return nil, nil, err
-			}
-			return nil, nil, nil
-		}
-		// No unflushed effects for this key — delegate to committed state
+		// No unflushed effects for this key — delegate to committed state.
+		// A definite miss (nothing local, no peer filter admits the key) is
+		// answered by engine.GetSnapshot's free-miss gate without announcing
+		// a subscription; with Cloud configured its backstop still checks
+		// durable storage before deciding the read is a miss.
 		result, tips, chainLen, err := c.engine.GetSnapshot(key)
 		if err != nil {
 			return nil, nil, err
@@ -262,7 +247,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 		// Guard on result != nil: engine.GetSnapshot is meant to zero chainLen
 		// when result is nil, but the check is defensive against future
 		// regressions in that contract.
-		compactThreshold := 20 + rand.IntN(31)
+		compactThreshold := 5 + rand.IntN(10)
 		if c.engine.broadcaster == nil {
 			compactThreshold = 5
 		}
@@ -282,7 +267,7 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 				State:      result,
 			}
 			for _, t := range tips {
-				cached, err := c.engine.getEffect(t)
+				cached, err := c.engine.getEffect(key, t)
 				if err != nil {
 					continue
 				}
@@ -395,7 +380,11 @@ func (c *Context) getSnapshotFromTx(key string) (*pb.ReducedEffect, []Tip, error
 // pairwise fork-choice on the key. Without the TxnId, the noop is an
 // anonymous committed effect that other writers can chain off,
 // producing false sequential relationships (the run-25890153673 G1a).
-func (c *Context) Watch(key string) {
+//
+// Errors fail the WATCH: a read that can't be answered (e.g. the Cloud
+// consult failed for an evicted key) must not silently record hadData=false —
+// the EXEC verdict would then rest on a fabricated observation.
+func (c *Context) Watch(key string) error {
 	if c.watchedKeys == nil {
 		c.watchedKeys = make(map[string]*watchedKeyState)
 	}
@@ -407,7 +396,10 @@ func (c *Context) Watch(key string) {
 	}
 
 	// Check if key has actual data BEFORE emitting the NOOP
-	snap, _, _, _ := c.engine.GetSnapshot(key)
+	snap, _, _, err := c.engine.GetSnapshot(key)
+	if err != nil {
+		return err
+	}
 	hadData := snap != nil
 
 	// Emit NOOP to record the observation in the causal log. We set
@@ -420,7 +412,7 @@ func (c *Context) Watch(key string) {
 		Kind:  &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 	}); err != nil {
 		slog.Error("Watch: NOOP emit failed", "key", key, "error", err)
-		return
+		return err
 	}
 
 	// Capture the NOOP offset before Flush clears c.keys
@@ -428,7 +420,9 @@ func (c *Context) Watch(key string) {
 
 	// Flush immediately so the NOOP is durable and in the index.
 	// ExecuteInto's post-handler Flush will be a no-op (c.keys empty).
-	c.Flush()
+	if err := c.Flush(); err != nil {
+		return err
+	}
 
 	// Capture the post-flush TipSet pointer (immutable — pointer identity = equality)
 	tips := c.engine.index.Contains(key)
@@ -438,6 +432,7 @@ func (c *Context) Watch(key string) {
 		hadData:    hadData,
 		flushGen:   c.engine.flushGeneration.Load(),
 	}
+	return nil
 }
 
 // ClearWatches removes all watched keys. Called from UNWATCH, DISCARD,
@@ -449,7 +444,6 @@ func (c *Context) Watch(key string) {
 func (c *Context) ClearWatches() {
 	clear(c.watchedKeys)
 	if !c.inTx {
-		c.dropTxRegistration()
 		c.txnID = ""
 	}
 }
@@ -472,31 +466,6 @@ func (c *Context) BeginTx() {
 	// the txn sees a consistent committed state.
 	if c.txSnapshot == nil {
 		c.txSnapshot = c.engine.index.Snapshot()
-	}
-	// Register the snapshot with the engine so reconstruct can derive
-	// the pre-tx walk cutoff from txID alone.
-	if c.txSnapshots() != nil && c.txnID != "" {
-		c.txSnapshots().Store(c.txnID, c.txSnapshot)
-	}
-}
-
-// txSnapshots is a tiny wrapper to make the engine-side per-tx snapshot
-// map easier to access from Context.
-func (c *Context) txSnapshots() *xsync.Map[string, keytrie.KeyIndex] {
-	if c.engine == nil {
-		return nil
-	}
-	return c.engine.txSnapshots
-}
-
-// dropTxRegistration removes this Context's tx snapshot from the engine.
-// Safe to call with empty txnID. Call before clearing c.txnID.
-func (c *Context) dropTxRegistration() {
-	if c.txnID == "" {
-		return
-	}
-	if m := c.txSnapshots(); m != nil {
-		m.Delete(c.txnID)
 	}
 }
 
@@ -533,7 +502,6 @@ func (c *Context) CheckWatches() bool {
 		// Key was modified — abort
 		clear(c.watchedKeys)
 		c.inTx = false
-		c.dropTxRegistration()
 		c.txnID = ""
 		c.txSnapshot = nil
 		return false
@@ -550,7 +518,6 @@ func (c *Context) CheckWatches() bool {
 			slog.Error("CheckWatches: transactional NOOP emit failed", "key", key, "error", err)
 			clear(c.watchedKeys)
 			c.inTx = false
-			c.dropTxRegistration()
 			c.txnID = ""
 			c.txSnapshot = nil
 			return false
@@ -570,7 +537,6 @@ func (c *Context) Abort() {
 	clear(c.keys)
 	clear(c.watchedKeys)
 	c.inTx = false
-	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
@@ -579,6 +545,12 @@ func (c *Context) Abort() {
 // state so that consecutive effects on the same key form a dep chain.
 // The index is NOT updated until Flush.
 //
+// Emit takes ownership of eff: it fills causality fields in place and
+// caches the message itself, so the caller must not retain, reuse, or
+// mutate eff (or its submessages) after the call. Byte-slice fields may
+// alias pooled buffers (e.g. RESP parser args) — Emit copies those
+// before caching.
+//
 // For read-modify-write commands, pass the tip offsets returned by
 // GetSnapshot as snapshotTips so that the first effect depends on the
 // tips the handler actually read, not whatever the index contains now.
@@ -586,16 +558,14 @@ func (c *Context) Abort() {
 func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	key := string(eff.Key)
 
-	// A read-only context may have answered a read-miss without subscribing.
-	// If a command then emits anyway (e.g. HGETEX setting a field TTL), it
-	// must subscribe first — exactly as flushTx does — so the effect
-	// dep-references our own SubscriptionEffect instead of being orphaned in
-	// the DAG. Idempotent and fast in the common case: the key existed, so
-	// GetSnapshot already subscribed and this is a no-op.
-	if c.readOnly {
-		if err := c.engine.ensureSubscribed(key); err != nil {
-			return err
-		}
+	// The effect must dep-reference our own SubscriptionEffect, or the
+	// subscription's offset is orphaned in this node's DAG and the subscriber
+	// graph splits brain (see ensureSubscribed). Reads no longer subscribe on
+	// a definite miss (GetSnapshot's free-miss gate), so ANY context can reach
+	// Emit unsubscribed — authority is claimed here, where state is created.
+	// Allocation-free no-op when already subscribed.
+	if err := c.engine.ensureSubscribed(key); err != nil {
+		return err
 	}
 
 	if tracing.Enabled() {
@@ -673,9 +643,23 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 		}
 	}
 
-	// Clone so the cached *pb.Effect owns its byte slices. Callers
-	// (e.g. RESP parser) may pool the underlying buffers.
-	eff = proto.Clone(eff).(*pb.Effect)
+	// Value compression (--compress): swap raw values for their compressed
+	// form before the effect is owned, marshaled, cached, and broadcast —
+	// the compressed form IS the effect everywhere downstream, and readers
+	// inflate off the per-effect flag at the reduce boundary.
+	if c.engine.compressValues {
+		CompressEffectValues(eff)
+	}
+
+	// Own the byte slices before caching: handler-built effects carry
+	// []byte fields that alias pooled parser buffers, which are recycled
+	// after the command returns while the cached message lives on in the
+	// vertex pool. Only those fields need copying — the message structs
+	// are built fresh per call (Emit already mutated them in place above,
+	// so sharing one across calls was never legal), so a full reflective
+	// proto.Clone here just duplicated every submessage and payload.
+	// A just-compressed raw value is already owned (fresh codec output).
+	ownEffectBytes(eff)
 
 	offset, notify, err := c.rawEmit(eff)
 	if err != nil {
@@ -701,6 +685,53 @@ func (c *Context) Emit(eff *pb.Effect, snapshotTips ...[]Tip) error {
 	}
 
 	return nil
+}
+
+// ownEffectBytes copies the []byte fields of eff that can alias
+// caller-pooled memory. Engine-built kinds (TxnBind, Snapshot,
+// Subscription, Serialization, Noop) own their memory already — a
+// Snapshot's ReducedEffect may share slices with cached effects, but
+// cache memory is immutable and never recycled, so aliasing it is safe.
+func ownEffectBytes(eff *pb.Effect) {
+	eff.Key = bytes.Clone(eff.Key)
+	switch k := eff.Kind.(type) {
+	case *pb.Effect_Data:
+		d := k.Data
+		d.Reference = bytes.Clone(d.Reference)
+		d.Id = bytes.Clone(d.Id)
+		if v, ok := d.Value.(*pb.DataEffect_Raw); ok {
+			v.Raw = bytes.Clone(v.Raw)
+		}
+		// A compressed arm needs no clone: it only exists as fresh codec
+		// output from CompressEffectValues, never as pooled parser memory.
+	case *pb.Effect_Meta:
+		k.Meta.ElementId = bytes.Clone(k.Meta.ElementId)
+	case *pb.Effect_PubsubMessage:
+		m := k.PubsubMessage
+		m.Channel = bytes.Clone(m.Channel)
+		m.Payload = bytes.Clone(m.Payload)
+	case *pb.Effect_RowWrite:
+		rw := k.RowWrite
+		rw.Pk = bytes.Clone(rw.Pk)
+		for _, col := range rw.Columns {
+			col.BlobVal = bytes.Clone(col.BlobVal)
+		}
+	case *pb.Effect_Observation:
+		ownPredicateBytes(k.Observation.Predicate)
+	}
+}
+
+func ownPredicateBytes(p *pb.Predicate) {
+	if p == nil {
+		return
+	}
+	if p.Literal != nil {
+		p.Literal.BlobVal = bytes.Clone(p.Literal.BlobVal)
+	}
+	ownPredicateBytes(p.Child)
+	for _, c := range p.Children {
+		ownPredicateBytes(c)
+	}
 }
 
 // applySubOps applies a key's deferred peer-subscriber mutations after its leaf
@@ -734,6 +765,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 		if c.engine.effectCache != nil {
 			c.engine.effectCache.Put(offset, eff)
 		}
+		c.engine.fireLocalEffect(offset, eff)
 		return offset, nil, nil
 	}
 
@@ -744,6 +776,7 @@ func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
 	if c.engine.effectCache != nil {
 		c.engine.effectCache.PutSized(offset, eff, len(data))
 	}
+	c.engine.fireLocalEffect(offset, eff)
 
 	notify := BuildOffsetNotify(c.engine.nodeID, offset, eff, data, c.TraceCtx())
 	return offset, notify, nil
@@ -762,7 +795,7 @@ func (c *Context) Flush() error {
 	// already pooled during Emit, so a command that wrote N effects (e.g. value +
 	// type-tag, or a read that also compacted) pays a single bounded eviction
 	// slice here instead of N. The drain itself is cheap — it drops victim tips and
-	// defers their ref-release walk to the governor (see Engine.releaseQueue).
+	// defers their ref-release walk to the governor (see Engine.releaseItems).
 	var err error
 	if !c.inTx {
 		err = c.flushNonTx()
@@ -1386,7 +1419,7 @@ func (c *Context) flushTx() error {
 				}
 				for beatenTxn, beatenOffset := range defeatedSet {
 					verdicts[beatenTxn] = pb.Verdict_LOST
-					loserEff, err := c.engine.getEffect(beatenOffset)
+					loserEff, err := c.engine.getEffect("", beatenOffset)
 					if err != nil {
 						slog.Warn("flushTx: cannot fetch beaten bind for verdict emit",
 							"loser_txn", beatenTxn,
@@ -1562,7 +1595,6 @@ func (c *Context) emitSerializationEffect(key string) {
 func (c *Context) reset() {
 	clear(c.keys)
 	c.inTx = false
-	c.dropTxRegistration()
 	c.txnID = ""
 	c.txSnapshot = nil
 }
@@ -1590,6 +1622,38 @@ func (e *Engine) updateIndex(key string, initialTips *keytrie.TipSet, lastOffset
 			// Insert fires the trie's refDelta hook (applyRefDelta), which
 			// increfs the added tips and decrefs the consumed ones — no manual
 			// refcount call here.
+			return
+		}
+		if e.index.Closed() {
+			// Not a CAS race: Insert fails unconditionally on a closed trie,
+			// so retrying would spin forever during shutdown.
+			return
+		}
+	}
+}
+
+// installTips merges a whole tip frontier into the key's index in one CAS
+// transition, so a concurrent reader observes either the prior frontier or the
+// full merged one — never a partial install. Same accounting as updateIndex:
+// Insert fires the trie's refDelta hook for the diff, and NewTipSet dedupes
+// tips the index already holds.
+func (e *Engine) installTips(key string, tips []Tip) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			slog.Debug("installTips: CAS retry", "key", key, "attempt", attempt)
+		}
+		current := e.index.Contains(key)
+		cur := current.Tips()
+		offsets := make([]Tip, 0, len(cur)+len(tips))
+		offsets = append(offsets, cur...)
+		offsets = append(offsets, tips...)
+		newTips := keytrie.NewTipSet(offsets...)
+		if _, ok := e.index.Insert(key, current, newTips); ok {
+			return
+		}
+		if e.index.Closed() {
+			// Not a CAS race: Insert fails unconditionally on a closed trie,
+			// so retrying would spin forever during shutdown.
 			return
 		}
 	}

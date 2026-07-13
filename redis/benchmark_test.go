@@ -31,11 +31,7 @@ import (
 // ==== String Command Benchmarks ====
 
 func BenchmarkHandler_Set(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -56,11 +52,7 @@ func BenchmarkHandler_Set(b *testing.B) {
 }
 
 func BenchmarkHandler_Get(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -94,11 +86,7 @@ func BenchmarkHandler_Get(b *testing.B) {
 // ==== List Command Benchmarks ====
 
 func BenchmarkHandler_LPush(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -119,11 +107,7 @@ func BenchmarkHandler_LPush(b *testing.B) {
 }
 
 func BenchmarkHandler_RPush(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -144,11 +128,7 @@ func BenchmarkHandler_RPush(b *testing.B) {
 }
 
 func BenchmarkHandler_LPop(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -180,11 +160,7 @@ func BenchmarkHandler_LPop(b *testing.B) {
 }
 
 func BenchmarkHandler_RPop(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -216,11 +192,7 @@ func BenchmarkHandler_RPop(b *testing.B) {
 }
 
 func BenchmarkHandler_LRange(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -252,11 +224,7 @@ func BenchmarkHandler_LRange(b *testing.B) {
 }
 
 func BenchmarkHandler_LIndex(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -290,11 +258,7 @@ func BenchmarkHandler_LIndex(b *testing.B) {
 // ==== Hash Command Benchmarks ====
 
 func BenchmarkHandler_HSet(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -316,11 +280,7 @@ func BenchmarkHandler_HSet(b *testing.B) {
 }
 
 func BenchmarkHandler_HGet(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -356,11 +316,7 @@ func BenchmarkHandler_HGet(b *testing.B) {
 }
 
 func BenchmarkHandler_HGetAll(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -393,11 +349,7 @@ func BenchmarkHandler_HGetAll(b *testing.B) {
 }
 
 func BenchmarkHandler_HIncrBy(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -426,11 +378,7 @@ func BenchmarkHandler_HIncrBy(b *testing.B) {
 // ==== String Increment Benchmarks ====
 
 func BenchmarkHandler_Incr(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -457,11 +405,7 @@ func BenchmarkHandler_Incr(b *testing.B) {
 }
 
 func BenchmarkHandler_IncrBy(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -490,11 +434,7 @@ func BenchmarkHandler_IncrBy(b *testing.B) {
 // ==== Mixed Workload Benchmarks ====
 
 func BenchmarkHandler_Mixed(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -541,11 +481,7 @@ func BenchmarkHandler_Mixed(b *testing.B) {
 // ==== Parallel Benchmarks ====
 
 func BenchmarkHandler_SetParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	b.RunParallel(func(pb *testing.PB) {
@@ -569,11 +505,7 @@ func BenchmarkHandler_SetParallel(b *testing.B) {
 }
 
 func BenchmarkHandler_GetParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -612,11 +544,7 @@ func BenchmarkHandler_GetParallel(b *testing.B) {
 }
 
 func BenchmarkHandler_LPushParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	b.RunParallel(func(pb *testing.PB) {
@@ -640,11 +568,7 @@ func BenchmarkHandler_LPushParallel(b *testing.B) {
 }
 
 func BenchmarkHandler_LPopParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -681,11 +605,7 @@ func BenchmarkHandler_LPopParallel(b *testing.B) {
 }
 
 func BenchmarkHandler_RPopParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -722,11 +642,7 @@ func BenchmarkHandler_RPopParallel(b *testing.B) {
 }
 
 func BenchmarkHandler_MixedParallel(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 100000,
-		MemoryLimit:   64 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -780,11 +696,7 @@ func BenchmarkHandler_MixedParallel(b *testing.B) {
 // ==== Large Value Benchmarks ====
 
 func BenchmarkHandler_SetLargeValue(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 10000,
-		MemoryLimit:   256 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()
@@ -915,11 +827,7 @@ func BenchmarkHandler_LPush_LargeList(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
-			h := NewHandler(HandlerConfig{
-				NumDatabases:  1,
-				CapacityPerDB: 100000,
-				MemoryLimit:   1024 * 1024 * 1024, // 1GB
-			})
+			h := NewHandler(HandlerConfig{})
 			defer h.Close()
 
 			w := shared.GetWriter()
@@ -957,11 +865,7 @@ func BenchmarkHandler_LPush_LargeList(b *testing.B) {
 
 // BenchmarkHandler_MSet benchmarks MSET (in-memory)
 func BenchmarkHandler_MSet(b *testing.B) {
-	h := NewHandler(HandlerConfig{
-		NumDatabases:  1,
-		CapacityPerDB: 1000000,
-		MemoryLimit:   256 * 1024 * 1024,
-	})
+	h := NewHandler(HandlerConfig{})
 	defer h.Close()
 
 	w := shared.GetWriter()

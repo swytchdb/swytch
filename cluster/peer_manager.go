@@ -31,6 +31,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/quic-go/quic-go"
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -39,6 +40,24 @@ import (
 // CDNFetcher can fetch effect data from a CDN / object storage endpoint.
 type CDNFetcher interface {
 	FetchFromCDN(ctx context.Context, offset *pb.EffectRef) ([]byte, error)
+}
+
+// KeyFilterProvider is the engine-side surface for cluster key filters: the
+// local filter advertised to peers at connection establishment, and the cache
+// of peers' filters. A peer with no cached filter is presumed to hold every
+// key, so delivery here is what activates free read-misses — never what
+// gates correctness.
+type KeyFilterProvider interface {
+	// NotePeerConnected marks a peer as connected-but-unfiltered until its
+	// bulk filter arrives.
+	NotePeerConnected(peer pb.NodeID)
+	// CachePeerFilter applies a peer's bulk filter (replace-if-newer).
+	CachePeerFilter(peer pb.NodeID, data []byte, version uint64)
+	// OwnKeyFilterSnapshot returns the serialized local filter and its version.
+	OwnKeyFilterSnapshot() ([]byte, uint64)
+	// DropPeer forgets a departed peer's filter; on reconnect the peer
+	// re-enters as presumed-everything.
+	DropPeer(peer pb.NodeID)
 }
 
 // PeerManager manages all peer connections and the local QUIC listener.
@@ -71,6 +90,11 @@ type PeerManager struct {
 
 	onPeerAdded   func(NodeId)
 	onPeerRemoved func(NodeId)
+
+	// keyFilter, when set, receives peer filter lifecycle events and provides
+	// the local filter to advertise. Written once during wiring (before
+	// Start); nil in tests that don't exercise filters.
+	keyFilter KeyFilterProvider
 
 	// inboundConns tracks QUIC connections that peers dialed TO us. The
 	// key is the peer's authoritative NodeID (learned from the 8-byte
@@ -200,6 +224,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 				if pm.heartbeat != nil {
 					pm.heartbeat.SendTickTo(peerID)
 				}
+				pm.sendKeyFilterTo(peerID)
 			},
 		)
 
@@ -231,6 +256,7 @@ func (pm *PeerManager) Start(ctx context.Context) error {
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendTickTo(peerID)
 			}
+			pm.sendKeyFilterTo(peerID)
 		})
 		pm.peers[peer.ID] = pc
 		pc.Start(pm.ctx)
@@ -277,6 +303,9 @@ func (pm *PeerManager) registerPeer(peer NodeConfig) {
 	if pm.replicator != nil {
 		pm.replicator.AddPeer(peer.ID, peer.Region)
 	}
+	if pm.keyFilter != nil {
+		pm.keyFilter.NotePeerConnected(peer.ID)
+	}
 	if pm.onPeerAdded != nil {
 		pm.onPeerAdded(peer.ID)
 	}
@@ -290,8 +319,34 @@ func (pm *PeerManager) unregisterPeer(peerID NodeId) {
 	if pm.replicator != nil {
 		pm.replicator.RemovePeer(peerID)
 	}
+	if pm.keyFilter != nil {
+		pm.keyFilter.DropPeer(peerID)
+	}
 	if pm.onPeerRemoved != nil {
 		pm.onPeerRemoved(peerID)
+	}
+}
+
+// SetKeyFilterProvider wires the engine's key filter surface. Must be called
+// before Start.
+func (pm *PeerManager) SetKeyFilterProvider(p KeyFilterProvider) {
+	pm.keyFilter = p
+}
+
+// sendKeyFilterTo ships our own key filter to a peer whose connection just
+// came up. Fire-and-forget: on loss the peer keeps treating us as holding
+// everything, which is safe (needless subscribes, never wrong misses).
+func (pm *PeerManager) sendKeyFilterTo(peerID NodeId) {
+	if pm.keyFilter == nil || pm.quicTransport == nil {
+		return
+	}
+	b, ver := pm.keyFilter.OwnKeyFilterSnapshot()
+	if b == nil && ver == 0 {
+		// Marshal failure — the peer keeps the presumed-everything default.
+		return
+	}
+	if err := pm.quicTransport.SendDirect(peerID, MarshalKeyFilterPacket(ver, b)); err != nil {
+		slog.Debug("failed to send key filter", "peer", peerID, "error", err)
 	}
 }
 
@@ -452,60 +507,55 @@ func (pm *PeerManager) SetCDNFetcher(f CDNFetcher) {
 	pm.cdnFetcher = f
 }
 
-// FetchFromAny tries to fetch effect bytes from any connected peer,
-// racing against CDN fetch if available. First successful result wins.
-func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef) ([]byte, error) {
+// FetchFromAny fetches effect bytes from peers or the CDN, in the order the
+// hint names. The unpreferred source is a fallback tried only after the
+// preferred one actually failed — never raced: racing turned every cold-key
+// hydration into a per-effect CDN GET storm from one address, which the
+// edge's per-IP protection blocks (accept-TLS-then-reset), stalling reads
+// cluster-wide. The peer leg runs under a 10s timeout — every conn answers
+// not-found in ~1 RTT, so slow there means dead. The CDN leg gets the
+// generous cloud backstop instead: slow is not down for the cloud (a cold
+// origin legitimately takes seconds), and connection death is keepalive's
+// job to surface.
+func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint) ([]byte, error) {
 	token := pm.mu.RLock()
 	cdnFetcher := pm.cdnFetcher
 	pm.mu.RUnlock(token)
 
-	conns := pm.fetchConns()
+	fetchPeers := func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
+		defer cancel()
+		return pm.fetchFromConns(ctx, offset, pm.fetchConns())
+	}
 
-	// No CDN fetcher: peer fetch only (original behavior). No outer race to
-	// honor, so root the fetch in pm.ctx (lives for the manager's lifetime).
 	if cdnFetcher == nil {
-		return pm.fetchFromConns(pm.ctx, offset, conns)
+		return fetchPeers()
 	}
 
-	// Race CDN against peer fetch
-	ctx, cancel := context.WithTimeout(pm.ctx, 10*time.Second)
-	defer cancel()
-
-	type result struct {
-		data []byte
-		err  error
-	}
-	ch := make(chan result, 2)
-
-	// Path 1: CDN fetch
-	go func() {
-		data, err := cdnFetcher.FetchFromCDN(ctx, offset)
-		ch <- result{data, err}
-	}()
-
-	// Path 2: Peer fetch — share the race ctx so peer fetches cancel the
-	// moment CDN wins (or the 10s timeout fires).
-	go func() {
-		data, err := pm.fetchFromConns(ctx, offset, conns)
-		ch <- result{data, err}
-	}()
-
-	// First success wins
-	var lastErr error
-	for range 2 {
-		select {
-		case r := <-ch:
-			if r.err == nil && len(r.data) > 0 {
-				return r.data, nil
-			}
-			lastErr = r.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	fetchCDN := func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(pm.ctx, cloudBackstopTimeout)
+		defer cancel()
+		return cdnFetcher.FetchFromCDN(ctx, offset)
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
+	first, second := fetchPeers, fetchCDN
+	if hint == effects.PreferCDN {
+		first, second = fetchCDN, fetchPeers
+	}
+
+	data, err := first()
+	if err == nil && len(data) > 0 {
+		return data, nil
+	}
+	fallbackData, fallbackErr := second()
+	if fallbackErr == nil && len(fallbackData) > 0 {
+		return fallbackData, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fallbackErr != nil {
+		return nil, fallbackErr
 	}
 	return nil, ErrPeerUnavailable
 }
@@ -639,6 +689,7 @@ func (pm *PeerManager) UpdateTopology(newCfg *ClusterConfig) {
 			if pm.heartbeat != nil {
 				pm.heartbeat.SendTickTo(peerID)
 			}
+			pm.sendKeyFilterTo(peerID)
 		})
 	}
 
@@ -768,6 +819,13 @@ func (pm *PeerManager) HandleNackNotify(peerID NodeId, nack *pb.NackNotify) {
 		if err := pm.handler.HandleNack(nack); err != nil {
 			slog.Debug("failed to handle NACK", "peer", peerID, "error", err)
 		}
+	}
+}
+
+// HandleKeyFilter routes an inbound bulk key filter to the engine's cache.
+func (pm *PeerManager) HandleKeyFilter(peerID NodeId, version uint64, filter []byte) {
+	if pm.keyFilter != nil {
+		pm.keyFilter.CachePeerFilter(peerID, filter, version)
 	}
 }
 

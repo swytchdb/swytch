@@ -56,6 +56,8 @@ func Run(args []string) error {
 	// reuse a single set of deployment envs.
 	clusterPassphrase := fs.String("cluster-passphrase", "",
 		"Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)")
+	cloudSecret := fs.String("cloud", "",
+		"Swytch Cloud connection secret (generate with: swytch gen-passphrase --cloud); replaces --cluster-passphrase and --join")
 	joinAddr := fs.String("join", "",
 		"DNS name to resolve for cluster peer discovery")
 	clusterPort := fs.Int("cluster-port", 0,
@@ -73,6 +75,9 @@ func Run(args []string) error {
 		return err
 	}
 
+	if *cloudSecret != "" && (*clusterPassphrase != "" || *joinAddr != "") {
+		return fmt.Errorf("--cloud is exclusive with --cluster-passphrase and --join: the connection secret derives the cluster identity and peers are discovered via cloud")
+	}
 	if *clusterPassphrase == "" && *joinAddr != "" {
 		return fmt.Errorf("--join requires --cluster-passphrase")
 	}
@@ -111,7 +116,7 @@ func Run(args []string) error {
 	// Derive cluster port from --listen when unset. Parses the port
 	// component only; a listen of ":5433" gives 5433 → cluster 6433.
 	cport := *clusterPort
-	if cport == 0 && *clusterPassphrase != "" {
+	if cport == 0 && (*clusterPassphrase != "" || *cloudSecret != "") {
 		cport = deriveClusterPort(*listen)
 		if cport == 0 {
 			return fmt.Errorf(
@@ -124,11 +129,13 @@ func Run(args []string) error {
 		MemoryLimit:        maxMemoryBytes,
 		MemoryLimitPercent: maxMemoryPct,
 		ClusterPassphrase:  *clusterPassphrase,
+		ConnectionSecret:   *cloudSecret,
 		JoinAddr:           *joinAddr,
 		ClusterPort:        cport,
 		AdvertiseAddr:      *clusterAdvertise,
 		Logger:             logger,
 	})
+	*cloudSecret = "" // derive-and-drop: the runtime has its keys, nothing retains the master
 	if err != nil {
 		return fmt.Errorf("start cluster runtime: %w", err)
 	}

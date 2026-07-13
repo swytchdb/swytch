@@ -33,6 +33,7 @@ type Writer struct {
 	stats      *Stats
 	wroteError bool
 	tmp        [64]byte
+	scratch    bytes.Buffer // reusable response-staging buffer, see Scratch
 }
 
 // NewWriter creates a new RESP response writer (defaults to RESP2)
@@ -73,6 +74,20 @@ func (w *Writer) Buffer() *bytes.Buffer {
 // Reset resets the writer with a new buffer
 func (w *Writer) Reset(buf *bytes.Buffer) {
 	w.buf = buf
+}
+
+// Scratch returns the writer's reusable response-staging buffer, reset and
+// ready for use. Retaining the buffer on the writer means the per-command
+// stage-then-commit in ExecuteInto reuses one high-water allocation instead
+// of growing a fresh buffer every command. If the writer is already staging
+// into its scratch (a nested ExecuteInto on the same writer), a fresh buffer
+// is returned so the outer stage's pending bytes aren't clobbered.
+func (w *Writer) Scratch() *bytes.Buffer {
+	if w.buf == &w.scratch {
+		return &bytes.Buffer{}
+	}
+	w.scratch.Reset()
+	return &w.scratch
 }
 
 // WriteRaw writes raw bytes directly to the buffer (pre-formatted RESP)

@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package dataplane;
+
+// Go stubs are generated once, in the swytch module (`just proto` there, from
+// its byte-identical mirror of this file); internal/dataplane/proto.go aliases
+// them. A second generated copy of proto package `dataplane` in one binary
+// would panic the protobuf registry at init.
+option go_package = "github.com/swytchdb/swytch/cluster/proto/dataplane";
+
+// DataPlane ingests encrypted effect blobs written by nodes. It is a content-
+// blind sink: it authenticates the writer by auth_key, stores each effect under
+// its cluster's opaque folder, and maintains a per-key tip set — never reading
+// the encrypted key or payload.
+service DataPlane {
+  // WriteEffects is a bidirectional stream: a node streams effects and the cloud
+  // streams back responses. Each effect is applied mechanically (store the blob,
+  // add its tip, delete the deps it supersedes) with no ordering authority — many
+  // nodes write the same key concurrently, so out-of-order arrival is normal and
+  // a transient orphan tip is harmless (a client prunes on reconstruct). Effects
+  // are processed fully concurrently; a slow effect never head-of-line blocks the
+  // others.
+  //
+  // Responses interleave a WriteAck per effect with FetchRequests: when a
+  // state-carrying snapshot triggers the cloud's retention DAG scan and a dep is
+  // missing at the origin, the cloud asks the cluster for it over this channel.
+  rpc WriteEffects(stream WriteEffectsRequest) returns (stream WriteResponse);
+
+  // GetTips returns the current tip set for one or more (encrypted) keys. A node
+  // bootstrapping from Cloud alone — no --join peer to gossip with — uses this to
+  // discover the frontier of the membership key, since the CDN read path is
+  // blob-by-address and cannot list a key's tips. Authenticated by auth_key like
+  // a write; read-only, so it does not open a stream.
+  rpc GetTips(GetTipsRequest) returns (GetTipsResponse);
+}
+
+// EffectRef identifies an effect globally as (node id, offset), matching the
+// nearcache's keytrie.EffectRef.
+message EffectRef {
+  uint64 node_id = 1;
+  uint64 offset = 2;
+}
+
+// EffectType is the structural kind of an effect, mirroring the nearcache's
+// Effect.kind oneof. The cloud cannot read the encrypted payload, but the kind is
+// structure (not content): it lets the cloud meter snapshot storage for billing
+// and identify snapshots for retention without ever decrypting anything.
+enum EffectType {
+  EFFECT_TYPE_UNSPECIFIED = 0;
+  EFFECT_TYPE_DATA = 1;
+  EFFECT_TYPE_META = 2;
+  EFFECT_TYPE_TXN_BIND = 3;
+  EFFECT_TYPE_SNAPSHOT = 4; // materialized state — the billable snapshot storage
+  EFFECT_TYPE_SUBSCRIPTION = 5;
+  EFFECT_TYPE_SERIALIZATION = 6;
+  EFFECT_TYPE_NOOP = 7;
+  EFFECT_TYPE_OBSERVATION = 8;
+  EFFECT_TYPE_ROW_WRITE = 9;
+  EFFECT_TYPE_PUBSUB_MESSAGE = 10;
+}
+
+// Effect is one encrypted effect: a structural envelope (id, deps, type, time)
+// plus an opaque, client-encrypted key and payload the cloud never interprets.
+message Effect {
+  EffectRef id = 1;            // this effect's ref; also its blob name
+  repeated EffectRef deps = 2; // tips this effect supersedes on its key
+  bytes key = 3;               // encrypted key name; an opaque tip-path segment
+  bytes raw_effect = 4;        // encrypted effect payload
+  int64 time_local = 5;        // writer's local clock, unix nanoseconds
+  EffectType effect_type = 6;  // structural kind; drives snapshot-storage billing
+  // snapshot_state_carrying marks a snapshot that carries materialized state
+  // (vs a verdict-only marker). Only state-carrying snapshots terminate the
+  // retention DAG walk at the LCA; verdict-only ones are followed through. This
+  // is structure (a flag), not content — the snapshot's State stays encrypted.
+  bool snapshot_state_carrying = 7;
+  // raw_size is the effect's byte size before compression and encryption — the
+  // customer's data as they wrote it. Usage metering resolves a key's level
+  // from its frontier: a data-carrying effect re-levels the key to
+  // max(raw_size, len(raw_effect)) (the sealed blob floors an under-declaring
+  // writer), while a structural effect — meta, noop, bind, subscription,
+  // verdict-only snapshot — inherits the level of the data it supersedes
+  // rather than re-leveling the key to its own marker size.
+  uint64 raw_size = 8;
+}
+
+// WriteEffectsRequest is one message on the write stream. The FIRST message MUST
+// carry auth_key (it locates + authenticates the cluster folder); every
+// subsequent message MUST carry an effect.
+message WriteEffectsRequest {
+  oneof payload {
+    bytes auth_key = 1; // 32-byte wire auth key, first message only
+    Effect effect = 2;  // a single effect to store
+  }
+}
+
+// WriteResponse is one message on the response stream: an ack for an effect the
+// node wrote, a fetch-request the cloud is pushing to the node, or the folder's
+// current key-name filter.
+message WriteResponse {
+  oneof msg {
+    WriteAck ack = 1;
+    FetchRequest fetch = 2;
+    KeyFilter filter = 3;
+  }
+}
+
+// WriteAck reports the durable outcome of a single effect.
+message WriteAck {
+  EffectRef id = 1;   // the effect this acks
+  bool ok = 2;        // true once durably stored
+  string error = 3;   // failure detail when ok is false (the stream stays open)
+}
+
+// FetchRequest asks the node to (re)send a missing effect the cloud needs to
+// complete a retention DAG walk. The node replies by writing that effect back on
+// its own stream (the one case a node sends an effect that is not its own). If
+// the node has evicted the effect, it stays silent and the cloud re-asks later.
+message FetchRequest {
+  EffectRef ref = 1;
+}
+
+// KeyFilter is the folder's key-name cuckoo filter (effects.CuckooChain wire
+// format) over the (encrypted) key names the cloud holds, pushed on stream open
+// and whenever the folder's filter changes. Advisory: a stale or absent filter
+// only changes read-miss cost, never correctness. Each frame replaces the
+// previous one wholesale.
+message KeyFilter {
+  bytes filter = 1;
+}
+
+// GetTipsRequest asks for the current tip frontier of each listed (encrypted)
+// key. auth_key locates + authenticates the cluster folder.
+message GetTipsRequest {
+  bytes auth_key = 1;      // 32-byte wire auth key
+  repeated bytes keys = 2; // encrypted key names to look up
+}
+
+// GetTipsResponse returns one KeyTips per requested key, in request order.
+message GetTipsResponse {
+  repeated KeyTips keys = 1;
+}
+
+// KeyTips is a key's current frontier: the encrypted key it answers for and the
+// set of tip refs the cloud holds for it (empty if the key is unknown).
+message KeyTips {
+  bytes key = 1;             // echoes the requested encrypted key
+  repeated EffectRef tips = 2;
+  // closure is every effect (tips included) a reconstruction from these tips
+  // needs: the sub-DAG from the tips down to the LCA state-carrying snapshot,
+  // walked over the cleartext envelope deps, carried as full envelopes so the
+  // node installs them without per-blob origin round-trips. Possibly partial
+  // (capped, or missing a blob the cloud is still fetching back from the
+  // cluster) — the node's own walk remains the authority and pulls any
+  // missing effect on demand.
+  repeated Effect closure = 3;
+}

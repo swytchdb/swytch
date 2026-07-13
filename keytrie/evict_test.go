@@ -36,6 +36,7 @@ func TestEvictBounded_EvictsColdNotProtected(t *testing.T) {
 	c.SetEvictHooks(
 		func(string) bool { return true },
 		func(k string, _ []EffectRef, _ *struct{}) { evicted = append(evicted, k) },
+		func() bool { return true },
 	)
 
 	for i, k := range []string{"hot-a", "hot-b", "cold-c"} {
@@ -66,7 +67,7 @@ func TestEvictBounded_EvictsColdNotProtected(t *testing.T) {
 // to a live leaf (warm restart) rather than starting cold.
 func TestEvictBounded_GhostPromoteOnReinsert(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	c.Insert("x", nil, NewTipSet(tip(1)))
 	if !c.EvictBounded(64) {
@@ -94,7 +95,7 @@ func TestEvictBounded_GhostPromoteOnReinsert(t *testing.T) {
 // most-recently-written ones (read-your-writes).
 func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	const n = 100
 	keys := make([]string, n)
@@ -118,12 +119,52 @@ func TestEvictBatch_EvictsOldestColdInOnePass(t *testing.T) {
 	}
 }
 
+// TestEvictBatch_SkipsDynamicallyPinned verifies the Pin/Unpin eviction hold:
+// a pinned key survives a sweep that takes everything around it (the cloud
+// outbox pins keys whose uploads haven't been acked — evicting one hides
+// cluster-durable data), and unpinning makes it evictable again.
+func TestEvictBatch_SkipsDynamicallyPinned(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+
+	const n = 10
+	keys := make([]string, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("k-%04d", i)
+		c.Insert(keys[i], nil, NewTipSet(tip(uint64(i+1))))
+	}
+	const held = "k-0000" // the oldest — first in line for eviction
+	if !c.Pin(held) {
+		t.Fatal("Pin on a live key must succeed")
+	}
+	if c.Pin("nonexistent") {
+		t.Fatal("Pin on a missing key must report no hold taken")
+	}
+
+	if got := c.EvictBatch(n); got != n-1 {
+		t.Fatalf("EvictBatch(%d) = %d; want %d (everything but the pinned key)", n, got, n-1)
+	}
+	if c.Contains(held) == nil {
+		t.Fatal("pinned key was evicted")
+	}
+
+	if !c.Unpin(held) {
+		t.Fatal("Unpin on a live key must succeed")
+	}
+	if got := c.EvictBatch(1); got != 1 {
+		t.Fatalf("EvictBatch(1) after Unpin = %d; want 1", got)
+	}
+	if c.Contains(held) != nil {
+		t.Fatal("unpinned key must be evictable again")
+	}
+}
+
 // TestEvictBounded_ReclaimsGhostBeforeHotKey verifies the ghost-as-fallback
 // policy: when the sweep finds no cold (unprotected) live leaf but ghosts exist,
 // eviction reclaims the oldest ghost instead of evicting a hot (protected) key.
 func TestEvictBounded_ReclaimsGhostBeforeHotKey(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	all := []string{"cold-1", "cold-2", "hot-1", "hot-2"}
 	for _, k := range all {
@@ -198,9 +239,11 @@ func TestReap_QueueDrainUnlinks(t *testing.T) {
 }
 
 // TestChunkReclaim_DropsFullyDeadChunk verifies that once every leaf in an arena
-// chunk has been deleted and reaped, the chunk is dropped from the arena (a nil
-// placeholder), while leaves in other chunks survive. Single-threaded, so leaf
-// allocation is sequential: the first chunkSize distinct keys land in leaf chunk 0.
+// chunk has been deleted and reaped, the chunk is reclaimed: a fresh array takes
+// its place and its slot range goes to the free list, so a subsequent insert
+// reuses a recycled slot instead of growing the arena. Leaves in other chunks
+// survive. Single-threaded, so leaf allocation is sequential: the first
+// chunkSize distinct keys land in leaf chunk 0.
 func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	const extra = 500
@@ -225,19 +268,39 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 	for c.reap() > 0 {
 	}
 
-	if chunks := c.leafArena.list.Load().chunks; chunks[0] != nil {
-		t.Fatalf("leaf chunk 0 should be reclaimed (nil) after all its leaves died; still present")
+	// Chunk 0 was recycled: a fresh array is in place and every one of its slots
+	// waits on the free list.
+	list := c.leafArena.list.Load()
+	if list.chunks[0] == nil {
+		t.Fatal("leaf chunk 0 was nil-dropped; the free list had room, so it should have been recycled")
+	}
+	if got := list.outstanding[0].Load(); got != int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("chunk 0 outstanding = %d; want %d (all recycled slots unallocated)",
+			got, defaultCritbitArenaChunkSize)
+	}
+	if got := c.leafArena.freeCount.Load(); got != int64(defaultCritbitArenaChunkSize) {
+		t.Fatalf("leaf free list holds %d slots; want %d", got, defaultCritbitArenaChunkSize)
+	}
+
+	// A new insert must reuse a recycled slot, not grow the monotonic tail.
+	nextBefore := c.leafArena.next.Load()
+	c.Insert("fresh-after-reclaim", nil, NewTipSet(tip(9999)))
+	if got := c.leafArena.next.Load(); got != nextBefore {
+		t.Fatalf("insert after reclaim grew the arena tail (%d -> %d); want a recycled slot", nextBefore, got)
+	}
+	if c.Contains("fresh-after-reclaim") == nil {
+		t.Fatal("key inserted into a recycled slot is unreadable")
 	}
 
 	// Survivors (chunk 1+) must remain readable, and the sweep must tolerate the
-	// reclaimed chunk.
+	// recycled chunk.
 	for i := defaultCritbitArenaChunkSize; i < n; i++ {
 		if c.Contains(keys[i]) == nil {
 			t.Fatalf("surviving key %s missing after chunk reclaim", keys[i])
 		}
 	}
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
-	c.EvictBounded(64) // must not panic on the nil chunk
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+	c.EvictBounded(64) // must not panic on the recycled chunk
 }
 
 // TestEvictBounded_GhostNotReaped verifies the reaper leaves ghost leaves in
@@ -245,7 +308,7 @@ func TestChunkReclaim_DropsFullyDeadChunk(t *testing.T) {
 // deleted leaf.
 func TestEvictBounded_GhostNotReaped(t *testing.T) {
 	c := NewCritbit[struct{}]()
-	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {})
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
 
 	c.Insert("ghost", nil, NewTipSet(tip(1)))
 	c.Insert("normal", nil, NewTipSet(tip(2)))
@@ -257,5 +320,41 @@ func TestEvictBounded_GhostNotReaped(t *testing.T) {
 	c.reap()
 	if g := c.ghostCount.Load(); g < 1 {
 		t.Fatalf("ghostCount = %d; a ghost should have survived reap", g)
+	}
+}
+
+// TestGraduationGatedByPressure exercises the underPressure gate in bumpAccess:
+// a leaf crossing k into protected status counts toward ReachedProtected only
+// while the consumer is over its eviction target. The other eviction tests pin
+// underPressure to always-true, so this is the only coverage of the gated-off
+// branch — counting graduations while not under pressure would rail adaptive k.
+func TestGraduationGatedByPressure(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	pressure := false
+	c.SetEvictHooks(
+		func(string) bool { return true },
+		func(string, []EffectRef, *struct{}) {},
+		func() bool { return pressure },
+	)
+
+	// Walk a fresh leaf's freq past k (=2) with no pressure: the crossing must
+	// not be counted.
+	c.Insert("cold", nil, NewTipSet(tip(1)))
+	for range 5 {
+		c.LoadOrStoreData("cold", &struct{}{})
+	}
+	if got := c.EvictStats().ReachedProtected; got != 0 {
+		t.Fatalf("ReachedProtected = %d with underPressure=false; want 0 (gated off)", got)
+	}
+
+	// Now under pressure, a different fresh leaf's crossing is counted (the gate
+	// fires once per leaf at f==k, so a new key is required).
+	pressure = true
+	c.Insert("warm", nil, NewTipSet(tip(2)))
+	for range 5 {
+		c.LoadOrStoreData("warm", &struct{}{})
+	}
+	if got := c.EvictStats().ReachedProtected; got == 0 {
+		t.Fatal("ReachedProtected = 0 with underPressure=true; want the crossing counted")
 	}
 }

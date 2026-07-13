@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -38,13 +39,18 @@ import (
 	"github.com/swytchdb/swytch/tracing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // systemKeyPrefix is the reserved namespace for cluster-operational
-// keys (membership, pubsub routing, etc.). Effects on these keys are
-// pinned in the effect cache and bypass the inbound authority gate
-// because they're load-bearing for protocol operation, not user data.
+// keys (membership, pubsub routing, etc.). The ONLY thing this prefix
+// governs is cache pinning (see vertexpool.go): system-key vertices are
+// never reclaim or eviction victims, because losing the membership chain
+// under memory pressure would sever the node from the cluster. Everywhere
+// else — filters, authority gates, bootstrap, flush — system keys are
+// ordinary keys; per-key prefix scans on hot paths are how isSystemKey
+// once ate half a CPU.
 var systemKeyPrefix = []byte("__swytch:")
 
 func isSystemKey(key []byte) bool {
@@ -60,9 +66,6 @@ func isSystemKey(key []byte) bool {
 // keeps the invariant "an owned, creation-ref'd vertex is reachable from a tip we
 // serve", so reclaim never strands an un-served fetch as a permanent leak.
 func (e *Engine) isServed(key []byte) bool {
-	if isSystemKey(key) {
-		return true
-	}
 	_, sub := e.subscriptions.Load(string(key))
 	return sub
 }
@@ -97,6 +100,7 @@ type Engine struct {
 	// derived read cache.
 	index       *keytrie.Critbit[leafState]
 	broadcaster Broadcaster // nil for standalone
+	cloudReader CloudReader // nil when no cloud is configured (standalone/dev)
 
 	nodeID pb.NodeID
 	clock  *crdt.HLC
@@ -113,11 +117,6 @@ type Engine struct {
 	pendingTxTips *xsync.Map[keytrie.EffectRef, []Tip]
 	txAbortCounts *xsync.Map[string, *atomic.Int32]
 
-	// In-flight tx snapshots, keyed by txnID. Populated by Context.BeginTx
-	// so reconstruct can bound bind discovery / verdict harvest to the
-	// caller's pre-tx view without round-tripping through the Context.
-	txSnapshots *xsync.Map[string, keytrie.KeyIndex]
-
 	// Adaptive serialization state (§5)
 	rttProvider        PeerRTTProvider
 	serializationState *xsync.Map[string, *keySerializationState]
@@ -126,17 +125,21 @@ type Engine struct {
 	pendingBootstraps *xsync.Map[string, *bootstrapCollector]
 
 	// Per-node cluster key filters powering free read-misses. ownKeyFilter
-	// holds the keys this node has data for; it's shipped on NACKs so peers
-	// can answer a read-miss without subscribing. peerKeyFilters caches each
-	// peer's keys — bulk from NACKs, real-time from inbound
-	// SubscriptionEffects (see cuckoo.go and keyfilter.go). Guarded by
-	// keyFilterMu (plain map + mutex, never sync.Map).
+	// holds the keys this node has data for; the cluster layer ships it to
+	// each peer at connection establishment so peers can answer a read-miss
+	// without subscribing. peerKeyFilters caches each peer's keys — bulk from
+	// the connection handshake, real-time from inbound SubscriptionEffects
+	// (see cuckoo.go and keyfilter.go). unfilteredPeers counts connected
+	// peers whose bulk filter hasn't arrived: until it does, the peer is
+	// presumed to hold every key. Guarded by keyFilterMu (plain map + mutex,
+	// never sync.Map).
 	keyFilterMu       sync.RWMutex
-	ownKeyFilter      cuckooChain
+	ownKeyFilter      CuckooChain
 	ownFilterVer      uint64
 	ownFilterBytes    []byte // cached marshal of ownKeyFilter at ownFilterBytesVer
 	ownFilterBytesVer uint64
 	peerKeyFilters    map[pb.NodeID]*peerKeyFilter
+	unfilteredPeers   int
 
 	// Deserialized effect store — effects are immutable once written.
 	// Replaces the per-offset CloxCache; eviction is driven by the engine
@@ -151,6 +154,11 @@ type Engine struct {
 	// (0 = unbounded). Exposed via MemoryTarget for heartbeat telemetry.
 	memTarget int64
 
+	// compressValues makes Emit store data values zstd-compressed inside the
+	// effect (--compress). Write-side only: reading inflates unconditionally,
+	// driven by the per-effect flag, never by this setting.
+	compressValues bool
+
 	// evictBudget is the number of keys the governor wants evicted, computed each
 	// tick from the live-heap overage. The write path drains it inline (see
 	// drainEvictBudget) so insertion is back-pressured by eviction — you cannot
@@ -158,19 +166,25 @@ type Engine struct {
 	// idle/low-write case. Zero means at/under target: writes evict nothing.
 	evictBudget atomic.Int64
 
-	// releaseQueue defers cold-evicted keys' creation-ref chain walk
+	// releaseItems defers cold-evicted keys' creation-ref chain walk
 	// (releaseChainRefs) off the eviction hot path. EvictBatch drops the victim's
 	// tip synchronously (the act that bounds memory) and enqueues the key here;
 	// the expensive resident-chain walk that releases its refs is bookkeeping the
 	// governor drains at the top of each reclaimUnreferenced, then frees the
 	// now-refs-0 vertices in the same pass — so memory frees on the same tick it
-	// would have, with the walk off the write/read latency path. Unbounded MPSC:
-	// many write-path drains enqueue, the single governor consumes. releasePending
-	// counts enqueued-but-undrained entries so the consumer dequeues exactly the
-	// available set (UMPSCQueue.Dequeue blocks on empty, has no Len). Allocated
-	// lazily (releaseQ) on first eviction so every construction site gets it.
-	releaseQueue   atomic.Pointer[xsync.UMPSCQueue[evictedKey]]
-	releasePending atomic.Int64
+	// would have, with the walk off the write/read latency path. Many write-path
+	// drains enqueue, the single governor consumes.
+	//
+	// This is deliberately a mutex+slice pair and NOT xsync's UMPSCQueue: that
+	// queue never zeroes a dequeued slot and pools consumed segments fully
+	// populated, so every evictedKey it ever carried — and the leafState → subdag
+	// → effect-payload chain each one pins — stayed reachable for GC cycles after
+	// being "drained". Under an eviction storm that phantom live set reached
+	// gigabytes and locked the governor permanently over target. The buffers here
+	// are explicitly cleared after every drain (see drainPendingReleases).
+	releaseMu    sync.Mutex
+	releaseItems []evictedKey
+	releaseSpare []evictedKey
 
 	closed atomic.Bool
 
@@ -188,6 +202,16 @@ type Engine struct {
 	OnKeyDataAdded func(key string) // wake oldest waiter (data inserted)
 	OnKeyDeleted   func(key string) // wake all waiters (key removed)
 	OnFlushAll     func()           // wake all waiters across all keys
+
+	// OnLocalEffect fires once for every effect this node mints and persists —
+	// data/meta/bind via Context, verdict snapshots, subscriptions,
+	// unsubscribes. This is the originator-uploads-its-own-writes hook for
+	// cloud durability: exactly the locally-authored DAG, never a peer's
+	// effects and never wire-only probes (discovery subscriptions, ephemeral
+	// pub/sub, PUBLISH payloads — those bypass the mint path entirely). Called
+	// synchronously on the emit path; implementations must not block.
+	localEffectMu sync.RWMutex
+	OnLocalEffect func(offset Tip, eff *pb.Effect)
 
 	// Ephemeral pub/sub callbacks — fired from HandleRemote on
 	// receive of wire-only effects that are never stored or indexed.
@@ -291,9 +315,8 @@ func (e *Engine) nextOffset() Tip {
 }
 
 // FlushKey is the special key used to signal a full index wipe (FLUSHDB/FLUSHALL).
-// Lives under the __swytch: namespace so isSystemKey recognizes it as
-// cluster-operational and the authority gate bypasses it on inbound,
-// and so it can't collide with a user-chosen key.
+// Lives under the __swytch: namespace so it's pinned in the cache and can't
+// collide with a user-chosen key.
 const FlushKey = "__swytch:flush"
 
 // FlushIndex deletes all keys from the index and evicts all cache entries.
@@ -350,11 +373,11 @@ func NewEngine(cfg EngineConfig) *Engine {
 		pendingTxns:        xsync.NewMap[keytrie.EffectRef, *pendingTxn](),
 		pendingTxTips:      xsync.NewMap[keytrie.EffectRef, []Tip](),
 		txAbortCounts:      xsync.NewMap[string, *atomic.Int32](),
-		txSnapshots:        xsync.NewMap[string, keytrie.KeyIndex](),
 		pendingBootstraps:  xsync.NewMap[string, *bootstrapCollector](),
 		peerKeyFilters:     make(map[pb.NodeID]*peerKeyFilter),
 		effectCache:        newVertexPool(),
 		spokenBinds:        clox.NewCloxCache[Tip, struct{}](clox.ConfigFromCapacity(8192)),
+		compressValues:     cfg.CompressValues,
 	}
 
 	// Creation refs are seeded at PutSized (one per tipset a vertex occupies) and
@@ -377,9 +400,16 @@ func NewEngine(cfg EngineConfig) *Engine {
 	e.memTarget = memTarget
 	e.startMemoryGovernor(memTarget)
 
+	// System keys ("__swytch:*": membership, flush, ...) are commutative
+	// protocol metadata and must never be quorum-gated — a node has to be able
+	// to register itself into a minority partition (you can't reach a majority
+	// until you've joined, and can't join if joining needs a majority). Pin it
+	// as the first rule so first-match-wins makes it an invariant no config can
+	// override; the anchored pattern won't match user keys like "_foo".
+	rules := append([]KeyRangeRule{{Pattern: "__swytch:*", Mode: UnsafeMode}}, cfg.KeyRangeRules...)
 	e.safety.Store(&safetyMap{
 		defaultMode: cfg.DefaultMode,
-		rules:       cfg.KeyRangeRules,
+		rules:       rules,
 	})
 
 	if cfg.Broadcaster != nil {
@@ -392,6 +422,14 @@ func NewEngine(cfg EngineConfig) *Engine {
 func (e *Engine) NodeID() pb.NodeID {
 	return e.nodeID
 }
+
+// PinKey adds a dynamic do-not-evict hold on key; UnpinKey releases it. The
+// cloud outbox is the caller: a key with un-acked uploads must stay findable —
+// evicting it frees almost nothing (the outbox pins the effect bytes) while
+// unsubscribing makes the committed data invisible to the whole cluster until
+// the ack lands. Reports whether a live leaf carried the operation.
+func (e *Engine) PinKey(key string) bool   { return e.index.Pin(key) }
+func (e *Engine) UnpinKey(key string) bool { return e.index.Unpin(key) }
 
 // makeTip constructs a full Tip from a local offset.
 func (e *Engine) makeTip(offset uint64) Tip {
@@ -560,6 +598,119 @@ func (e *Engine) SetRTTProvider(p PeerRTTProvider) {
 	e.rttProvider = p
 }
 
+// SetCloudReader installs the Cloud read backstop consulted on a read-miss. Nil
+// leaves the engine free-missing as before (standalone / no cloud).
+func (e *Engine) SetCloudReader(r CloudReader) {
+	e.cloudReader = r
+}
+
+// cloudTipsBackstop caps a read-miss's Cloud GetTips round-trip. Liveness is
+// keepalive's job — the cloud client pings both directions, so a dead or
+// half-open connection errors out of the RPC on its own. This exists only for
+// the case keepalive cannot see: a wedged-but-alive stream (healthy
+// connection, stuck handler). It is deliberately generous because a tight
+// deadline here treats slow as down — a cold dataplane rebuilding its store
+// legitimately answers in seconds, and failing the read at 5s manufactured
+// ErrCloudUnavailable errors for reads that were about to succeed.
+const cloudTipsBackstop = 60 * time.Second
+
+// ErrCloudUnavailable marks a read that could not be answered because the
+// Cloud consult failed or returned a frontier we could not fully fetch. It
+// must surface to the client as an error, never as a miss: Cloud provably
+// holds data for the key, so answering "no such key" would be
+// indistinguishable from data loss.
+var ErrCloudUnavailable = errors.New("cloud unavailable")
+
+// hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
+// for key's tip frontier and installs it into the index (pulling blobs via
+// FetchFromAny → CDN), so a subsequent reconstruct finds the key locally and
+// the cluster owns it thereafter. installed reports whether the frontier
+// landed in the index; consulted reports whether Cloud gave a complete
+// answer — including "holds nothing" — so GetSnapshot can mark the leaf as
+// authoritative and stop re-consulting for a key whose state reduces to nil.
+//
+// A transport error, a timeout, or a partially-unreachable frontier returns
+// ErrCloudUnavailable — the read fails rather than fabricating a miss (or,
+// worse, a subset of the frontier posing as the whole state). The install is
+// all-or-nothing for the same reason: installing the reachable subset would
+// let the NEXT read reconstruct partial state locally and skip the consult
+// entirely. The leaf stays unconsulted on failure, so a later read retries.
+func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err error) {
+	if e.cloudReader == nil {
+		return false, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsBackstop)
+	defer cancel()
+	tips, sidecar, err := e.cloudReader.CloudTips(ctx, key)
+	if err != nil {
+		slog.Warn("cloud read-miss backstop: get tips failed; failing read", "key", key, "error", err)
+		return false, false, fmt.Errorf("%w: get tips for %q: %w", ErrCloudUnavailable, key, err)
+	}
+	if len(tips) == 0 {
+		return false, true, nil // Cloud holds nothing either: an authoritative miss.
+	}
+	if err := e.InstallCloudTips(key, tips, sidecar); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+// InstallCloudTips validates and installs a Cloud-provided tip frontier for
+// key, merging it with whatever the index already holds (the DAG reduces the
+// union; a tip that is an ancestor of an existing tip is redundant but
+// harmless — the next write consumes and collapses it). Besides the read-miss
+// rehydrate it serves the cloud-sync reconcile path: a read served from the
+// outbox during a Cloud outage installs the missed Cloud frontier here once
+// Cloud answers again.
+//
+// The install is all-or-nothing: the whole frontier is walk-validated before
+// any tip lands in the index. Installing the reachable subset would let a
+// subsequent read reconstruct partial state as if it were the whole answer.
+// Unlike retryBootstrap's walkAndInstall, which is deliberately progressive.
+func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
+	// Warm the cache with the closure effects GetTips delivered inline, so the
+	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
+	// owned-vs-cache routing as every other ingest path; stragglers the
+	// sidecar didn't carry are pulled by the walk itself.
+	if e.effectCache != nil {
+		for _, ce := range sidecar {
+			if _, ok := e.effectCache.Get(ce.Tip); ok {
+				continue
+			}
+			e.putIngested(ce.Tip, ce.Eff, ce.ProtoLen)
+		}
+	}
+	for _, tip := range tips {
+		rd := newDag(e, key, "")
+		if walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil }); walkErr != nil {
+			slog.Warn("cloud tip install: tip unreachable; installing nothing",
+				"key", key, "tip", tip, "error", walkErr)
+			return fmt.Errorf("%w: tip %v unreachable for %q: %w",
+				ErrCloudUnavailable, tip, key, walkErr)
+		}
+	}
+	e.installTips(key, tips)
+	return nil
+}
+
+// fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.
+func (e *Engine) fireLocalEffect(offset Tip, eff *pb.Effect) {
+	e.localEffectMu.RLock()
+	defer e.localEffectMu.RUnlock()
+	if e.OnLocalEffect != nil {
+		e.OnLocalEffect(offset, eff)
+	}
+}
+
+// SetOnLocalEffect replaces the local-mint hook. It waits for callbacks already
+// in flight, which gives lifecycle owners a clean boundary before draining or
+// tearing down the hook's resources.
+func (e *Engine) SetOnLocalEffect(hook func(offset Tip, eff *pb.Effect)) {
+	e.localEffectMu.Lock()
+	e.OnLocalEffect = hook
+	e.localEffectMu.Unlock()
+}
+
 // UpdateSafetyRules atomically replaces the key-range safety configuration.
 func (e *Engine) UpdateSafetyRules(defaultMode SafetyMode, rules []KeyRangeRule) {
 	e.safety.Store(&safetyMap{
@@ -645,19 +796,6 @@ func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
 	return resolved
 }
 
-// txCutoff returns the snapshot bounding bind-discovery walks for a
-// tx-context reconstruct. Walks ask the snapshot per-(key, tip) whether
-// a tip is in the caller's pre-tx view; if yes, the tip is a boundary
-// (walk doesn't descend past it). Returns nil if no tx is registered,
-// in which case walks proceed unbounded back to snapshot LCAs.
-func (e *Engine) txCutoff(txID string) keytrie.KeyIndex {
-	if txID == "" || e.txSnapshots == nil {
-		return nil
-	}
-	snap, _ := e.txSnapshots.Load(txID)
-	return snap
-}
-
 // emitSnapshot writes a verdict-carrying SnapshotEffect on `key`, chained
 // via prev_snapshot to the latest existing snapshot tip. Deps are the
 // current tips with pending-tx tips substituted; the index is updated
@@ -678,7 +816,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 	if currentSet != nil {
 		tips := currentSet.Tips()
 		for _, t := range tips {
-			cached, err := e.getEffect(t)
+			cached, err := e.getEffect(key, t)
 			if err != nil {
 				continue
 			}
@@ -699,6 +837,7 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 		e.effectCache.PutSized(offset, eff, len(data))
 	}
 	e.updateIndex(key, currentSet, offset)
+	e.fireLocalEffect(offset, eff)
 
 	if e.broadcaster != nil {
 		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
@@ -750,7 +889,7 @@ func (e *Engine) lookupSnapshotVerdict(key, txnID string) (pb.Verdict, bool) {
 			continue
 		}
 		visited[t] = true
-		eff, err := e.getEffect(t)
+		eff, err := e.getEffect(key, t)
 		if err != nil {
 			continue
 		}
@@ -819,7 +958,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 		}
 		slog.Debug("HandleRemote: fetching missing effect data", "offset", notify.Origin)
 		var err error
-		effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+		effectData, err = e.broadcaster.FetchFromAny(notify.Origin, e.fetchHint(string(notify.Key)))
 		if err != nil {
 			return nil, err
 		}
@@ -892,8 +1031,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 	// track — which are exactly the keys a read-only handler needs the filter
 	// to know about (a peer's brand-new key). Recording the originator's
 	// effect on K here is a safe over-approximation: worst case a needless
-	// subscribe, never a wrong free-miss. peerFilterAdd skips self and system
-	// keys.
+	// subscribe, never a wrong free-miss. peerFilterAdd skips self.
 	if origin := pb.NodeID(eff.NodeId); origin != e.nodeID {
 		if bind := eff.GetTxnBind(); bind != nil {
 			for _, kb := range bind.Keys {
@@ -908,19 +1046,19 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	// Authority gate: accept the effect only if we already track the
 	// key locally — either subscribed to it, or the index already has
-	// tips (a previous local write installed them). System keys are
-	// exempt because cluster bootstrap depends on them arriving before
-	// any subscription exists.
+	// tips (a previous local write installed them).
 	//
 	// SubscriptionEffects are exempt and respond with an empty ACK so
 	// ensureSubscribed isn't deadlocked when nobody yet has authority
-	// for a brand-new key.
+	// for a brand-new key. Flush-all is likewise exempt: it's a cluster
+	// control message — nobody subscribes to FlushKey, and a flush must
+	// reach every node regardless (the handler below wipes the index).
 	//
 	// TxnBinds touch multiple keys; collectSubscribers replicates them
 	// to peers subscribed to any touched key, so the gate must accept
 	// the bind when authority holds for any key in bind.Keys (not just
 	// eff.Key, the canonical first key).
-	if !isSystemKey(eff.Key) {
+	{
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		authoritative := subscribed || e.index.Contains(key) != nil
@@ -935,6 +1073,9 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 					}
 				}
 			}
+		}
+		if !authoritative && key == FlushKey {
+			authoritative = true
 		}
 
 		if !authoritative {
@@ -997,8 +1138,7 @@ func (e *Engine) HandleRemote(notify *pb.OffsetNotify) ([]*pb.NackNotify, error)
 
 	initialTips := e.index.Contains(key)
 
-	_, subscribedCanonical := e.subscriptions.Load(key)
-	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+	_, canonicalIndexable := e.subscriptions.Load(key)
 
 	// Consume deps: any dep that is a current tip becomes an ancestor.
 	deps := eff.Deps
@@ -1198,7 +1338,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 				return nil
 			}
 			var err error
-			effectData, err = e.broadcaster.FetchFromAny(notify.Origin)
+			effectData, err = e.broadcaster.FetchFromAny(notify.Origin, e.fetchHint(string(notify.Key)))
 			if err != nil {
 				return err
 			}
@@ -1220,7 +1360,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 		}
 	}
 
-	if !isSystemKey(eff.Key) {
+	{
 		key := string(eff.Key)
 		_, subscribed := e.subscriptions.Load(key)
 		authoritative := subscribed || e.index.Contains(key) != nil
@@ -1263,8 +1403,7 @@ func (e *Engine) handleBackfill(notify *pb.OffsetNotify) error {
 	}
 
 	key := string(eff.Key)
-	_, subscribedCanonical := e.subscriptions.Load(key)
-	canonicalIndexable := subscribedCanonical || isSystemKey(eff.Key)
+	_, canonicalIndexable := e.subscriptions.Load(key)
 
 	deps := eff.Deps
 	if bind := eff.GetTxnBind(); bind != nil {
@@ -1396,7 +1535,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 		for len(ancestorStack) > 0 {
 			cur := ancestorStack[len(ancestorStack)-1]
 			ancestorStack = ancestorStack[:len(ancestorStack)-1]
-			eff, err := e.getEffect(cur)
+			eff, err := e.getEffect(k, cur)
 			if err != nil {
 				continue
 			}
@@ -1419,7 +1558,7 @@ func (e *Engine) checkCompetingBinds(bind *pb.TransactionalBindEffect, txnID str
 				continue
 			}
 			visited[t] = true
-			eff, err := e.getEffect(t)
+			eff, err := e.getEffect(k, t)
 			if err != nil {
 				continue
 			}
@@ -1490,7 +1629,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 			if tipOff == bindOffset {
 				continue
 			}
-			eff, err := e.getEffect(tipOff)
+			eff, err := e.getEffect(k, tipOff)
 			if err != nil {
 				continue
 			}
@@ -1563,7 +1702,7 @@ func (e *Engine) evaluateBindForkChoice(bind *pb.TransactionalBindEffect, bindOf
 							continue
 						}
 						visited[off] = true
-						depEff, err := e.getEffect(off)
+						depEff, err := e.getEffect(k, off)
 						if err != nil {
 							continue
 						}
@@ -1686,20 +1825,6 @@ func (e *Engine) buildEnrichedNack(key string, conflicting *pb.EffectRef, tips [
 
 	nack.CausalChain = e.collectCausalChain(key, tips)
 
-	// Advertise our held keys so the subscriber can answer future read-misses
-	// without subscribing. Attaching the (potentially large) filter to every
-	// NACK is too much bandwidth, so the bulk transfer rides only on
-	// system-key NACKs — every node subscribes to the membership key on join,
-	// so that one rendezvous distributes the full set. Ongoing freshness is
-	// the real-time peerFilterAdd push on each SubscriptionEffect. The
-	// subscriber applies the bulk replace-if-newer.
-	if isSystemKey([]byte(key)) {
-		if b, ver := e.ownFilterSnapshot(); b != nil {
-			nack.NodeKeyFilter = b
-			nack.FilterVersion = ver
-		}
-	}
-
 	return nack
 }
 
@@ -1820,10 +1945,18 @@ func (e *Engine) ingestNackTips(nack *pb.NackNotify) {
 // ingestCausalChain bulk-fetches every ref in the NACK's pre-computed
 // causal chain in parallel and caches the deserialized effects. Does
 // NOT install tips — the synchronous ingestNackTips / walkAndInstall
-// path handles that. This just warms the cache so dag.bfs finds
-// everything locally instead of doing sequential FetchFromAny calls.
+// path handles that.
 func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
-	if e.effectCache == nil {
+	e.prefetchEffects(fromPbRefs(nack.CausalChain))
+}
+
+// prefetchEffects fetches every listed ref not already resident in parallel
+// and caches the deserialized effects, so a subsequent dag.bfs finds
+// everything locally instead of doing sequential FetchFromAny calls. Purely a
+// cache warmer: it installs no tips, and a failed fetch is skipped — the walk
+// that follows fetches stragglers itself.
+func (e *Engine) prefetchEffects(refs []Tip) {
+	if e.effectCache == nil || len(refs) == 0 {
 		return
 	}
 
@@ -1832,22 +1965,33 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 		ref  Tip
 		data []byte
 	}
-	results := make(chan fetchResult, len(nack.CausalChain))
+	results := make(chan fetchResult, len(refs))
 
-	for _, ref := range nack.CausalChain {
-		off := r(ref)
+	// Bound the fan-out: a causal chain can name thousands of refs, and one
+	// in-flight fetch per ref would dogpile peers/CDN. results is buffered to
+	// len(refs), so a worker never blocks sending and always frees its slot.
+	const prefetchParallelism = 16
+	sem := semaphore.NewWeighted(prefetchParallelism)
+	for _, off := range refs {
 		if _, ok := e.effectCache.Get(off); ok {
 			continue
 		}
+		if err := sem.Acquire(context.Background(), 1); err != nil {
+			// Unreachable with a Background context; stop dispatching rather
+			// than fetch unbounded.
+			slog.Error("prefetchEffects: semaphore acquire failed", "error", err)
+			break
+		}
 		pending++
 		go func(ref *pb.EffectRef) {
-			data, err := e.broadcaster.FetchFromAny(ref)
+			defer sem.Release(1)
+			data, err := e.broadcaster.FetchFromAny(ref, PreferPeers)
 			if err != nil {
 				results <- fetchResult{}
 				return
 			}
 			results <- fetchResult{ref: r(ref), data: data}
-		}(ref)
+		}(toPbRef(off))
 	}
 
 	for range pending {
@@ -1881,26 +2025,11 @@ func (e *Engine) ingestCausalChain(nack *pb.NackNotify) {
 // peers reduce us out of the subscriber set. Future reads re-subscribe and
 // bootstrap fresh. The leaf is already soft-deleted by the sweep.
 // evictedKey is a cold-evicted key queued for deferred creation-ref release; see
-// Engine.releaseQueue.
+// Engine.releaseItems.
 type evictedKey struct {
 	key  string
 	tips []Tip
 	ls   *leafState
-}
-
-// releaseQ returns the deferred-release queue, allocating it on first use. The CAS
-// lets concurrent first-evictors converge on a single queue; the loser's queue is
-// dropped (GC'd) and it reloads the winner's. Lazy so no construction site needs
-// to wire it.
-func (e *Engine) releaseQ() *xsync.UMPSCQueue[evictedKey] {
-	if q := e.releaseQueue.Load(); q != nil {
-		return q
-	}
-	q := xsync.NewUMPSCQueue[evictedKey]()
-	if e.releaseQueue.CompareAndSwap(nil, q) {
-		return q
-	}
-	return e.releaseQueue.Load()
 }
 
 func (e *Engine) onLeafEvicted(key string, tips []Tip, ls *leafState) {
@@ -1911,10 +2040,11 @@ func (e *Engine) onLeafEvicted(key string, tips []Tip, ls *leafState) {
 	// Defer the creation-ref chain walk to the governor: EvictBatch already
 	// dropped the tip (the act that frees space), and the walk is bookkeeping that
 	// must not sit on the write/read latency path that triggered this eviction.
-	// The governor drains releaseQueue at the top of reclaimUnreferenced, so the
+	// The governor drains releaseItems at the top of reclaimUnreferenced, so the
 	// vertices still free on the same tick.
-	e.releaseQ().Enqueue(evictedKey{key: key, tips: tips, ls: ls})
-	e.releasePending.Add(1)
+	e.releaseMu.Lock()
+	e.releaseItems = append(e.releaseItems, evictedKey{key: key, tips: tips, ls: ls})
+	e.releaseMu.Unlock()
 
 	// Count the real cold-key eviction here (once per victim) — the bounded
 	// sweep chose this key under memory pressure. Distinct from the vertex
@@ -1942,9 +2072,13 @@ func (e *Engine) releaseChainRefs(key string, tips []Tip, ls *leafState) {
 	if e.effectCache == nil {
 		return
 	}
+	// Terminal swap: after this, publishSubdag refuses to install into this
+	// leafState, so no racing read can pin vertices on a leaf whose release
+	// walk has already run. The sentinel also makes a double release (evict +
+	// flush) a no-op.
 	if ls != nil {
-		if cs := ls.subdag.Load(); cs != nil {
-			for tip := range cs.nodes {
+		if cs := ls.subdag.Swap(evictedSubdag); cs != nil && cs != evictedSubdag {
+			for _, tip := range cs.topoOrder {
 				e.effectCache.decref(tip)
 			}
 		}
@@ -2001,6 +2135,19 @@ func (e *Engine) broadcastUnsubscribe(key string, tips []Tip) {
 			}},
 		}
 		if data, err := MarshalEffect(unsub); err == nil {
+			// OnLocalEffect's contract is that the vertex is resident and owned
+			// when the hook runs (the cloud outbox increfs it and panics on a
+			// miss). This hand-rolled emit must install like rawEmit does. No
+			// leaf will ever release the creation ref — the key is evicted and
+			// unsubscribed — so it is dropped right after the hook: whoever
+			// increfed there (or nobody) owns the vertex from here.
+			if e.effectCache != nil {
+				e.effectCache.PutSized(offset, unsub, len(data))
+			}
+			e.fireLocalEffect(offset, unsub)
+			if e.effectCache != nil {
+				e.effectCache.Decref(offset)
+			}
 			notify := BuildOffsetNotify(e.nodeID, offset, unsub, data, nil)
 			e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		} else {
@@ -2271,7 +2418,7 @@ func (e *Engine) probeAndFetchKey(key string) {
 			}
 		}
 
-		fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(off))
+		fetchedData, fetchErr := e.broadcaster.FetchFromAny(toPbRef(off), e.fetchHint(key))
 		if fetchErr != nil {
 			continue
 		}

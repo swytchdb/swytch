@@ -35,6 +35,7 @@ type PacketHandler interface {
 	HandleNotifyACK(peerID NodeId, requestID uint64, status byte, credits uint32)
 	HandleNotifyACKWithData(peerID NodeId, requestID uint64, status byte, credits uint32, fullPacket []byte)
 	HandleNackNotify(peerID NodeId, nack *pb.NackNotify)
+	HandleKeyFilter(peerID NodeId, version uint64, filter []byte)
 }
 
 // Notify plaintext layout:
@@ -165,6 +166,26 @@ func parseNotifyNACKPayload(data []byte) ([]*pb.NackNotify, error) {
 		offset += int(nLen)
 	}
 	return nacks, nil
+}
+
+// MarshalKeyFilterPacket builds a key-filter plaintext body:
+// [1:type][8:version LE][marshaled CuckooChain]
+// Sent to a peer at connection establishment so it learns which keys we hold;
+// until it arrives, the peer treats us as holding everything.
+func MarshalKeyFilterPacket(version uint64, filter []byte) []byte {
+	buf := make([]byte, 1+8+len(filter))
+	buf[0] = PacketTypeKeyFilter
+	binary.LittleEndian.PutUint64(buf[1:9], version)
+	copy(buf[9:], filter)
+	return buf
+}
+
+// parseKeyFilterPacket parses the plaintext body of a key-filter packet.
+func parseKeyFilterPacket(data []byte) (version uint64, filter []byte, err error) {
+	if len(data) < 9 {
+		return 0, nil, fmt.Errorf("key filter packet too short: %d", len(data))
+	}
+	return binary.LittleEndian.Uint64(data[1:9]), data[9:], nil
 }
 
 // MarshalNackPacket builds a NACK plaintext body:

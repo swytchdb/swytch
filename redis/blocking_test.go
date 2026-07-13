@@ -40,7 +40,7 @@ func newHandlerWithEffects() *Handler {
 
 // newEffectsConn creates a Connection with EffectsCtx set, matching what the server does.
 func newEffectsConn(h *Handler) *shared.Connection {
-	conn := &shared.Connection{SelectedDB: 0, User: testUser, Ctx: context.Background()}
+	conn := &shared.Connection{User: testUser, Ctx: context.Background()}
 	if h.engine != nil {
 		conn.EffectsCtx = h.engine.NewContext()
 	}
@@ -601,7 +601,7 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			ctx := context.Background()
-			conn := &shared.Connection{SelectedDB: 0, User: testUser, Ctx: ctx}
+			conn := &shared.Connection{User: testUser, Ctx: ctx}
 
 			buf := &bytes.Buffer{}
 			w := shared.NewWriter(buf)

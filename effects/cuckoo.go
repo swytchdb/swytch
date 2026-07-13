@@ -213,7 +213,7 @@ func (c *CuckooFilter) UnmarshalBinary(data []byte) error {
 // it then can't replace, silently dropping a previously-added key.
 const cuckooChainChunk = 4096
 
-// cuckooChain is a queryable approximate set with NO false negatives, built
+// CuckooChain is a queryable approximate set with NO false negatives, built
 // from a sequence of CuckooFilters split into:
 //   - active: the single writable segment, always one we allocated and kept
 //     below cuckooChainChunk distinct keys, so Add on it never fails.
@@ -223,16 +223,16 @@ const cuckooChainChunk = 4096
 //
 // It never shrinks; a deleted key lingers as a safe false-positive (a needless
 // subscribe, never a wrong miss) until the chain is rebuilt.
-type cuckooChain struct {
+type CuckooChain struct {
 	sealed []*CuckooFilter
 	active *CuckooFilter
 }
 
-// add inserts key into the active segment, rotating first if that segment is
+// Add inserts key into the active segment, rotating first if that segment is
 // at capacity. Returns true iff a new fingerprint was actually stored (false
 // for an idempotent re-add), so callers can skip version bumps when the set
 // did not change.
-func (cc *cuckooChain) add(key string) bool {
+func (cc *CuckooChain) Add(key string) bool {
 	if cc.active == nil {
 		cc.active = NewCuckooFilter(cuckooChainChunk)
 	} else if cc.active.Count() >= cuckooChainChunk {
@@ -254,7 +254,8 @@ func (cc *cuckooChain) add(key string) bool {
 	return cc.active.Count() != before
 }
 
-func (cc *cuckooChain) maybeContains(key string) bool {
+// MaybeContains reports whether key may be in the set; false is authoritative.
+func (cc *CuckooChain) MaybeContains(key string) bool {
 	if cc.active != nil && cc.active.MaybeContains(key) {
 		return true
 	}
@@ -266,7 +267,7 @@ func (cc *cuckooChain) maybeContains(key string) bool {
 	return false
 }
 
-func (cc *cuckooChain) MarshalBinary() ([]byte, error) {
+func (cc *CuckooChain) MarshalBinary() ([]byte, error) {
 	n := len(cc.sealed)
 	if cc.active != nil {
 		n++
@@ -299,11 +300,17 @@ func (cc *cuckooChain) MarshalBinary() ([]byte, error) {
 
 // UnmarshalBinary decodes a chain as query-only segments (active stays nil) —
 // a decoded peer chain is never written to.
-func (cc *cuckooChain) UnmarshalBinary(data []byte) error {
+func (cc *CuckooChain) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 {
 		return errors.New("cuckoo chain: short buffer")
 	}
 	count := binary.BigEndian.Uint32(data[:4])
+	// Each segment costs at least its 4-byte length header, so a count that
+	// couldn't fit in the buffer is corrupt — reject it before it drives a
+	// giant pre-allocation (the input may come from a peer or the cloud).
+	if uint64(count) > uint64(len(data)-4)/4 {
+		return errors.New("cuckoo chain: segment count exceeds buffer")
+	}
 	off := 4
 	filters := make([]*CuckooFilter, 0, count)
 	for range count {

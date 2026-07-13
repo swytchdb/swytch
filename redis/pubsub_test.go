@@ -32,10 +32,9 @@ func TestHandler_PubSubCommands(t *testing.T) {
 	defer h.Close()
 
 	conn := &shared.Connection{
-		SelectedDB: 0,
-		User:       testUser,
-		Protocol:   shared.RESP2,
-		Ctx:        context.Background(),
+		User:     testUser,
+		Protocol: shared.RESP2,
+		Ctx:      context.Background(),
 	}
 
 	buf := &bytes.Buffer{}
@@ -86,7 +85,7 @@ func TestHandler_PubSubCommands(t *testing.T) {
 
 	// Test PUBSUB CHANNELS
 	// First subscribe again
-	conn2 := &shared.Connection{SelectedDB: 0, User: testUser, Protocol: shared.RESP2, Ctx: context.Background()}
+	conn2 := &shared.Connection{User: testUser, Protocol: shared.RESP2, Ctx: context.Background()}
 	cmd = &shared.Command{Type: shared.CmdSubscribe, Args: [][]byte{[]byte("news.sports"), []byte("news.weather")}}
 	h.ExecuteInto(cmd, w, conn2)
 	buf.Reset()
@@ -130,10 +129,9 @@ func TestHandler_PSubscribe(t *testing.T) {
 	defer h.Close()
 
 	conn := &shared.Connection{
-		SelectedDB: 0,
-		User:       testUser,
-		Protocol:   shared.RESP2,
-		Ctx:        context.Background(),
+		User:     testUser,
+		Protocol: shared.RESP2,
+		Ctx:      context.Background(),
 	}
 
 	buf := &bytes.Buffer{}
@@ -149,7 +147,7 @@ func TestHandler_PSubscribe(t *testing.T) {
 
 	// Test PUBSUB NUMPAT
 	cmd = &shared.Command{Type: shared.CmdPubSub, Args: [][]byte{[]byte("NUMPAT")}}
-	connNonPubSub := &shared.Connection{SelectedDB: 0, User: testUser, Protocol: shared.RESP2, Ctx: context.Background()}
+	connNonPubSub := &shared.Connection{User: testUser, Protocol: shared.RESP2, Ctx: context.Background()}
 	h.ExecuteInto(cmd, w, connNonPubSub)
 	if !bytes.Contains(buf.Bytes(), []byte(":2\r\n")) {
 		t.Errorf("expected 2 pattern subscriptions, got: %s", buf.String())

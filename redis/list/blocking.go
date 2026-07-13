@@ -160,7 +160,7 @@ func tryPop(cmd *shared.Command, key string, left bool, reg *shared.Registration
 		return nil, false, err
 	}
 
-	return elem.Data.GetRaw(), true, nil
+	return elem.Data.Decompress(), true, nil
 }
 
 // handleBRPopLPushNonBlocking handles BRPOPLPUSH inside transactions (non-blocking mode)
@@ -310,7 +310,7 @@ func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 
 			w.WriteArray(2)
 			w.WriteBulkStringStr(keyStr)
-			w.WriteBulkString(elem.Data.GetRaw())
+			w.WriteBulkString(elem.Data.Decompress())
 			return
 		}
 
@@ -421,7 +421,7 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.D
 			popped := make([][]byte, n)
 			if left {
 				for i := range n {
-					popped[i] = elements[i].Data.GetRaw()
+					popped[i] = elements[i].Data.Decompress()
 					if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -430,7 +430,7 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.D
 			} else {
 				for i := range n {
 					idx := len(elements) - 1 - i
-					popped[i] = elements[idx].Data.GetRaw()
+					popped[i] = elements[idx].Data.Decompress()
 					if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -626,7 +626,7 @@ func tryMultiPop(cmd *shared.Command, key string, left bool, count int, reg *sha
 	popped := make([][]byte, n)
 	if left {
 		for i := range n {
-			popped[i] = elements[i].Data.GetRaw()
+			popped[i] = elements[i].Data.Decompress()
 			if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
 				return nil, false, err
 			}
@@ -634,7 +634,7 @@ func tryMultiPop(cmd *shared.Command, key string, left bool, count int, reg *sha
 	} else {
 		for i := range n {
 			idx := len(elements) - 1 - i
-			popped[i] = elements[idx].Data.GetRaw()
+			popped[i] = elements[idx].Data.Decompress()
 			if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
 				return nil, false, err
 			}

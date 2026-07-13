@@ -132,9 +132,9 @@ type Stats struct {
 	// Error stats (error prefix -> count), uses xsync.Map for lock-free reads
 	errorStats *xsync.Map[string, *atomic.Uint64]
 
-	// Command stats (command name -> stats)
-	cmdStats   map[string]*CommandStats
-	cmdStatsMu xsync.RBMutex
+	// Command stats, indexed by CommandType. A flat array of atomics keeps
+	// the record path free of locks, map lookups, and allocations.
+	cmdStats [CmdMax]CommandStats
 }
 
 // CommandStats tracks statistics for a single command
@@ -154,7 +154,6 @@ func NewStats() *Stats {
 		setLatencies: make([]time.Duration, latencyHistogramSize),
 		cmdLatencies: make([]time.Duration, latencyHistogramSize),
 		errorStats:   xsync.NewMap[string, *atomic.Uint64](),
-		cmdStats:     make(map[string]*CommandStats),
 	}
 }
 
@@ -193,9 +192,13 @@ func (s *Stats) Reset() {
 		return true
 	})
 
-	s.cmdStatsMu.Lock()
-	s.cmdStats = make(map[string]*CommandStats)
-	s.cmdStatsMu.Unlock()
+	for i := range s.cmdStats {
+		st := &s.cmdStats[i]
+		st.Calls.Store(0)
+		st.Usec.Store(0)
+		st.RejectedCalls.Store(0)
+		st.FailedCalls.Store(0)
+	}
 }
 
 // ConnectionOpened records a new connection
@@ -336,32 +339,12 @@ func (s *Stats) GetErrorStats() map[string]uint64 {
 	return result
 }
 
-// getOrCreateCmdStats returns the CommandStats for a command, creating if necessary
-func (s *Stats) getOrCreateCmdStats(cmd string) *CommandStats {
-	token := s.cmdStatsMu.RLock()
-	stats, exists := s.cmdStats[cmd]
-	s.cmdStatsMu.RUnlock(token)
-
-	if exists {
-		return stats
-	}
-
-	// Need to create a new stats entry
-	s.cmdStatsMu.Lock()
-	// Double-check after acquiring write lock
-	if stats, exists = s.cmdStats[cmd]; exists {
-		s.cmdStatsMu.Unlock()
-		return stats
-	}
-	stats = &CommandStats{}
-	s.cmdStats[cmd] = stats
-	s.cmdStatsMu.Unlock()
-	return stats
-}
-
 // RecordCommand records a command execution
-func (s *Stats) RecordCommand(cmd string, usec uint64, failed bool) {
-	stats := s.getOrCreateCmdStats(cmd)
+func (s *Stats) RecordCommand(cmd CommandType, usec uint64, failed bool) {
+	if cmd < 0 || cmd >= CmdMax {
+		return
+	}
+	stats := &s.cmdStats[cmd]
 	stats.Calls.Add(1)
 	stats.Usec.Add(usec)
 	if failed {
@@ -375,13 +358,6 @@ func (s *Stats) RecordCommand(cmd string, usec uint64, failed bool) {
 	s.latencyMu.Unlock()
 }
 
-// RecordRejectedCommand records a rejected command (e.g., OOM)
-func (s *Stats) RecordRejectedCommand(cmd string) {
-	stats := s.getOrCreateCmdStats(cmd)
-	stats.Calls.Add(1)
-	stats.RejectedCalls.Add(1)
-}
-
 // CommandStatsSnapshot is a non-atomic snapshot of command stats
 type CommandStatsSnapshot struct {
 	Calls         uint64
@@ -390,15 +366,18 @@ type CommandStatsSnapshot struct {
 	FailedCalls   uint64
 }
 
-// GetCommandStats returns a copy of command statistics
+// GetCommandStats returns a copy of command statistics, keyed by command
+// name, for commands that have been called at least once.
 func (s *Stats) GetCommandStats() map[string]CommandStatsSnapshot {
-	token := s.cmdStatsMu.RLock()
-	defer s.cmdStatsMu.RUnlock(token)
-
-	result := make(map[string]CommandStatsSnapshot, len(s.cmdStats))
-	for cmd, stats := range s.cmdStats {
-		result[cmd] = CommandStatsSnapshot{
-			Calls:         stats.Calls.Load(),
+	result := make(map[string]CommandStatsSnapshot)
+	for cmd := range CmdMax {
+		stats := &s.cmdStats[cmd]
+		calls := stats.Calls.Load()
+		if calls == 0 {
+			continue
+		}
+		result[cmd.String()] = CommandStatsSnapshot{
+			Calls:         calls,
 			Usec:          stats.Usec.Load(),
 			RejectedCalls: stats.RejectedCalls.Load(),
 			FailedCalls:   stats.FailedCalls.Load(),

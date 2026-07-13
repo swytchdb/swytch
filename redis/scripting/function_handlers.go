@@ -525,10 +525,6 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 	e.scriptMutex.Lock()
 	defer e.scriptMutex.Unlock()
 
-	// Save the original database selection - SELECT inside scripts should not affect caller
-	originalDB := conn.SelectedDB
-	defer func() { conn.SelectedDB = originalDB }()
-
 	// Create context with timeout (or cancel-only when timeout is 0)
 	timeout := e.getScriptTimeout()
 	var ctx context.Context

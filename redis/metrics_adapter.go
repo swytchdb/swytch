@@ -91,9 +91,15 @@ func (a *MetricsAdapter) Reclaimed() uint64 {
 	return a.handler.GetVerticesReclaimed()
 }
 
-// ItemCount returns the current number of items in the cache.
+// ItemCount returns the number of keys resident in the index.
 func (a *MetricsAdapter) ItemCount() int {
 	return a.handler.GetItemCount()
+}
+
+// ReleaseQueueDepth returns the number of cold-evicted keys whose deferred
+// ref-release walk has not yet run.
+func (a *MetricsAdapter) ReleaseQueueDepth() int {
+	return a.handler.GetReleaseQueueDepth()
 }
 
 // ArenaBytes returns the critbit index's slot-array footprint (trie skeleton).

@@ -27,33 +27,40 @@ import (
 	"time"
 
 	"github.com/swytchdb/swytch/cluster"
+	pb "github.com/swytchdb/swytch/cluster/proto"
 	"github.com/swytchdb/swytch/effects"
 )
 
-// bootstrap performs DNS discovery, installs a temporary topology, and
-// waits for at least one peer to become reachable. It does NOT read
-// authoritative membership — that happens in waitForMembershipConverged
-// after self-registration, because every node's bootstrap waits for
-// the others to be visible and nobody is visible until they've
-// registered themselves. Reading membership before registerSelf
-// deadlocks the fleet when nodes start simultaneously.
+// bootstrap performs peer discovery (DNS, or the cloud membership roster when
+// --cloud is set), installs a temporary topology, and waits for at least one
+// peer to become reachable. It does NOT read authoritative membership — that
+// happens in waitForMembershipConverged after self-registration, because
+// every node's bootstrap waits for the others to be visible and nobody is
+// visible until they've registered themselves. Reading membership before
+// registerSelf deadlocks the fleet when nodes start simultaneously.
 //
 // On return: PeerManager is connected to at least one candidate, or
 // we've fallen back to solo mode with a warning.
 func (b *Beacon) bootstrap(ctx context.Context) error {
-	candidates, err := b.resolveJoinAddrWithRetry(ctx)
-	if err != nil {
-		slog.Warn("beacon: DNS resolution failed after retries, starting solo", "error", err)
-		return nil
+	var candidates []string
+	if b.cfg.Cloud != nil {
+		candidates = b.cloudCandidates(ctx)
+	} else {
+		var err error
+		candidates, err = b.resolveJoinAddrWithRetry(ctx)
+		if err != nil {
+			slog.Warn("beacon: DNS resolution failed after retries, starting solo", "error", err)
+			return nil
+		}
 	}
 
 	candidates = b.filterSelf(candidates)
 	if len(candidates) == 0 {
-		slog.Info("beacon: no peers found via DNS, starting solo")
+		slog.Info("beacon: no peers found, starting solo")
 		return nil
 	}
 
-	slog.Info("beacon: discovered candidates via DNS", "candidates", candidates)
+	slog.Info("beacon: discovered candidates", "candidates", candidates)
 	b.setTemporaryTopology(candidates)
 	b.expectedPeers = len(candidates)
 
@@ -63,9 +70,78 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 	defer waitCancel()
 	if err := b.pm.WaitForAnyPeer(waitCtx); err != nil {
 		slog.Warn("beacon: no candidates reachable, starting solo", "error", err)
+		// Bootstrap candidates are DNS guesses, not members. Conceding solo
+		// ends their relevance: keeping them would dial dead addresses forever
+		// (stale DNS from a rescheduled pod, our own other-address-family
+		// record) and expectedPeers > 0 would stall the symmetric-peer wait
+		// and membership convergence against peers that never come. Joining a
+		// cluster that was merely unreachable here is the same human
+		// adjudication as any membership repair — restart a node. Real members
+		// are never dropped by this: they arrive later through membership
+		// effects, which own the topology from then on.
+		b.setTemporaryTopology(nil)
+		b.expectedPeers = 0
 		return nil
 	}
 	return nil
+}
+
+// cloudCandidates discovers peer addresses from the cloud's membership
+// roster. A discovery *error* is retried with capped backoff, same as the DNS
+// path — a transient cloud hiccup at startup must not strand this node solo
+// while the rest of the fleet joins. A *successful* read that yields no
+// members is authoritative (fresh cluster, or we're first) and starts solo.
+func (b *Beacon) cloudCandidates(ctx context.Context) []string {
+	reduced, err := b.discoverMembersWithRetry(ctx)
+	if err != nil {
+		slog.Warn("beacon: cloud member discovery failed after retries, starting solo", "error", err)
+		return nil
+	}
+	members := parseMembership(reduced)
+	selfID := uint64(b.cfg.NodeID)
+	addrs := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.NodeID == selfID {
+			continue
+		}
+		addrs = append(addrs, m.Addr)
+	}
+	return addrs
+}
+
+// discoverMembersWithRetry reads the cloud membership roster, retrying on
+// error with capped backoff until it succeeds or the deadline passes. Same
+// rationale as resolveJoinAddrWithRetry: an error means "the cloud isn't
+// reachable yet", not "there is no cluster", and conceding solo on the first
+// error is what strands nodes in a split-brain membership.
+func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffect, error) {
+	const (
+		perAttemptTimeout = 10 * time.Second
+		discoverDeadline  = 30 * time.Second
+		backoffStart      = 250 * time.Millisecond
+		backoffMax        = 3 * time.Second
+	)
+
+	deadlineCtx, cancel := context.WithTimeout(ctx, discoverDeadline)
+	defer cancel()
+
+	backoff := backoffStart
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(deadlineCtx, perAttemptTimeout)
+		reduced, err := b.cfg.Cloud.DiscoverMembers(attemptCtx, MembershipKey)
+		attemptCancel()
+		if err == nil {
+			return reduced, nil
+		}
+		slog.Debug("beacon: cloud member discovery failed, retrying", "error", err, "backoff", backoff)
+
+		select {
+		case <-deadlineCtx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, backoffMax)
+	}
 }
 
 // resolveJoinAddrWithRetry resolves JoinAddr, retrying on error with capped

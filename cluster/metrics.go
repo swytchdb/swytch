@@ -298,6 +298,50 @@ func RecordNotificationReceived() {
 	NotificationsReceivedTotal.Inc()
 }
 
+// --- Cloud sync outbox ---
+
+var (
+	cloudOutboxPending = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cluster_cloud_outbox_pending",
+		Help: "Un-acked effects held in the cloud upload outbox (each pins its vertex in the pool)",
+	})
+
+	cloudOutboxEnqueuedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_outbox_enqueued_total",
+		Help: "Local effects enqueued for cloud upload",
+	})
+
+	cloudEffectsSentTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_effects_sent_total",
+		Help: "Effect envelopes handed to the upload stream (includes re-sends after reconnect)",
+	})
+
+	cloudEffectsAckedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_effects_acked_total",
+		Help: "Effects durably acked by the cloud",
+	})
+
+	cloudEffectsNackedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_effects_nacked_total",
+		Help: "Effects the cloud failed to store (scheduled for re-send)",
+	})
+
+	cloudStreamReconnectsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_stream_reconnects_total",
+		Help: "WriteEffects stream failures that triggered a reconnect",
+	})
+
+	cloudSidecarEffectsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_sidecar_effects_total",
+		Help: "Closure effects delivered inline by GetTips responses (installed without per-blob CDN fetches)",
+	})
+
+	cloudCDNFetchesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_cdn_fetch_total",
+		Help: "Per-blob CDN GETs (sidecar stragglers and PreferCDN fetches; excludes outbox-served reads)",
+	})
+)
+
 // --- 9.10 QUIC Transport ---
 
 var (

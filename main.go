@@ -20,6 +20,9 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 
@@ -56,12 +59,10 @@ func main() {
 			os.Exit(1)
 		}
 	case "gen-passphrase":
-		pass, err := cluster.GeneratePassphrase()
-		if err != nil {
+		if err := runGenPassphrase(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "gen-passphrase: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(pass)
 	case "-h", "--help", "help":
 		printUsage()
 	case "-v", "--version", "version":
@@ -75,6 +76,55 @@ func main() {
 	}
 }
 
+// runGenPassphrase handles the gen-passphrase subcommand. Without --cloud it
+// prints a single random cluster mTLS passphrase. With --cloud it prints a cloud
+// connection secret (the master) and the cloud secret derived from it.
+func runGenPassphrase(args []string) error {
+	fs := flag.NewFlagSet("gen-passphrase", flag.ContinueOnError)
+	cloud := fs.Bool("cloud", false, "generate a cloud connection secret and its derived cloud secret")
+	asJSON := fs.Bool("json", false, "with --cloud, emit the secrets as a JSON object")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // -h/--help: usage already printed, a successful invocation
+		}
+		return err
+	}
+
+	if !*cloud {
+		if *asJSON {
+			return fmt.Errorf("--json requires --cloud")
+		}
+		pass, err := cluster.GeneratePassphrase()
+		if err != nil {
+			return err
+		}
+		fmt.Println(pass)
+		return nil
+	}
+
+	connectionSecret, err := cluster.GenerateConnectionSecret()
+	if err != nil {
+		return err
+	}
+	cloudSecret := cluster.DeriveCloudSecret(connectionSecret)
+
+	if *asJSON {
+		out, err := json.Marshal(struct {
+			CloudSecret      string `json:"cloud_secret"`
+			ConnectionSecret string `json:"connection_secret"`
+		}{cloudSecret, connectionSecret})
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+
+	fmt.Printf("Cloud secret (enter during onboarding): %s\n", cloudSecret)
+	fmt.Printf("Connection secret (start with --cloud): %s\n", connectionSecret)
+	return nil
+}
+
 func printUsage() {
 	fmt.Println(`swytch - High-performance distributed caching database
 
@@ -83,7 +133,7 @@ Usage: swytch <command> [options]
 Commands:
   redis            Start a Redis-compatible server
   sql              Start a SQL (pg wire / SQLite dialect) server
-  gen-passphrase   Generate a cluster mTLS passphrase
+  gen-passphrase   Generate a cluster mTLS passphrase (use --cloud for cloud secrets)
   help             Show this help message
   version          Show version information
 
@@ -92,6 +142,8 @@ Examples:
   swytch redis --persistent --db-path /data/redis.db
   swytch sql --listen :5433
   swytch gen-passphrase
+  swytch gen-passphrase --cloud
+  swytch gen-passphrase --cloud --json
 
 Run 'swytch <command> -h' for more information on a command.`)
 }

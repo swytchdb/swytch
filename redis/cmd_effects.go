@@ -37,11 +37,13 @@ import (
 type EffectsConfig struct {
 	Enabled            bool
 	ClusterPassphrase  string
+	Cloud              string // Swytch Cloud connection secret; blanked after use
 	JoinAddr           string
 	ClusterPort        int
 	AdvertiseAddr      string
 	MemoryLimit        int64
 	MemoryLimitPercent float64
+	Compress           bool
 	Port               int // main Redis port, used to compute default ClusterPort
 }
 
@@ -49,9 +51,11 @@ type EffectsConfig struct {
 func RegisterEffectsFlags(fs *flag.FlagSet) *EffectsConfig {
 	cfg := &EffectsConfig{}
 	fs.StringVar(&cfg.ClusterPassphrase, "cluster-passphrase", "", "Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)")
+	fs.StringVar(&cfg.Cloud, "cloud", "", "Swytch Cloud connection secret (generate with: swytch gen-passphrase --cloud); derives cluster identity and discovers peers via cloud, so it replaces --cluster-passphrase and --join")
 	fs.StringVar(&cfg.JoinAddr, "join", "", "DNS name to resolve for cluster peer discovery")
 	fs.IntVar(&cfg.ClusterPort, "cluster-port", 0, "QUIC port for cluster traffic (default: --port + 1000)")
 	fs.StringVar(&cfg.AdvertiseAddr, "cluster-advertise", "", "Address:port this node advertises to peers (default: auto-detect)")
+	fs.BoolVar(&cfg.Compress, "compress", false, "Store values compressed inside effects (more resident data per byte of memory, decompression on read); nodes with any setting interoperate")
 	return cfg
 }
 
@@ -66,8 +70,11 @@ var activeRuntime *beacon.Runtime
 func InitializeEffects(cfg *EffectsConfig) error {
 	cfg.Enabled = true
 
+	if cfg.Cloud != "" && (cfg.ClusterPassphrase != "" || cfg.JoinAddr != "") {
+		return fmt.Errorf("--cloud is exclusive with --cluster-passphrase and --join: the connection secret derives the cluster identity and peers are discovered via cloud")
+	}
 	clusterPort := cfg.ClusterPort
-	if clusterPort == 0 && cfg.ClusterPassphrase != "" {
+	if clusterPort == 0 && (cfg.ClusterPassphrase != "" || cfg.Cloud != "") {
 		clusterPort = cfg.Port + 1000
 	}
 	if cfg.ClusterPassphrase == "" && cfg.JoinAddr != "" {
@@ -78,10 +85,13 @@ func InitializeEffects(cfg *EffectsConfig) error {
 		MemoryLimit:        cfg.MemoryLimit,
 		MemoryLimitPercent: cfg.MemoryLimitPercent,
 		ClusterPassphrase:  cfg.ClusterPassphrase,
+		ConnectionSecret:   cfg.Cloud,
 		JoinAddr:           cfg.JoinAddr,
 		ClusterPort:        clusterPort,
 		AdvertiseAddr:      cfg.AdvertiseAddr,
+		CompressValues:     cfg.Compress,
 	})
+	cfg.Cloud = "" // derive-and-drop: the runtime has its keys, nothing retains the master
 	if err != nil {
 		return fmt.Errorf("start cluster runtime: %w", err)
 	}
@@ -202,6 +212,9 @@ func PrintEffectsConfig(cfg *EffectsConfig) {
 	if cfg.JoinAddr != "" {
 		fmt.Printf("  Cluster join: %s\n", cfg.JoinAddr)
 	}
+	if activeRuntime != nil && activeRuntime.CloudSync != nil {
+		fmt.Printf("  Cloud durability: %s\n", cluster.CloudEndpoint)
+	}
 }
 
 // EffectsUsage returns the usage string for effects flags.
@@ -209,6 +222,8 @@ func EffectsUsage() string {
 	return `
 Cluster options:
   --cluster-passphrase=<pass>   Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)
+  --cloud=<secret>              Swytch Cloud connection secret (generate with: swytch gen-passphrase --cloud);
+                                replaces --cluster-passphrase and --join
   --join=<dns-name>             DNS name to resolve for cluster peer discovery
   --cluster-port=<num>          QUIC port for cluster traffic (default: --port + 1000)
   --cluster-advertise=<addr>    Address:port this node advertises to peers (default: auto-detect)

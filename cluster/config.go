@@ -35,19 +35,6 @@ type NodeConfig struct {
 	Region  string
 }
 
-// StorageConfig holds configuration for off-node object storage (Bunny CDN).
-type StorageConfig struct {
-	UploadEndpoint string // Bunny storage API (e.g. "https://storage.bunnycdn.com/zone")
-	CDNEndpoint    string // Bunny CDN read (e.g. "https://cdn.example.com")
-	AccessKey      string // Bunny storage access key
-	BasePath       string // Node-specific prefix (derived from NodeID if empty)
-
-	// HPKE keypair for post-quantum encryption (MLKEM768X25519 + AES-256-GCM).
-	// Base64-encoded. Used as the default for key ranges without specific keys.
-	HPKEPublicKey  string
-	HPKEPrivateKey string
-}
-
 // ClockConfig tunes the clock tick (heartbeat) subsystem. The zero value
 // selects all defaults, so existing callers need not populate it.
 type ClockConfig struct {
@@ -90,7 +77,6 @@ type ClusterConfig struct {
 	Nodes              []NodeConfig  // All nodes including self
 	TLSPassphrase      string        // Shared passphrase for deterministic mTLS CA derivation
 	ReplicationTimeout time.Duration // Max time to wait for replication ACK (default 5s)
-	Storage            StorageConfig // Object storage for off-node durability
 	Clock              ClockConfig   // Clock tick / failure detection tuning
 }
 

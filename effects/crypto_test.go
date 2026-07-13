@@ -24,18 +24,19 @@ import (
 	"testing"
 )
 
+func testEncryptor(t *testing.T) *Encryptor {
+	t.Helper()
+	enc, err := NewEncryptorFromIKM(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enc
+}
+
 func TestEncryptor_RoundTrip(t *testing.T) {
-	pub, priv, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
+	enc := testEncryptor(t)
 
-	enc, err := NewEncryptor(pub, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	plaintext := []byte("hello, post-quantum world!")
+	plaintext := []byte("hello, world!")
 	info := []byte("test-domain")
 
 	sealed, err := enc.SealAndCompress(plaintext, info)
@@ -43,8 +44,8 @@ func TestEncryptor_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if bytes.Equal(sealed, plaintext) {
-		t.Fatal("sealed should differ from plaintext")
+	if bytes.Contains(sealed, plaintext) {
+		t.Fatal("sealed blob contains the plaintext")
 	}
 
 	recovered, err := enc.OpenAndDecompress(sealed, info)
@@ -57,41 +58,97 @@ func TestEncryptor_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestNewEncryptorFromIKM_Deterministic(t *testing.T) {
+	ikm := bytes.Repeat([]byte{0x42}, 32)
+
+	a, err := NewEncryptorFromIKM(ikm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewEncryptorFromIKM(ikm)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two independent derivations from the same IKM must interoperate: one
+	// node seals, another node (deriving on its own) opens.
+	plaintext := []byte("cluster-shared cloud payload")
+	sealed, err := a.SealAndCompress(plaintext, []byte("effect"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := b.OpenAndDecompress(sealed, []byte("effect"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recovered, plaintext) {
+		t.Fatalf("cross-derivation round-trip failed: got %q, want %q", recovered, plaintext)
+	}
+
+	// A different IKM must not open the blob.
+	other, err := NewEncryptorFromIKM(bytes.Repeat([]byte{0x43}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.OpenAndDecompress(sealed, []byte("effect")); err == nil {
+		t.Fatal("blob sealed under one IKM opened under another")
+	}
+}
+
 func TestEncryptor_DomainSeparation(t *testing.T) {
-	pub, priv, err := GenerateKeyPair()
+	enc := testEncryptor(t)
+
+	sealed, err := enc.SealAndCompress([]byte("sensitive data"), []byte("domain-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	enc, err := NewEncryptor(pub, priv)
+	if _, err := enc.OpenAndDecompress(sealed, []byte("domain-b")); err == nil {
+		t.Fatal("blob sealed under one domain opened under another")
+	}
+}
+
+func TestEncryptor_TamperDetection(t *testing.T) {
+	enc := testEncryptor(t)
+
+	sealed, err := enc.SealAndCompress([]byte("integrity matters"), []byte("effect"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	plaintext := []byte("sensitive data")
+	for _, i := range []int{0, len(sealed) / 2, len(sealed) - 1} {
+		tampered := bytes.Clone(sealed)
+		tampered[i] ^= 0x01
+		if _, err := enc.OpenAndDecompress(tampered, []byte("effect")); err == nil {
+			t.Fatalf("tampered blob (byte %d) opened successfully", i)
+		}
+	}
 
-	sealed, err := enc.SealAndCompress(plaintext, []byte("domain-a"))
+	if _, err := enc.OpenAndDecompress(sealed[:10], []byte("effect")); err == nil {
+		t.Fatal("truncated blob opened successfully")
+	}
+}
+
+// TestEncryptor_SealOverhead pins the per-blob byte cost. Effects are tiny and
+// stored blob-per-effect, so constant sealing overhead multiplies directly
+// into storage and egress: nonce (24) + Poly1305 tag (16) on top of the
+// compressed payload, and nothing else.
+func TestEncryptor_SealOverhead(t *testing.T) {
+	enc := testEncryptor(t)
+
+	plaintext := []byte("small effect payload")
+	sealed, err := enc.SealAndCompress(plaintext, []byte("effect"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Decrypting with wrong info should fail
-	_, err = enc.OpenAndDecompress(sealed, []byte("domain-b"))
-	if err == nil {
-		t.Fatal("expected error when using wrong info for decryption")
+	if got, limit := len(sealed), len(Compress(plaintext))+40; got > limit {
+		t.Fatalf("sealed %d bytes, want ≤ %d (compressed + nonce + tag)", got, limit)
 	}
 }
 
 func TestEncryptor_LargePayload(t *testing.T) {
-	pub, priv, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	enc, err := NewEncryptor(pub, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enc := testEncryptor(t)
 
 	// 1MB payload — tests compression + encryption
 	plaintext := make([]byte, 1024*1024)
@@ -111,45 +168,5 @@ func TestEncryptor_LargePayload(t *testing.T) {
 
 	if !bytes.Equal(recovered, plaintext) {
 		t.Fatal("large payload round-trip failed")
-	}
-}
-
-func TestEncryptor_EncryptOnlyNode(t *testing.T) {
-	pub, _, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	enc, err := NewEncryptor(pub, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	plaintext := []byte("encrypt only")
-	sealed, err := enc.SealAndCompress(plaintext, []byte("test"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sealed) == 0 {
-		t.Fatal("expected non-empty sealed data")
-	}
-
-	// Decryption should fail without private key
-	_, err = enc.OpenAndDecompress(sealed, []byte("test"))
-	if err == nil {
-		t.Fatal("expected error when decrypting without private key")
-	}
-}
-
-func TestGenerateKeyPair(t *testing.T) {
-	pub, priv, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pub) == 0 {
-		t.Fatal("public key should not be empty")
-	}
-	if len(priv) == 0 {
-		t.Fatal("private key should not be empty")
 	}
 }

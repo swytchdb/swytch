@@ -782,12 +782,15 @@ parseStreams:
 	}
 
 	// Try to read streams
-	tryReadStreams := func() []streamResult {
+	tryReadStreams := func() ([]streamResult, error) {
 		var results []streamResult
 
 		for j, sKey := range streamKeys {
 			snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
-			if err != nil || !exists || wrongType {
+			if err != nil {
+				return nil, err
+			}
+			if !exists || wrongType {
 				continue
 			}
 
@@ -819,12 +822,16 @@ parseStreams:
 			}
 		}
 
-		return results
+		return results, nil
 	}
 
 	// Non-blocking case
 	if block < 0 {
-		results := tryReadStreams()
+		results, err := tryReadStreams()
+		if err != nil {
+			w.WriteError(err.Error())
+			return
+		}
 		if len(results) == 0 {
 			w.WriteNullArray()
 			return
@@ -837,7 +844,11 @@ parseStreams:
 	// First resolve $ IDs to current LastID
 	for j, sKey := range streamKeys {
 		if useLastID[j] {
-			snap, _, exists, _, _ := getStreamSnapshot(cmd, sKey)
+			snap, _, exists, _, err := getStreamSnapshot(cmd, sKey)
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
 			if exists {
 				lastID, _, _, found := streamMetadata(snap)
 				if !found {
@@ -864,7 +875,12 @@ parseStreams:
 
 	// Blocking loop
 	for {
-		results := tryReadStreams()
+		results, err := tryReadStreams()
+		if err != nil {
+			reg.Cancel()
+			w.WriteError(err.Error())
+			return
+		}
 		if len(results) > 0 {
 			reg.Cancel()
 			writeXReadResults(w, results)
@@ -981,7 +997,11 @@ parseNBStreams:
 
 		for j, sKey := range streamKeys {
 			snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
-			if err != nil || !exists || wrongType {
+			if err != nil {
+				w.WriteError(err.Error())
+				return
+			}
+			if !exists || wrongType {
 				continue
 			}
 
@@ -1310,7 +1330,7 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		if err == nil && snap != nil && snap.NetAdds != nil {
 			count := 0
 			for _, elem := range snap.NetAdds {
-				r := elem.Data.GetRaw()
+				r := elem.Data.Decompress()
 				if len(r) >= 32 {
 					entryGen := int64(binary.LittleEndian.Uint64(r[24:32]))
 					if entryGen == currentGen {
@@ -1533,7 +1553,7 @@ func writeXInfoConsumerFull(w *shared.Writer, name string, pelEntries []*shared.
 
 	seenTime, activeTime := int64(0), int64(0)
 	if elem, ok := consumers[name]; ok {
-		seenTime, activeTime = decodeConsumerMeta(elem.Data.GetRaw())
+		seenTime, activeTime = decodeConsumerMeta(elem.Data.Decompress())
 	}
 
 	w.WriteBulkStringStr("seen-time")
@@ -1707,7 +1727,7 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	w.WriteArray(len(consumerNames))
 	for _, name := range consumerNames {
 		elem := consumers[name]
-		seenTime, activeTime := decodeConsumerMeta(elem.Data.GetRaw())
+		seenTime, activeTime := decodeConsumerMeta(elem.Data.Decompress())
 		pendingCount := consumerPendingCount(pelSnap, name)
 
 		w.WriteArray(8)
@@ -1971,7 +1991,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 			for elemID, elem := range pelSnap.NetAdds {
 				if len(elemID) == 16 {
 					id := decodeStreamElementID([]byte(elemID))
-					raw := elem.Data.GetRaw()
+					raw := elem.Data.Decompress()
 					if len(raw) >= 24 {
 						consumer := string(raw[24:])
 						group.Pending[id] = &shared.PendingEntry{
@@ -2372,7 +2392,7 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	keys = []string{key}
 	valid = true
 	runner = func() {
-		_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
+		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
 			return
@@ -2387,7 +2407,6 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		}
 
 		// Verify the stream ID exists in the stream
-		snap, _, _ := cmd.Context.GetSnapshot(key)
 		entries := snapshotToEntries(snap)
 		found := false
 		for _, e := range entries {

@@ -51,6 +51,11 @@ type EngineConfig struct {
 	// precedence over MemoryLimit. The cache enforces this via a live
 	// re-evaluating tick so cgroup/system changes propagate.
 	MemoryLimitPercent float64
+	// CompressValues makes this node store data values zstd-compressed inside
+	// the effects it emits, trading decompression on read for more resident
+	// DAG per byte. Write-side only: the per-effect compression flag drives
+	// reading, so nodes with different settings share one DAG.
+	CompressValues bool
 }
 
 // ModeForKey returns the safety mode for a key. First matching rule wins.

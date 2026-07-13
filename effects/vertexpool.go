@@ -79,6 +79,26 @@ type vertex struct {
 type VertexPool struct {
 	m *xsync.Map[Tip, *vertex]
 
+	// reclaimQueue holds tips whose refcount just transitioned to zero — the
+	// candidates the governor's per-tick drainReclaim frees without ever scanning
+	// the whole map. This is the sole reclaim mechanism: there is no full-map
+	// fallback, at any pressure level, because every path to refs==0 enqueues
+	// here — the two decrement sites (decref, decrefChainNode) and born-at-zero
+	// cache puts (PutSizedCache) — so the queue is by construction the complete
+	// set of reclaimable vertices. Completeness is enforced by
+	// TestRefcount_EvictAllReclaimsPool (evict every key, then the pool must be
+	// empty); a future decrement site that forgets to enqueue fails that test
+	// rather than silently leaking. The single governor goroutine consumes;
+	// reclaimPending counts enqueued-but-undrained entries so the consumer
+	// dequeues exactly the available set (UMPSCQueue.Dequeue blocks on empty, has
+	// no Len). A stale or duplicate entry is harmless: drainReclaim's
+	// CAS(0→tombstone) fails on a re-referenced vertex and delete no-ops on an
+	// absent one. UMPSCQueue's slot retention (it never zeroes dequeued items) is
+	// safe here, unlike for evictedKey: Tip is a pointer-free value, so a retained
+	// slot pins nothing.
+	reclaimQueue   *xsync.UMPSCQueue[Tip]
+	reclaimPending atomic.Int64
+
 	hits   atomic.Uint64
 	misses atomic.Uint64
 	// reclaimed counts vertices freed by reclaimUnreferenced (refs-0 below-LCA
@@ -93,7 +113,10 @@ type VertexPool struct {
 }
 
 func newVertexPool() *VertexPool {
-	return &VertexPool{m: xsync.NewMap[Tip, *vertex]()}
+	return &VertexPool{
+		m:            xsync.NewMap[Tip, *vertex](),
+		reclaimQueue: xsync.NewUMPSCQueue[Tip](),
+	}
 }
 
 // Get returns the effect at tip.
@@ -170,24 +193,32 @@ func tipCount(eff *pb.Effect) int32 {
 }
 
 // PutSizedCache stores a fetched effect on a key we do NOT serve as a reclaimable
-// cache entry: refs start at 0, so it carries no creation ref and reclaimUnref-
-// erenced frees it the moment no subdag adopts it. These are cross-key bind
-// adjudication fetches (and remote effects on unsubscribed keys): a read that
-// walks them holds them via the reconstruct dag for its duration, and they are
-// refetchable from a peer, so they must not pin memory the way an owned effect's
-// creation ref does. An already-resident owned tip is kept (LoadOrStore), never
+// cache entry: refs start at 0, so it carries no creation ref and reclaim frees
+// it the moment no subdag adopts it. These are cross-key bind adjudication
+// fetches (and remote effects on unsubscribed keys): a read that walks them
+// holds them via the reconstruct dag for its duration, and they are refetchable
+// from a peer, so they must not pin memory the way an owned effect's creation
+// ref does. An already-resident owned tip is kept (LoadOrStore), never
 // downgraded. protoLen semantics match PutSized.
+//
+// A freshly-stored entry is born at refs==0 and will never see a refs→0
+// transition unless first adopted (publishSubdag) and then dropped, so it is
+// enqueued as a reclaim candidate at birth — without this an un-adopted cache
+// fetch would never be reclaimed (there is no full-map scan to catch it).
 func (p *VertexPool) PutSizedCache(tip Tip, eff *pb.Effect, protoLen int) {
 	nv := &vertex{eff: eff, size: int64(protoLen) + vertexOverhead}
-	p.m.LoadOrStore(tip, nv) // refs default to 0; keep an existing (owned) vertex
+	if _, loaded := p.m.LoadOrStore(tip, nv); !loaded {
+		p.enqueueReclaim(tip)
+	}
 }
 
 // delete removes tip from the pool and counts a reclaim. It does NOT touch the
 // effect's deps: a vertex is kept alive by the tipsets and DAGs that reach it
 // (its own creation/adoption refs), not by its parents, so freeing a vertex
 // never cascades to its deps — a shared dep stays as long as another reacher
-// still references it. Returns the per-vertex size estimate freed (telemetry
-// only), or 0 if tip was absent. Its only caller is reclaimUnreferenced.
+// still references it (which is why the reclaim queue, not a re-scan, is what
+// catches each newly-zero vertex). Returns the per-vertex size estimate freed
+// (telemetry only), or 0 if tip was absent. Its only caller is claimAndDelete.
 func (p *VertexPool) delete(tip Tip) int64 {
 	prev, loaded := p.m.LoadAndDelete(tip)
 	if !loaded {
@@ -216,6 +247,9 @@ func (p *VertexPool) decrefChainNode(tip Tip) (*pb.Effect, bool) {
 			break // cache node (no creation ref) or already released — nothing to do
 		}
 		if v.refs.CompareAndSwap(n, n-1) {
+			if n-1 == 0 {
+				p.enqueueReclaim(tip) // last ref released — reclaim candidate
+			}
 			break
 		}
 	}
@@ -227,11 +261,54 @@ func (p *VertexPool) decrefChainNode(tip Tip) (*pb.Effect, bool) {
 // eviction the old conflated counter never saw.
 func (p *VertexPool) recordColdEviction() { p.coldEvictions.Add(1) }
 
-// rangeVertices iterates every resident vertex. The callback must not call
-// the pool's mutating methods on the same tip mid-iteration other than
-// delete, which xsync.Map tolerates.
-func (p *VertexPool) rangeVertices(fn func(tip Tip, v *vertex) bool) {
-	p.m.Range(fn)
+// enqueueReclaim records a tip whose refcount just reached zero (or a
+// born-at-zero cache put) as a reclaim candidate. Enqueue precedes the pending
+// increment so the consumer's Swap-then-dequeue-n never observes a count for an
+// item not yet in the queue.
+func (p *VertexPool) enqueueReclaim(tip Tip) {
+	p.reclaimQueue.Enqueue(tip)
+	p.reclaimPending.Add(1)
+}
+
+// claimAndDelete frees the vertex at tip iff it is still a reclaimable refs==0
+// non-system vertex, returning the bytes freed (0 if it survived). The
+// CAS(0→vertexTombstone) is the membership oracle: it fails if a concurrent
+// incref or owned re-Put bumped refs above 0 since the candidate was enqueued —
+// in which case the vertex is referenced again and must survive. incref treats a
+// successful claim as "absent" and refuses to resurrect it, so delete after the
+// claim is safe. Without the CAS this check-then-delete races incref and frees a
+// referenced vertex. System keys are pinned defensively.
+func (p *VertexPool) claimAndDelete(tip Tip, v *vertex) int64 {
+	if v.eff != nil && isSystemKey(v.eff.Key) {
+		return 0
+	}
+	if !v.refs.CompareAndSwap(0, vertexTombstone) {
+		return 0
+	}
+	return p.delete(tip)
+}
+
+// drainReclaim frees every queued reclaim candidate, returning the bytes freed.
+// This is the whole reclaim mechanism — the governor calls it every tick at any
+// pressure level (via reclaimUnreferenced): O(transitions since the last tick),
+// touching only refs==0 candidates, with no full-map scan, so it never pins a
+// core or stalls the request path the way a rangeVertices sweep would.
+// Single-consumer (the governor goroutine): the Swap-then-dequeue is not safe to
+// run from two goroutines at once. A stale candidate (already reclaimed,
+// re-referenced, or re-put as owned) is a cheap no-op via claimAndDelete. It
+// dequeues exactly reclaimPending entries — the count enqueued so far — so the
+// blocking UMPSCQueue.Dequeue never waits on an empty queue; entries enqueued
+// concurrently after the Swap are counted into the next drain.
+func (p *VertexPool) drainReclaim() int64 {
+	n := p.reclaimPending.Swap(0)
+	var total int64
+	for ; n > 0; n-- {
+		tip := p.reclaimQueue.Dequeue()
+		if v, ok := p.m.Load(tip); ok {
+			total += p.claimAndDelete(tip, v)
+		}
+	}
+	return total
 }
 
 // vertexTombstone marks a vertex reclaimUnreferenced has claimed for deletion.
@@ -240,31 +317,38 @@ func (p *VertexPool) rangeVertices(fn func(tip Tip, v *vertex) bool) {
 // to resurrect it. Reclaim CAS-claims 0 -> vertexTombstone, then deletes.
 const vertexTombstone = math.MinInt32 / 2
 
-// incref bumps the key-membership refcount of the vertex at tip, if resident.
-// A no-op for a non-resident tip (e.g. an effect served from the wire-parse
-// fallback that never entered the pool) — refcounting only governs pooled
-// vertices.
+// incref bumps the key-membership refcount of the vertex at tip and reports
+// whether the reference was taken. It fails (false) for a non-resident tip and
+// for a vertex reclaimUnreferenced has already claimed for deletion (refs < 0):
+// the claim-then-delete is atomic with this CAS, so resurrecting a claimed
+// vertex would let the pool free a vertex the caller still references.
 //
-// It must not resurrect a vertex reclaimUnreferenced has already claimed for
-// deletion (refs < 0): the claim-then-delete is atomic with this CAS, so a
-// concurrent reader that walks a just-claimed tip simply treats it as absent
-// (the effect is still reachable via getEffect / a re-fetch). Without this
-// guard, a read could incref between reclaim's refs==0 check and its delete,
-// leaving the pool to free a vertex the read still references — a vertex that
-// stays resident off the pool's books (Bytes() drifts below true memory).
-func (p *VertexPool) incref(tip Tip) {
+// Callers that retain the effect beyond the current operation (subdag pins,
+// the cloud outbox) MUST honor a false return — retaining a pointer without
+// the ref recreates exactly the off-books residency this protocol exists to
+// prevent: memory that is heap-live but invisible to the pool's accounting
+// and unreachable by eviction.
+func (p *VertexPool) incref(tip Tip) bool {
 	if v, ok := p.m.Load(tip); ok {
 		for {
 			r := v.refs.Load()
 			if r < 0 {
-				return // claimed for reclamation; do not resurrect
+				return false // claimed for reclamation; do not resurrect
 			}
 			if v.refs.CompareAndSwap(r, r+1) {
-				return
+				return true
 			}
 		}
 	}
+	return false
 }
+
+// Incref adds a DAG reference to the vertex at tip and reports whether the
+// reference was taken. See incref for the failure contract.
+func (p *VertexPool) Incref(tip Tip) bool { return p.incref(tip) }
+
+// Decref releases a DAG reference on the vertex at tip.
+func (p *VertexPool) Decref(tip Tip) { p.decref(tip) }
 
 // decref lowers the key-membership refcount of the vertex at tip, if resident.
 // A refcount that goes negative means a decref had no matching incref — a
@@ -273,8 +357,12 @@ func (p *VertexPool) incref(tip Tip) {
 // (a leak). It is never correct, so it panics rather than silently underflowing.
 func (p *VertexPool) decref(tip Tip) {
 	if v, ok := p.m.Load(tip); ok {
-		if n := v.refs.Add(-1); n < 0 {
+		n := v.refs.Add(-1)
+		if n < 0 {
 			panic(fmt.Sprintf("vertex refcount underflow: tip=%v refs=%d (decref without matching incref)", tip, n))
+		}
+		if n == 0 {
+			p.enqueueReclaim(tip) // last ref released — reclaim candidate
 		}
 	}
 }
@@ -341,6 +429,12 @@ func (e *Engine) startMemoryGovernor(targetBytes int64) {
 	e.index.SetEvictHooks(
 		func(key string) bool { return !isSystemKey([]byte(key)) },
 		e.onLeafEvicted,
+		// Live over-target signal: the governor sets evictBudget > 0 each tick it
+		// measures live heap above target, and writers drain it back to 0. This is
+		// the keytrie analogue of CloxCache's instantaneous
+		// entryCount >= capacity check, so a graduation is counted only while
+		// there is genuinely pressure to adapt against.
+		func() bool { return e.evictBudget.Load() > 0 },
 	)
 	if cur := debug.SetMemoryLimit(-1); cur == math.MaxInt64 {
 		// Reserve 5% of the target for non-heap memory (stacks, mmap, etc.).
@@ -363,20 +457,25 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 		case <-ticker.C:
 			// 1. Drain any budget the write path didn't (idle / low write rate), so
 			//    a quiet node still converges to target. Each eviction only drops the
-			//    victim's tip and queues its ref-release walk (releaseQueue) — the
+			//    victim's tip and queues its ref-release walk (releaseItems) — the
 			//    walk runs in step 2, off the latency path.
 			e.drainEvictBudget(maxDrainPerTick)
-			// 2. Reclaim: first run the deferred ref-release walks for every key
+			// 2. Reclaim, entirely off the candidate queue — no full-map scan, at
+			//    any pressure level. Run the deferred ref-release walks for every key
 			//    evicted since the last tick (inline back-pressure evictions plus the
-			//    drain above), then free the now-refs-0 vertices. Below-LCA history
-			//    and orphans the GC still marks as live (the pool map references them)
-			//    would otherwise inflate the live-heap reading with reclaimable
-			//    garbage; reclaiming before measuring keeps Bytes() on the true
-			//    working set rather than memory that's about to free itself.
+			//    drain above), then free the vertices those walks and concurrent
+			//    reads drove to refs==0. Every path to refs==0 enqueues, so the queue
+			//    is the complete set of reclaimable vertices. Reclaiming before
+			//    measuring keeps Bytes() on the true working set (below-LCA history /
+			//    orphans the GC still marks live are freed here first).
 			e.reclaimUnreferenced()
 			// 3. Re-measure and set the deficit for the write path to drain over the
-			//    next second as back-pressure. Sized as overage / true per-key
-			//    footprint (live heap / live keys), straight from the runtime.
+			//    next second as back-pressure. If we are still over target after
+			//    draining every reclaimable vertex, the live working set genuinely
+			//    exceeds the budget: evict cold keys. Their chain release re-enqueues
+			//    their vertices, which the next tick's drain frees — sustained
+			//    pressure converges through the queue, never through a full scan.
+			//    Sized as overage / true per-key footprint (live heap / live keys).
 			live := e.effectCache.Bytes()
 			over := live - targetBytes
 			if over <= 0 {
@@ -389,7 +488,10 @@ func (e *Engine) memoryGovernorLoop(targetBytes int64) {
 				continue
 			}
 			avgPerKey := max(live/keys, 64)
-			e.evictBudget.Store(min(over/avgPerKey, maxDrainPerTick))
+			// Round a positive deficit up to at least one key: an overage
+			// smaller than avgPerKey would otherwise divide to a zero budget
+			// and park the node permanently over target.
+			e.evictBudget.Store(min(max(over/avgPerKey, 1), maxDrainPerTick))
 		}
 	}
 }
@@ -442,71 +544,67 @@ func (e *Engine) drainEvictBudget(maxKeys int) {
 		e.evictBudget.Add(-int64(n))
 		maxKeys -= n
 	}
-	// Note: no reclaimUnreferenced here. EvictBatch already released each dropped
-	// leaf's tips, subdag, reduced memo, and subscription synchronously (via the
-	// refDelta hook + onLeafEvicted); the now-refs-0 pool vertices are swept by the
-	// governor's per-tick reclaim. A full pool scan must never run on the inline
-	// write-path drain.
+	// Note: no reclaim here. EvictBatch already released each dropped leaf's
+	// tips, subdag, reduced memo, and subscription synchronously (via the
+	// refDelta hook + onLeafEvicted); the now-refs-0 pool vertices are enqueued
+	// as reclaim candidates and freed by the governor's per-tick drain. Reclaim
+	// must never run on the inline write-path drain.
+}
+
+// ReleaseQueueDepth returns the number of cold-evicted keys whose deferred
+// ref-release walk has not yet run. Each pending entry pins its key's cached
+// subdag and resident effect chain, so a persistently deep queue means the
+// governor's reclaim pass is falling behind eviction and live heap will read
+// high for memory eviction can't actually free yet.
+func (e *Engine) ReleaseQueueDepth() int {
+	e.releaseMu.Lock()
+	n := len(e.releaseItems)
+	e.releaseMu.Unlock()
+	return n
 }
 
 // drainPendingReleases runs the deferred creation-ref chain walks
 // (releaseChainRefs) for keys cold-evicted since the last call. Single-consumer:
-// only reclaimUnreferenced (on the governor goroutine) calls it. It dequeues
-// exactly releasePending entries — the count enqueued so far — so the blocking
-// UMPSCQueue.Dequeue never waits on an empty queue; entries enqueued concurrently
-// after the Swap are counted into the next drain.
+// only reclaimUnreferenced (on the governor goroutine) calls it. It swaps the
+// buffer out under the lock (entries enqueued during the walks land in the
+// spare and are drained next call), then zeroes every processed slot before
+// reusing the buffer — an evictedKey's leafState pins the key's whole cached
+// subdag → effect → payload chain, so a drained-but-unzeroed slot would keep
+// gigabytes of evicted state GC-reachable.
 func (e *Engine) drainPendingReleases() {
-	n := e.releasePending.Swap(0)
-	if n == 0 {
+	e.releaseMu.Lock()
+	batch := e.releaseItems
+	e.releaseItems = e.releaseSpare[:0]
+	e.releaseMu.Unlock()
+	if len(batch) == 0 {
+		e.releaseSpare = batch
 		return
 	}
-	q := e.releaseQueue.Load() // non-nil: pending>0 means onLeafEvicted ran releaseQ
-	for ; n > 0; n-- {
-		ek := q.Dequeue()
+	for _, ek := range batch {
 		e.releaseChainRefs(ek.key, ek.tips, ek.ls)
 	}
+	clear(batch)
+	e.releaseSpare = batch[:0]
 }
 
-// reclaimUnreferenced drops every pool vertex whose refcount is zero: it is held
-// by no tipset that reaches it and no cached subdag that adopted it, so nothing
-// reconstruct walks from a live tip can reach it — it is a released chain node, a
-// reclaimable cache fetch, or a true orphan, and safe to free (getEffect
-// re-fetches on the rare miss). The maintained refcount is the membership oracle,
-// so reclamation needs no per-key DAG walk.
+// reclaimUnreferenced runs the deferred creation-ref chain walks for keys
+// cold-evicted since the last call, then frees every pool vertex now at refcount
+// zero by draining the candidate queue — no full-map scan. A vertex held by no
+// tipset that reaches it and no cached subdag that adopted it is a released
+// chain node, a reclaimable cache fetch, or a true orphan, and safe to free
+// (getEffect re-fetches on the rare miss); every path to refs==0 enqueued it
+// (decref, decrefChainNode, born-at-zero PutSizedCache), so the queue is the
+// complete set of reclaimable vertices.
 //
-// It first drains releaseQueue — the deferred creation-ref chain walks for keys
-// cold-evicted since the last call — so an evicted key's chain drops to refs==0
-// in this same pass and frees here, the work having moved off the eviction
-// latency path. System-key effects are pinned defensively.
+// Like drainReclaim it is single-consumer: only the governor goroutine (and
+// tests, which never start a governor — it requires a memory target) may call
+// it.
 func (e *Engine) reclaimUnreferenced() int64 {
 	if e.effectCache == nil {
 		return 0
 	}
 	e.drainPendingReleases()
-	var total int64
-	for {
-		var reclaimed int64
-		e.effectCache.rangeVertices(func(tip Tip, v *vertex) bool {
-			if v.eff != nil && isSystemKey(v.eff.Key) {
-				return true
-			}
-			// Atomically claim a refs==0 vertex for deletion. The CAS fails if a
-			// concurrent incref bumped it above 0 between now and the snapshot the
-			// range saw — in which case the vertex is referenced again and must
-			// survive. Only after a successful claim (which incref treats as
-			// "absent", refusing to resurrect) is it safe to delete. Without the CAS
-			// this check-then-delete races incref and frees a referenced vertex.
-			if !v.refs.CompareAndSwap(0, vertexTombstone) {
-				return true
-			}
-			reclaimed += e.effectCache.delete(tip)
-			return true
-		})
-		total += reclaimed
-		if reclaimed == 0 {
-			break // a full pass freed nothing — the cascade is drained
-		}
-	}
+	total := e.effectCache.drainReclaim()
 	if total > 0 {
 		slog.Debug("vertex pool: reclaimed unreferenced effects",
 			"est_bytes_freed", total, "live_heap", e.effectCache.Bytes())

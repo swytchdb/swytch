@@ -123,13 +123,13 @@ func TestCuckooUnmarshalRejectsGarbage(t *testing.T) {
 // must still report present, and the marshal round-trip must preserve them.
 func TestCuckooChainNoFalseNegativesAcrossRotation(t *testing.T) {
 	const n = cuckooChainChunk*5 + 123 // force several rotations
-	var cc cuckooChain
+	var cc CuckooChain
 	for i := range n {
-		cc.add(fmt.Sprintf("key:%d", i))
+		cc.Add(fmt.Sprintf("key:%d", i))
 	}
 	for i := range n {
 		k := fmt.Sprintf("key:%d", i)
-		if !cc.maybeContains(k) {
+		if !cc.MaybeContains(k) {
 			t.Fatalf("false negative across rotation for %q", k)
 		}
 	}
@@ -138,26 +138,26 @@ func TestCuckooChainNoFalseNegativesAcrossRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalBinary: %v", err)
 	}
-	var dec cuckooChain
+	var dec CuckooChain
 	if err := dec.UnmarshalBinary(data); err != nil {
 		t.Fatalf("UnmarshalBinary: %v", err)
 	}
 	for i := range n {
 		k := fmt.Sprintf("key:%d", i)
-		if !dec.maybeContains(k) {
+		if !dec.MaybeContains(k) {
 			t.Fatalf("decoded chain false negative for %q", k)
 		}
 	}
 }
 
-// TestCuckooChainAddReportsChange checks add's return: true for a new key,
+// TestCuckooChainAddReportsChange checks Add's return: true for a new key,
 // false for an idempotent re-add (drives the version-bump skip).
 func TestCuckooChainAddReportsChange(t *testing.T) {
-	var cc cuckooChain
-	if !cc.add("x") {
+	var cc CuckooChain
+	if !cc.Add("x") {
 		t.Fatal("first add of a key should report a change")
 	}
-	if cc.add("x") {
+	if cc.Add("x") {
 		t.Fatal("re-adding the same key should report no change")
 	}
 }

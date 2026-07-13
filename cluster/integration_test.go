@@ -27,6 +27,7 @@ import (
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
+	"github.com/swytchdb/swytch/effects"
 )
 
 func TestIntegration_TwoNodeNotification(t *testing.T) {
@@ -126,7 +127,7 @@ func TestIntegration_FetchFromAny(t *testing.T) {
 		[]LogReader{lr0, lr1},
 	)
 
-	data, err := pms[1].FetchFromAny(&pb.EffectRef{NodeId: 0, Offset: 999})
+	data, err := pms[1].FetchFromAny(&pb.EffectRef{NodeId: 0, Offset: 999}, effects.PreferPeers)
 	if err != nil {
 		t.Fatalf("FetchFromAny failed: %v", err)
 	}

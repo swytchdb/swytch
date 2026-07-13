@@ -2463,27 +2463,41 @@ func TestHandleCopy(t *testing.T) {
 }
 
 func TestHandleMove(t *testing.T) {
-	t.Run("missing source returns 0", func(t *testing.T) {
-		eng := effects.NewTestEngine()
-		ctx := eng.NewContext()
-
-		// MOVE needs a db with Manager(), but since it checks db.Manager() at parse time,
-		// we can't use runHandler with nil db. Verify basic arg parsing instead.
-		cmd := &shared.Command{Type: shared.CmdMove, Args: [][]byte{[]byte("nokey"), []byte("abc")}}
-		cmd.Runtime = eng
-		cmd.Context = ctx
+	run := func(dbArg string) (bool, string) {
+		cmd := &shared.Command{Type: shared.CmdMove, Args: [][]byte{[]byte("k"), []byte(dbArg)}}
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
 		valid, _, _ := handleMove(cmd, w, nil)
-		// With a nil db, parsing the DB index will fail before runner
+		return valid, buf.String()
+	}
+
+	t.Run("non-integer db index", func(t *testing.T) {
+		valid, got := run("abc")
 		if valid {
-			t.Error("expected invalid with nil db")
+			t.Error("expected invalid")
 		}
-		got := buf.String()
 		if !strings.Contains(got, "not an integer") {
-			// "abc" is not a valid integer, so it should fail with not-an-integer
-			// Actually MOVE needs a valid integer for the db index
-			t.Logf("got: %q", got)
+			t.Errorf("expected not-an-integer error, got %q", got)
+		}
+	})
+
+	t.Run("nonzero db index is out of range", func(t *testing.T) {
+		valid, got := run("1")
+		if valid {
+			t.Error("expected invalid")
+		}
+		if !strings.Contains(got, "out of range") {
+			t.Errorf("expected out-of-range error, got %q", got)
+		}
+	})
+
+	t.Run("db 0 is the same database", func(t *testing.T) {
+		valid, got := run("0")
+		if valid {
+			t.Error("expected invalid")
+		}
+		if !strings.Contains(got, "source and destination objects are the same") {
+			t.Errorf("expected same-object error, got %q", got)
 		}
 	})
 }

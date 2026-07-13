@@ -127,7 +127,7 @@ func (e *Engine) isRealConflict(ptxn *pendingTxn, key string, detail *pb.NackTip
 	if detail.IsBind {
 		theirBindOffset := r(detail.Ref)
 		var theirTxnID string
-		if theirEff, err := e.getEffect(theirBindOffset); err == nil {
+		if theirEff, err := e.getEffect(key, theirBindOffset); err == nil {
 			theirTxnID = theirEff.TxnId
 		}
 		if theirTxnID != "" && theirTxnID == ptxn.txnID {
@@ -201,7 +201,7 @@ func (e *Engine) reachesFromTx(ptxn *pendingTxn, target Tip) bool {
 		if cur == target {
 			return true
 		}
-		eff, err := e.getEffect(cur)
+		eff, err := e.getEffect("", cur)
 		if err != nil {
 			continue
 		}
@@ -285,7 +285,7 @@ func (e *Engine) defeatedCompetitor(ptxn *pendingTxn, key string, detail *pb.Nac
 	}
 	theirBindOffset := r(detail.Ref)
 	var theirTxnID string
-	if theirEff, err := e.getEffect(theirBindOffset); err == nil {
+	if theirEff, err := e.getEffect(key, theirBindOffset); err == nil {
 		theirTxnID = theirEff.TxnId
 	}
 	if theirTxnID == "" || theirTxnID == ptxn.txnID {

@@ -99,10 +99,6 @@ func (e *Engine) executeScript(script []byte, keys, args []string, w *shared.Wri
 	e.scriptMutex.Lock()
 	defer e.scriptMutex.Unlock()
 
-	// Save the original database selection - SELECT inside scripts should not affect caller
-	originalDB := conn.SelectedDB
-	defer func() { conn.SelectedDB = originalDB }()
-
 	// Get timeout for BUSY checking (not for automatic termination)
 	// In Redis, lua-time-limit makes the script killable and causes BUSY for other clients,
 	// but does NOT automatically terminate the script.
