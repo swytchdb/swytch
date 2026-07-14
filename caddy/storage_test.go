@@ -395,6 +395,22 @@ func TestCaddyfile_AllOptions(t *testing.T) {
 	}
 }
 
+func TestCaddyfile_ConnectionSecret(t *testing.T) {
+	s, err := parseCaddyfile(t, `swytch {
+		connection_secret cloud-secret-xyz
+		cluster_port 9999
+	}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if s.ConnectionSecret != "cloud-secret-xyz" {
+		t.Errorf("ConnectionSecret: got %q", s.ConnectionSecret)
+	}
+	if s.ClusterPassphrase != "" {
+		t.Errorf("ClusterPassphrase should be empty in cloud mode, got %q", s.ClusterPassphrase)
+	}
+}
+
 func TestCaddyfile_Empty(t *testing.T) {
 	s, err := parseCaddyfile(t, `swytch {
 	}`)
@@ -485,6 +501,12 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 	// is already bound and the TLS cert SAN baked in.
 	if err := claimRuntime(beacon.RuntimeConfig{AdvertiseAddr: "10.0.0.1:7380"}, "__caddy:"); err == nil {
 		t.Fatalf("expected error for incompatible advertise")
+	}
+
+	// Conflicting connection_secret on reclaim must error — it derives the
+	// cluster identity and is baked in at NewRuntime time.
+	if err := claimRuntime(beacon.RuntimeConfig{ConnectionSecret: "cloud-x"}, "__caddy:"); err == nil {
+		t.Fatalf("expected error for incompatible connection_secret")
 	}
 
 	// Release back to zero — runtime stops.

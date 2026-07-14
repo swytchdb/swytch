@@ -76,6 +76,14 @@ type SwytchStorage struct {
 	// replication. Must match across every peer.
 	ClusterPassphrase string `json:"cluster_passphrase,omitempty"`
 
+	// ConnectionSecret enables Swytch Cloud durability. It is a self-contained
+	// cluster identity: the mTLS passphrase derives from it, so it is mutually
+	// exclusive with ClusterPassphrase, and peer discovery uses the cloud
+	// membership roster, so Join must be empty. When set, TLS state replicates
+	// peer-to-peer as usual and is additionally backed by Swytch Cloud, so a key
+	// evicted from every live peer is rehydrated from Cloud instead of lost.
+	ConnectionSecret string `json:"connection_secret,omitempty"`
+
 	// Join is the DNS name to discover peers.
 	// Empty is fine for single-node deployments.
 	Join string `json:"join,omitempty"`
@@ -134,9 +142,23 @@ func (s *SwytchStorage) CertMagicStorage() (certmagic.Storage, error) {
 func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
 	repl := caddycore.NewReplacer()
 	s.ClusterPassphrase = repl.ReplaceAll(s.ClusterPassphrase, "")
+	s.ConnectionSecret = repl.ReplaceAll(s.ConnectionSecret, "")
 	s.Join = repl.ReplaceAll(s.Join, "")
 	s.ClusterAdvertise = repl.ReplaceAll(s.ClusterAdvertise, "")
 	s.KeyPrefix = repl.ReplaceAll(s.KeyPrefix, "")
+
+	if s.ConnectionSecret != "" {
+		// Swytch Cloud identity is self-contained: the mTLS passphrase derives
+		// from the secret, and peers come from the cloud roster. beacon.NewRuntime
+		// rejects both collisions, but catch them here so the operator gets a
+		// Caddyfile-level error instead of a runtime start failure.
+		if s.ClusterPassphrase != "" {
+			return fmt.Errorf("swytch storage: connection_secret is mutually exclusive with cluster_passphrase (the mTLS passphrase derives from the secret)")
+		}
+		if s.Join != "" {
+			return fmt.Errorf("swytch storage: connection_secret is mutually exclusive with join (peer discovery uses the cloud membership roster)")
+		}
+	}
 
 	if s.ClusterPort == 0 {
 		s.ClusterPort = defaultClusterPort
@@ -156,6 +178,7 @@ func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
 
 	cfg := beacon.RuntimeConfig{
 		ClusterPassphrase: s.ClusterPassphrase,
+		ConnectionSecret:  s.ConnectionSecret,
 		JoinAddr:          s.Join,
 		ClusterPort:       s.ClusterPort,
 		AdvertiseAddr:     s.ClusterAdvertise,
@@ -176,8 +199,11 @@ func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
 		// same host — and dial peers as a side effect of a read-only check.
 		// Caddy exposes no validate signal to modules, so drop into
 		// single-node mode: the engine still comes up (so storage-config
-		// validation succeeds) with no network activity.
+		// validation succeeds) with no network activity. ConnectionSecret is
+		// cleared too — it derives the passphrase and starts CloudSync, which
+		// dials Swytch Cloud.
 		cfg.ClusterPassphrase = ""
+		cfg.ConnectionSecret = ""
 		cfg.JoinAddr = ""
 	}
 	if err := claimRuntime(cfg, s.KeyPrefix); err != nil {
@@ -206,6 +232,7 @@ func (s *SwytchStorage) Cleanup() error {
 //
 //	storage swytch {
 //	    cluster_passphrase <pass>
+//	    connection_secret <secret>
 //	    join <dns>
 //	    cluster_port <num>
 //	    cluster_advertise <addr:port>
@@ -226,6 +253,11 @@ func (s *SwytchStorage) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			s.ClusterPassphrase = d.Val()
+		case "connection_secret":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			s.ConnectionSecret = d.Val()
 		case "join":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -310,11 +342,12 @@ func claimRuntime(cfg beacon.RuntimeConfig, keyPrefix string) error {
 	if currentRuntime != nil {
 		prev := currentRuntime.cfg
 		if prev.ClusterPassphrase != cfg.ClusterPassphrase ||
+			prev.ConnectionSecret != cfg.ConnectionSecret ||
 			prev.JoinAddr != cfg.JoinAddr ||
 			prev.ClusterPort != cfg.ClusterPort ||
 			prev.AdvertiseAddr != cfg.AdvertiseAddr {
 			return fmt.Errorf("cluster configuration cannot change without restarting the process " +
-				"(passphrase/join/port/advertise differ from running instance)")
+				"(passphrase/connection_secret/join/port/advertise differ from running instance)")
 		}
 		if currentRuntime.keyPrefix != keyPrefix {
 			return fmt.Errorf("key_prefix cannot change without restarting the process "+

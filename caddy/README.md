@@ -41,6 +41,7 @@ which would fail because the parent module is `package main`.)
 {
     storage swytch {
         cluster_passphrase <secret>     # empty = single-node (no replication)
+        connection_secret <secret>      # Swytch Cloud durability; excludes cluster_passphrase + join
         join <dns-name>                 # peers resolve via DNS; optional
         cluster_port <num>              # QUIC port; default 7380/UDP
         cluster_advertise <addr:port>   # this node's reachable address; auto-detect if empty
@@ -68,6 +69,7 @@ JSON-encoded equivalents of the Caddyfile keywords:
   "storage": {
     "module": "swytch",
     "cluster_passphrase": "...",
+    "connection_secret": "...",
     "join": "...",
     "cluster_port": 7380,
     "cluster_advertise": "10.0.0.1:7380",
@@ -80,10 +82,15 @@ JSON-encoded equivalents of the Caddyfile keywords:
 ## Lifecycle notes
 
 - The embedded engine is a process-wide singleton. Caddy reloads reuse it;
-  changing `cluster_passphrase`, `join`, `cluster_port`, `cluster_advertise`,
-  or `key_prefix` at reload time is rejected — these are all baked into
-  the QUIC listener, TLS cert SAN, or peer-discovery state at startup and
-  there is no live-update path. Restart the process instead.
+  changing `cluster_passphrase`, `connection_secret`, `join`, `cluster_port`,
+  `cluster_advertise`, or `key_prefix` at reload time is rejected — these are
+  all baked into the QUIC listener, TLS cert SAN, or peer-discovery state at
+  startup and there is no live-update path. Restart the process instead.
+- `connection_secret` enables Swytch Cloud durability and is a self-contained
+  cluster identity: the cluster passphrase derives from it and peers come from
+  the cloud roster, so it is mutually exclusive with `cluster_passphrase` and
+  `join`. TLS state still replicates peer-to-peer; Cloud is the backstop that
+  rehydrates keys evicted from every live peer.
 - `lock_ttl` is per-storage and DOES take effect on the next reload.
 - Single-node mode (`cluster_passphrase` empty) is supported and useful
   for local development. No QUIC port is bound, no peer discovery runs.
