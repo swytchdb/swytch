@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -394,6 +395,22 @@ func TestCaddyfile_AllOptions(t *testing.T) {
 	}
 }
 
+func TestCaddyfile_ConnectionSecret(t *testing.T) {
+	s, err := parseCaddyfile(t, `swytch {
+		connection_secret cloud-secret-xyz
+		cluster_port 9999
+	}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if s.ConnectionSecret != "cloud-secret-xyz" {
+		t.Errorf("ConnectionSecret: got %q", s.ConnectionSecret)
+	}
+	if s.ClusterPassphrase != "" {
+		t.Errorf("ClusterPassphrase should be empty in cloud mode, got %q", s.ClusterPassphrase)
+	}
+}
+
 func TestCaddyfile_Empty(t *testing.T) {
 	s, err := parseCaddyfile(t, `swytch {
 	}`)
@@ -486,6 +503,12 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 		t.Fatalf("expected error for incompatible advertise")
 	}
 
+	// Conflicting connection_secret on reclaim must error — it derives the
+	// cluster identity and is baked in at NewRuntime time.
+	if err := claimRuntime(beacon.RuntimeConfig{ConnectionSecret: "cloud-x"}, "__caddy:"); err == nil {
+		t.Fatalf("expected error for incompatible connection_secret")
+	}
+
 	// Release back to zero — runtime stops.
 	if err := releaseRuntime(); err != nil {
 		t.Fatalf("first release: %v", err)
@@ -503,5 +526,37 @@ func TestClaimRuntime_RefcountAndIncompatibility(t *testing.T) {
 	// Extra release on empty is a no-op.
 	if err := releaseRuntime(); err != nil {
 		t.Errorf("extra release: %v", err)
+	}
+}
+
+// TestIsConfigValidation locks the subcommand-based detection that makes
+// Provision drop into single-node mode under `caddy validate` (no QUIC
+// bind, no peer dial). Caddy exposes no in-context validate flag, so this
+// argv check is the whole signal — keep it honest.
+func TestIsConfigValidation(t *testing.T) {
+	saved := os.Args
+	t.Cleanup(func() { os.Args = saved })
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"validate", []string{"caddy", "validate", "--config", "Caddyfile"}, true},
+		{"run", []string{"caddy", "run", "--config", "Caddyfile"}, false},
+		{"start", []string{"caddy", "start"}, false},
+		{"no subcommand", []string{"caddy"}, false},
+		{"empty", nil, false},
+		// Only the subcommand slot counts — a later "validate" arg (e.g. a
+		// path) must not trip it.
+		{"validate as later arg", []string{"caddy", "run", "validate"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = tc.args
+			if got := isConfigValidation(); got != tc.want {
+				t.Errorf("isConfigValidation() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

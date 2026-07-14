@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/swytchdb/swytch/cluster"
@@ -82,6 +83,24 @@ type RuntimeConfig struct {
 	// peers. Empty triggers auto-detection via DetectAdvertiseAddr.
 	AdvertiseAddr string
 
+	// AsyncJoin makes NewRuntime return as soon as the local engine and
+	// peer manager (QUIC listener) are up, running the beacon's blocking
+	// join — DNS discovery, symmetric-peer wait, membership convergence —
+	// in a background goroutine instead of before returning. The node
+	// serves immediately in solo mode and converges with peers as they
+	// become reachable.
+	//
+	// This trades the default's join-before-serve guarantee for
+	// availability: a caller that accepts writes before the background
+	// join completes may commit solo and replicate late. Enable it only
+	// where that is acceptable — e.g. the Caddy TLS-storage module, whose
+	// writes are LWW cert state, and whose Provision must return promptly
+	// so it does not stall the whole server's startup (and time out under
+	// systemd) when a peer is unreachable. Transports that must not serve
+	// against a synthetic topology (SQL/redis serializable paths) leave it
+	// false.
+	AsyncJoin bool
+
 	// Embedder durability seams, installed before the beacon starts so no emit
 	// or remote arrival races their wiring. They are how an embedder brings its
 	// own durable store (e.g. the cloud dataplane's internal S3): OnLocalEffect
@@ -109,6 +128,13 @@ type Runtime struct {
 	CloudSync   *cluster.CloudSync
 
 	cfg RuntimeConfig
+
+	// joinCancel/joinWG track an in-flight AsyncJoin goroutine so Stop can
+	// cancel it and wait for it to return before tearing down the peer
+	// manager and engine it touches. Both are zero-valued (nil / empty)
+	// when AsyncJoin is false, making Stop's drain a no-op.
+	joinCancel context.CancelFunc
+	joinWG     sync.WaitGroup
 }
 
 // NewRuntime builds and starts the engine. If cfg.ClusterPassphrase
@@ -301,13 +327,29 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		}
 	}
 
-	if err := b.Start(context.Background()); err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("failed to start beacon: %w", err),
-			closeRuntimeOnError(rt),
-		)
+	if cfg.AsyncJoin {
+		// Local engine + QUIC listener are already up; run the blocking
+		// join in the background so callers (e.g. Caddy's Provision) return
+		// promptly and serve solo until peers converge. joinCtx lets Stop
+		// abort an in-flight join; joinWG lets it wait for the goroutine to
+		// return before closing the peer manager / engine the join uses.
+		joinCtx, joinCancel := context.WithCancel(context.Background())
+		rt.joinCancel = joinCancel
+		rt.Beacon = b
+		rt.joinWG.Go(func() {
+			if err := b.Start(joinCtx); err != nil {
+				log.Warn("cluster join did not complete; serving solo, will converge in background", "error", err)
+			}
+		})
+	} else {
+		if err := b.Start(context.Background()); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to start beacon: %w", err),
+				closeRuntimeOnError(rt),
+			)
+		}
+		rt.Beacon = b
 	}
-	rt.Beacon = b
 
 	log.Info("cluster runtime ready",
 		"node_id", engine.NodeID(),
@@ -325,6 +367,14 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 // still reach the upload outbox; PM before engine because broadcast close
 // paths reference the engine).
 func (r *Runtime) Stop() error {
+	// Drain an in-flight AsyncJoin first: b.Start touches the peer manager
+	// and engine, so it must fully return before we tear those down. No-op
+	// when AsyncJoin was false (joinCancel nil, joinWG empty).
+	if r.joinCancel != nil {
+		r.joinCancel()
+	}
+	r.joinWG.Wait()
+
 	var errs []error
 	if r.Beacon != nil {
 		r.Beacon.Stop()
