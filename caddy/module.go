@@ -27,6 +27,7 @@ package caddy
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,11 +160,41 @@ func (s *SwytchStorage) Provision(ctx caddycore.Context) error {
 		ClusterPort:       s.ClusterPort,
 		AdvertiseAddr:     s.ClusterAdvertise,
 		Logger:            ctx.Slogger(),
+		// Serve immediately; join the cluster in the background. Caddy gates
+		// its readiness (the systemd notify) on every module's Provision
+		// returning, so a blocking cluster join here stalls the whole
+		// server's startup — and times out under systemd — whenever a peer
+		// is unreachable. Solo-first + background convergence is the right
+		// trade for TLS storage, whose values are LWW cert state.
+		AsyncJoin: true,
+	}
+	if isConfigValidation() {
+		// `caddy validate` provisions every module (to surface config
+		// errors) but never starts serving and tears the config down
+		// immediately after. Standing up the cluster transport here would
+		// bind the QUIC port — colliding with an already-running node on the
+		// same host — and dial peers as a side effect of a read-only check.
+		// Caddy exposes no validate signal to modules, so drop into
+		// single-node mode: the engine still comes up (so storage-config
+		// validation succeeds) with no network activity.
+		cfg.ClusterPassphrase = ""
+		cfg.JoinAddr = ""
 	}
 	if err := claimRuntime(cfg, s.KeyPrefix); err != nil {
 		return fmt.Errorf("swytch storage: %w", err)
 	}
 	return nil
+}
+
+// isConfigValidation reports whether this process was invoked as
+// `caddy validate`. Caddy runs module Provision during validation just as
+// it does for a real run, but with no serving and an immediate teardown,
+// and exposes no in-context flag distinguishing the two — so we inspect the
+// subcommand. Defaults to false (serve) for any other or embedded
+// invocation; an in-process admin-API validate is already safe because it
+// reuses the running singleton runtime rather than binding a second one.
+func isConfigValidation() bool {
+	return len(os.Args) > 1 && os.Args[1] == "validate"
 }
 
 // Cleanup releases this module's reference on the runtime.
