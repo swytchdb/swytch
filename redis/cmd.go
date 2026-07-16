@@ -266,6 +266,9 @@ Examples:
 	// Initialize cluster replication if configured (effects builds only)
 	if err := InitializeCluster(effectsCfg, server.Handler()); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize cluster: %v\n", err)
+		// The runtime already joined and registered membership; leave
+		// gracefully or peers will dial this dead node forever.
+		StopCluster()
 		os.Exit(1)
 	}
 
@@ -375,6 +378,9 @@ Examples:
 	// Start server
 	if err := server.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+		// The runtime already joined and registered membership; leave
+		// gracefully or peers will dial this dead node forever.
+		StopCluster()
 		os.Exit(1)
 	}
 
