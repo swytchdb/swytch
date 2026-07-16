@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
 	github.com/caddyserver/certmagic v0.25.4
-	github.com/swytchdb/swytch v1.2.2
+	github.com/swytchdb/swytch v1.2.3
 	google.golang.org/protobuf v1.36.11
 )
 
