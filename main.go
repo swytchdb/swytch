@@ -39,6 +39,7 @@ var Version = "dev"
 func init() {
 	redis.Version = Version
 	sql.Version = Version
+	cluster.Version = Version
 }
 
 func main() {

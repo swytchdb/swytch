@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	gproto "google.golang.org/protobuf/proto"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -51,6 +52,18 @@ const (
 
 // cloudEffectInfo is the domain-separation info for sealed effect payloads.
 var cloudEffectInfo = []byte("effect")
+
+// Version is the swytch build, set from main.Version at startup (ldflags). The
+// cloud stream announces it — with the node id — as gRPC metadata, which is how
+// the Cloud dashboard knows each cluster's node count and running version.
+var Version = "dev"
+
+// Metadata keys the dataplane reads off the WriteEffects stream; must match
+// cloud's internal/dataplane.
+const (
+	nodeIDMetadataKey      = "swytch-node-id"
+	nodeVersionMetadataKey = "swytch-version"
+)
 
 const (
 	cloudRetryMin = time.Second
@@ -460,7 +473,15 @@ func (cs *CloudSync) run() {
 // retired some), then interleave sends with the reader's acks and
 // fetch-requests until the stream breaks or we shut down.
 func (cs *CloudSync) runStream() error {
-	stream, err := cs.streamClient.WriteEffects(cs.ctx)
+	// Announce who we are alongside the auth_key: the node id and build version
+	// ride the stream metadata so the cloud can report the cluster's fleet
+	// (node count, running version) to its dashboard without ever looking
+	// inside an effect.
+	ctx := metadata.AppendToOutgoingContext(cs.ctx,
+		nodeIDMetadataKey, fmt.Sprintf("%d", uint64(cs.engine.NodeID())),
+		nodeVersionMetadataKey, Version,
+	)
+	stream, err := cs.streamClient.WriteEffects(ctx)
 	if err != nil {
 		return err
 	}
