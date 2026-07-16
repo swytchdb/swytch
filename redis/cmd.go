@@ -324,29 +324,13 @@ Examples:
 		go func() { defer close(telemetryDone); tc.Run(telCtx) }()
 	}
 
-	// Handle signals
+	// Handle signals. The shutdown sequence runs on the main goroutine
+	// (after Start, below): server.Stop cancels the context main would
+	// otherwise be blocked on, so a shutdown goroutine would race main's
+	// return and the process could exit before StopCluster emits and
+	// replicates the membership REMOVE — peers would dial us forever.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		slog.Info("Shutting down")
-		if telemetryCancel != nil {
-			telemetryCancel()
-			<-telemetryDone
-		}
-		if metricsServer != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := metricsServer.Stop(ctx); err != nil {
-				slog.Error("Error stopping metrics server", "error", err)
-			}
-		}
-		if err := server.Stop(); err != nil {
-			slog.Error("Error during shutdown", "error", err)
-		}
-		StopCluster()
-	}()
 
 	// Start pprof server if enabled
 	if *pprofAddr != "" {
@@ -389,10 +373,28 @@ Examples:
 	fmt.Println()
 
 	// Start server
-	if err := server.ListenAndServe(); err != nil {
+	if err := server.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
 	}
+
+	<-sigCh
+	slog.Info("Shutting down")
+	if telemetryCancel != nil {
+		telemetryCancel()
+		<-telemetryDone
+	}
+	if metricsServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsServer.Stop(ctx); err != nil {
+			slog.Error("Error stopping metrics server", "error", err)
+		}
+	}
+	if err := server.Stop(); err != nil {
+		slog.Error("Error during shutdown", "error", err)
+	}
+	StopCluster()
 }
 
 // Run starts the Redis server with the given arguments
