@@ -324,15 +324,6 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// ListenAndServe starts the server and blocks until it's stopped
-func (s *Server) ListenAndServe() error {
-	if err := s.Start(); err != nil {
-		return err
-	}
-	<-s.ctx.Done()
-	return nil
-}
-
 // Stop gracefully stops the server
 func (s *Server) Stop() error {
 	s.cancel()

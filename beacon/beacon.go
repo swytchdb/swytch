@@ -144,10 +144,15 @@ func (b *Beacon) Start(ctx context.Context) error {
 
 // Stop sends a REMOVE_OP for this node and stops background loops.
 func (b *Beacon) Stop() {
-	// Graceful departure: remove our membership entry.
+	// Graceful departure: remove our membership entry. A failure here means
+	// peers keep our entry and redial us until an operator intervenes, so it
+	// must be loud.
 	ctx := b.engine.NewContext()
-	_ = ctx.Emit(buildMemberRemove(uint64(b.cfg.NodeID)))
-	_ = ctx.Flush()
+	if err := ctx.Emit(buildMemberRemove(uint64(b.cfg.NodeID))); err != nil {
+		slog.Error("beacon: departure remove emit failed", "node_id", b.cfg.NodeID, "error", err)
+	} else if err := ctx.Flush(); err != nil {
+		slog.Error("beacon: departure remove flush failed", "node_id", b.cfg.NodeID, "error", err)
+	}
 
 	if b.cancel != nil {
 		b.cancel()
