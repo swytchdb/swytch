@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -478,7 +479,7 @@ func (cs *CloudSync) runStream() error {
 	// (node count, running version) to its dashboard without ever looking
 	// inside an effect.
 	ctx := metadata.AppendToOutgoingContext(cs.ctx,
-		nodeIDMetadataKey, fmt.Sprintf("%d", uint64(cs.engine.NodeID())),
+		nodeIDMetadataKey, strconv.FormatUint(uint64(cs.engine.NodeID()), 10),
 		nodeVersionMetadataKey, Version,
 	)
 	stream, err := cs.streamClient.WriteEffects(ctx)
