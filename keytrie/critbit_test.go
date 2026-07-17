@@ -199,6 +199,26 @@ func TestCritbitBasicOperations(t *testing.T) {
 	}
 }
 
+func TestCritbitLoadData(t *testing.T) {
+	c := NewCritbit[int]()
+	defer c.Close()
+
+	c.Insert("key", nil, NewTipSet(r(1)))
+	if got := c.LoadData("key"); got != nil {
+		t.Fatalf("LoadData before install = %v, want nil", *got)
+	}
+	payload := 42
+	if got, loaded := c.LoadOrStoreData("key", &payload); loaded || got != &payload {
+		t.Fatalf("LoadOrStoreData = (%v, %v), want (&payload, false)", got, loaded)
+	}
+	if got := c.LoadData("key"); got != &payload {
+		t.Fatalf("LoadData = %v, want &payload", got)
+	}
+	if got := c.LoadData("missing"); got != nil {
+		t.Fatalf("LoadData missing = %v, want nil", *got)
+	}
+}
+
 func TestCritbitInsertCASFailure(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	defer c.Close()

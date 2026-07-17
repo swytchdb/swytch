@@ -200,12 +200,12 @@ func handleGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		return
 	}
 
-	key := string(cmd.Args[0])
-	keys = []string{key}
+	cmd.SetSingleKey(cmd.Args[0])
+	keys = cmd.SingleKeySlice()
 	valid = true
 
 	runner = func() {
-		snap, _, exists, wrongType, err := getStringSnapshot(cmd, key)
+		snap, _, exists, wrongType, err := getStringSnapshot(cmd, cmd.SingleKeyValue())
 		if err != nil {
 			w.WriteError(err.Error())
 			return

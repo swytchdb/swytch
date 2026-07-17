@@ -161,13 +161,19 @@ func (p *Parser) readArrayCommand(cmd *Command) (*Command, error) {
 
 	// Parse command type from first argument
 	if len(cmd.Args) > 0 {
-		cmd.Type = ParseCommandType(cmd.Args[0])
+		name := cmd.Args[0]
+		cmd.Type = ParseCommandType(name)
 		// Store raw name for unknown commands (useful for logging)
 		if cmd.Type == CmdUnknown {
-			cmd.RawName = cmd.Args[0]
+			cmd.RawName = name
+		} else {
+			PutDataBuf(name)
 		}
-		// Remove command name from Args, leaving only actual arguments
-		cmd.Args = cmd.Args[1:]
+		// Remove the command name without advancing the slice base. Advancing it
+		// loses one slot of pooled capacity per command and eventually forces a
+		// new Args backing array on the hot parser path.
+		copy(cmd.Args, cmd.Args[1:])
+		cmd.Args = cmd.Args[:len(cmd.Args)-1]
 	}
 
 	return cmd, nil
@@ -212,12 +218,16 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 	}
 
 	// Parse command type from first token
-	cmd.Type = ParseCommandType(cmd.Args[0])
+	name := cmd.Args[0]
+	cmd.Type = ParseCommandType(name)
 	// Store raw name for unknown commands (useful for logging)
 	if cmd.Type == CmdUnknown {
-		cmd.RawName = cmd.Args[0]
+		cmd.RawName = name
+	} else {
+		PutDataBuf(name)
 	}
-	cmd.Args = cmd.Args[1:]
+	copy(cmd.Args, cmd.Args[1:])
+	cmd.Args = cmd.Args[:len(cmd.Args)-1]
 
 	return cmd, nil
 }

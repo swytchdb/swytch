@@ -791,6 +791,26 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 	return leaf.tips.Load()
 }
 
+// LoadData returns the existing leaf payload without installing one. Like
+// Contains, it is a lock-free, stale-tolerant read: compaction leaves relocated
+// husk payloads intact, so a reader that captured the old leaf still observes
+// the same *T. A successful lookup records the access for eviction policy.
+func (c *Critbit[T]) LoadData(key string) *T {
+	if c.closed.Load() {
+		return nil
+	}
+	rootNode := c.root.Load()
+	if rootNode == nil {
+		return nil
+	}
+	leaf := c.findBestMatch(rootNode, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return nil
+	}
+	c.bumpAccess(leaf)
+	return leaf.data.Load()
+}
+
 // bumpAccess records an access to leaf: it raises the frequency counter
 // (saturating at maxLeafFreq) and stamps lastAccess from the monotonic clock.
 // Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —

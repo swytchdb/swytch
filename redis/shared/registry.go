@@ -142,7 +142,8 @@ func KeysFirst(cmd *Command) []string {
 	if len(cmd.Args) < 1 {
 		return nil
 	}
-	return []string{string(cmd.Args[0])}
+	cmd.SetSingleKey(cmd.Args[0])
+	return cmd.SingleKeySlice()
 }
 
 // KeysAfterStreams extracts keys after the STREAMS keyword.

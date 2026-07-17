@@ -761,6 +761,20 @@ func fromPbRefs(refs []*pb.EffectRef) []Tip {
 // substitution would leave us pointing at another tx-tipped offset of
 // the same in-flight txn, which is what we're trying to avoid.
 func (e *Engine) resolveTipDeps(tips []Tip) []Tip {
+	// Nearly every read is already at a committed frontier. Avoid allocating
+	// the recursive walk's closure, seen set, and output slice until at least
+	// one tip actually needs substitution.
+	needsResolution := false
+	for _, tp := range tips {
+		if _, ok := e.pendingTxTips.Load(tp); ok {
+			needsResolution = true
+			break
+		}
+	}
+	if !needsResolution {
+		return tips
+	}
+
 	seen := make(map[Tip]struct{}, len(tips))
 	var resolved []Tip
 	changed := false
