@@ -94,13 +94,14 @@ message WriteEffectsRequest {
 }
 
 // WriteResponse is one message on the response stream: an ack for an effect the
-// node wrote, a fetch-request the cloud is pushing to the node, or the folder's
-// current key-name filter.
+// node wrote, a fetch-request the cloud is pushing to the node, the folder's
+// current key-name filter, or a member-remove command.
 message WriteResponse {
   oneof msg {
     WriteAck ack = 1;
     FetchRequest fetch = 2;
     KeyFilter filter = 3;
+    MemberRemove member_remove = 4;
   }
 }
 
@@ -126,6 +127,16 @@ message FetchRequest {
 // previous one wholesale.
 message KeyFilter {
   bytes filter = 1;
+}
+
+// MemberRemove is the control plane's "delete this server" command, pushed on
+// the write-response stream to one connected node of the cluster whose
+// announced version is >= 1.2.5 (older nodes never receive it — proto3 makes
+// an unknown oneof variant safely ignored anyway, the version gate is
+// belt-and-braces). The receiving node applies a REMOVE_OP to that member's
+// element of `__swytch:members` so the cluster stops dialing it.
+message MemberRemove {
+  uint64 node_id = 1;
 }
 
 // GetTipsRequest asks for the current tip frontier of each listed (encrypted)
