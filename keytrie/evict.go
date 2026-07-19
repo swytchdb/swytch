@@ -450,7 +450,6 @@ func (c *Critbit[T]) decayIntervalNow() uint64 {
 	switch every := c.decayEvery.Load(); every {
 	case 0:
 		return max(defaultDecayInterval, uint64(c.size.Load())/2)
-		//return defaultDecayInterval
 	case math.MaxUint64:
 		return 0
 	default:

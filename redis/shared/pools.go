@@ -144,7 +144,7 @@ func PutCommand(cmd *Command) {
 			PutDataBuf(arg)
 		}
 	}
-	clear(cmd.Args)
+	clear(cmd.Args[:cap(cmd.Args)])
 	cmd.keyScratch[0] = ""
 	cmd.Args = cmd.Args[:0]
 	commandPool.Put(cmd)

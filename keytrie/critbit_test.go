@@ -201,7 +201,11 @@ func TestCritbitBasicOperations(t *testing.T) {
 
 func TestCritbitLoadData(t *testing.T) {
 	c := NewCritbit[int]()
-	defer c.Close()
+	defer func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close failed: %v", err)
+		}
+	}()
 
 	c.Insert("key", nil, NewTipSet(r(1)))
 	if got := c.LoadData("key"); got != nil {

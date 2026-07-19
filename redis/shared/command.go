@@ -331,7 +331,7 @@ func (c *Command) Reset() {
 			PutDataBuf(arg)
 		}
 	}
-	clear(c.Args)
+	clear(c.Args[:cap(c.Args)])
 	if c.RawName != nil {
 		PutDataBuf(c.RawName)
 	}

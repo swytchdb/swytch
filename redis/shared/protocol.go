@@ -172,8 +172,10 @@ func (p *Parser) readArrayCommand(cmd *Command) (*Command, error) {
 		// Remove the command name without advancing the slice base. Advancing it
 		// loses one slot of pooled capacity per command and eventually forces a
 		// new Args backing array on the hot parser path.
+		last := len(cmd.Args) - 1
 		copy(cmd.Args, cmd.Args[1:])
-		cmd.Args = cmd.Args[:len(cmd.Args)-1]
+		cmd.Args[last] = nil
+		cmd.Args = cmd.Args[:last]
 	}
 
 	return cmd, nil
@@ -226,8 +228,10 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 	} else {
 		PutDataBuf(name)
 	}
+	last := len(cmd.Args) - 1
 	copy(cmd.Args, cmd.Args[1:])
-	cmd.Args = cmd.Args[:len(cmd.Args)-1]
+	cmd.Args[last] = nil
+	cmd.Args = cmd.Args[:last]
 
 	return cmd, nil
 }
