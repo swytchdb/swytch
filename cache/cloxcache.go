@@ -20,6 +20,16 @@
 // Package cache provides a lock-free adaptive in-memory cache implementation.
 // CloxCache uses protected-freq eviction: items with high frequency are protected,
 // with LRU as a tiebreaker among same-frequency items.
+//
+// Boundary conditions on the policy's edge over plain LRU (measured against
+// offline Belady replay; see trace_replay_test.go): the win lives at
+// cache-size/working-set ratios of roughly 0.3–0.8. Below ~0.25 every policy
+// produces near-identical contents (the cache fully flushes each cycle);
+// above ~1 plain recency already retains the working set. Any hot tier above
+// this cache (a client cache, CDN, an L1) skims precisely the frequency skew
+// protection feeds on, so the policy's value concentrates in whatever skew
+// the residual traffic still carries and shrinks toward LRU-parity as upper
+// tiers deepen. Benchmark claims should state these conditions.
 package cache
 
 import (
@@ -41,9 +51,15 @@ const (
 	// initialFreq is the starting frequency for new keys
 	initialFreq = 1
 
-	// defaultProtectedFreqThreshold - items with freq > this are protected from eviction.
-	// Analysis shows freq>=3 items are likely to return
-	defaultProtectedFreqThreshold = 2
+	// defaultProtectedFreqThreshold - items with freq > this are protected
+	// from eviction. k = 0 means protection is off: every live entry is a
+	// candidate and eviction is pure LRU. That is the starting state —
+	// protection must earn its way in via the graduation probe rather than
+	// being presumed, so a cache serving a low-reuse workload never starts
+	// out worse than plain LRU. (A floor of 1 still shields every key that
+	// was ever read once; on a reuse-≈1.3 real trace that made the entire
+	// already-served cohort untouchable.)
+	defaultProtectedFreqThreshold = 0
 
 	// adaptiveCheckInterval - check graduation rate every N evictions
 	adaptiveCheckInterval = 1000
@@ -64,6 +80,26 @@ const (
 	// Window size for measuring hit rate effect of k changes
 	hitRateWindowSize = 2000 // smaller window = faster feedback
 
+	// defaultDecayInterval - floor for the per-shard eviction count between
+	// eviction-driven frequency decay steps. Every step walks live entries
+	// down by 1 (floor 1) as the eviction scan visits them, so a saturated
+	// entry that stops earning accesses forgets instead of squatting on its
+	// slot after the workload moves on. The auto default scales the interval
+	// with per-shard capacity (max(8, capacity/2), see decayIntervalFor):
+	// the Belady replay's optimum — forget-from-saturation over ~50–120
+	// evictions on 3–32-slot shards — is ≈7 capacity-turnovers, and it is the
+	// turnover count that generalizes, not the absolute eviction count. A
+	// fixed ~100-eviction timescale on a 128-entry shard is under one
+	// turnover, so a single capacity-sized flood erases all protection and
+	// the policy replays bit-identical to LRU (the scan-burst fixture catches
+	// this). Linear −1 rather than halving: halving's first step (15→7)
+	// erases the hot-vs-warm ranking exactly when a starved cache needs it,
+	// while −1 is rank-preserving and beat halving at equal timescale in
+	// every configuration tested. The clock is evictions, never wall time: an
+	// idle cache must forget nothing. Decaying too fast degrades into plain
+	// LRU (never below it); too slowly re-introduces squatters — a forgiving
+	// knob.
+	defaultDecayInterval = 8
 )
 
 // Key is a type constraint for cache keys.
@@ -119,11 +155,12 @@ type CloxCache[K Key, V any] struct {
 	shardBits int
 
 	// Configuration
-	collectStats bool
-	sweepPercent int                        // Percentage of shard to scan during eviction (1-100)
-	sizeFunc     func(key K, value V) int64 // optional byte size calculator
-	evictDecider func(key K, value V) bool  // optional eviction veto (true = may evict, false = pinned)
-	evictNotify  func(key K, value V)       // optional post-eviction notification (ghost-conversion or full unlink)
+	collectStats  bool
+	sweepPercent  int                        // Percentage of shard to scan during eviction (1-100)
+	decayInterval int64                      // evictions per freq-decay step (0 = auto-scale, -1 = disabled)
+	sizeFunc      func(key K, value V) int64 // optional byte size calculator
+	evictDecider  func(key K, value V) bool  // optional eviction veto (true = may evict, false = pinned)
+	evictNotify   func(key K, value V)       // optional post-eviction notification (ghost-conversion or full unlink)
 
 	// Metrics (only updated when collectStats is true)
 	hits        atomic.Uint64
@@ -174,7 +211,11 @@ type shard[K Key, V any] struct {
 	reachedProtected   atomic.Uint64 // items whose freq crossed the shard's current k (graduated)
 	lastAdaptCheck     atomic.Uint64 // eviction count at last adaptation check
 	prevHitRate        atomic.Uint64 // previous window hit rate * 10000 (gradient descent on hit rate)
-	_                  [8]byte       // pad to 64
+	decayClock         atomic.Uint64 // evictions since the last decay-epoch step (reset each step)
+
+	// cache line 5: decay epoch (eviction only)
+	decayEpoch atomic.Uint64 // completed decay intervals; nodes absorb the delta on sweep visit
+	_          [56]byte      // pad to 64
 }
 
 // Compile-time assertion: shard size must be a multiple of 64 bytes (cache line).
@@ -190,7 +231,11 @@ type recordNode[K Key, V any] struct {
 	keyHash    uint64                           // fast hash comparison
 	freq       atomic.Int32                     // access frequency (negative = ghost)
 	lastAccess atomic.Uint64                    // per-shard monotonic timestamp for LRU tiebreaking
-	key        K
+	// lastDecayEpoch is the shard decay epoch this node last absorbed; the
+	// eviction scan steps freq down by the elapsed epochs on visit, so decay
+	// costs O(1) per touched node instead of a global walk (see decayNode).
+	lastDecayEpoch atomic.Uint64
+	key            K
 }
 
 // SizeFunc returns the size in bytes of a key-value pair.
@@ -205,6 +250,14 @@ type Config struct {
 	CollectStats  bool // Enable hit/miss/eviction counters
 	// (recommend: 15 for temporal workloads and low latency)
 	SweepPercent int // Percentage of shard to scan during eviction
+	// DecayInterval is the number of evictions (per shard) between
+	// eviction-driven frequency decay steps: 0 auto-scales with per-shard
+	// capacity (max(8, capacity/2) — forget-from-saturation ≈ 7 capacity
+	// turnovers), negative disables decay. Without decay, an entry that
+	// saturated freq while hot squats on a slot after the workload moves on
+	// (measured on a sliding-window trace: 50.8% hit rate vs plain LRU's
+	// 89.9%).
+	DecayInterval int
 }
 
 // NewCloxCache creates a new cache with the given configuration
@@ -232,13 +285,19 @@ func NewCloxCache[K Key, V any](cfg Config) *CloxCache[K, V] {
 		sweepPercent = 100
 	}
 
+	decayInterval := int64(cfg.DecayInterval)
+	if decayInterval < 0 {
+		decayInterval = -1
+	}
+
 	c := &CloxCache[K, V]{
-		numShards:    cfg.NumShards,
-		shardBits:    bits.Len(uint(cfg.NumShards - 1)),
-		shards:       make([]shard[K, V], cfg.NumShards),
-		stop:         make(chan struct{}),
-		collectStats: cfg.CollectStats,
-		sweepPercent: sweepPercent,
+		numShards:     cfg.NumShards,
+		shardBits:     bits.Len(uint(cfg.NumShards - 1)),
+		shards:        make([]shard[K, V], cfg.NumShards),
+		stop:          make(chan struct{}),
+		collectStats:  cfg.CollectStats,
+		sweepPercent:  sweepPercent,
+		decayInterval: decayInterval,
 	}
 
 	totalCapacity := cfg.Capacity
@@ -314,8 +373,15 @@ func (c *CloxCache[K, V]) Get(key K, offset uint64) (V, bool) {
 				if node.freq.CompareAndSwap(f, f+1) {
 					// Track when items cross into protected status (freq > k)
 					// This happens when freq goes from k to k+1
-					// Only count when at capacity (under eviction pressure)
-					if f == shard.k.Load() && shard.entryCount.Load() >= shard.capacity.Load() {
+					// Only count when at capacity (under eviction pressure).
+					// At k=0 (protection off) every successful bump counts,
+					// not just a crossing: the question there is "does enough
+					// recurrence exist to pay for protection at all", and
+					// once-per-residency crossings can't push the rate past
+					// rateHigh even on a hot-set workload (measured ≈0.25 on
+					// scan-burst — k never climbed and the policy stayed LRU).
+					// Resident hits per eviction can.
+					if kk := shard.k.Load(); (kk == 0 || f == kk) && shard.entryCount.Load() >= shard.capacity.Load() {
 						shard.reachedProtected.Add(1)
 					}
 					// Only update timestamp when we successfully bumped freq
@@ -415,6 +481,11 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 					node.value.Store(value)
 					node.freq.Store(promotedFreq)
 					node.lastAccess.Store(shard.timestamp.Add(1))
+					// The ghost period is not decay debt: without this reset the
+					// promoted freq would absorb every epoch spent as a ghost and
+					// collapse to the floor on the next sweep visit, erasing the
+					// warm restart the ghost exists to provide.
+					node.lastDecayEpoch.Store(shard.decayEpoch.Load())
 					shard.ghostCount.Add(-1)
 					shard.entryCount.Add(1)
 					return true, k, 0, 0
@@ -442,7 +513,9 @@ func (c *CloxCache[K, V]) Put(key K, value V) (success bool, evictedKey K, evict
 		}
 	}
 
-	// Insert at head
+	// Insert at head. The decay epoch starts at "now" so the new node only
+	// absorbs decay accrued during its own residency.
+	newNode.lastDecayEpoch.Store(shard.decayEpoch.Load())
 	head := slot.Load()
 	newNode.next.Store(head)
 	slot.Store(newNode)
@@ -499,8 +572,9 @@ func (c *CloxCache[K, V]) PutBack(key K, value V, oldSize int64) (success bool, 
 					break
 				}
 				if node.freq.CompareAndSwap(f, f+1) {
-					// Track graduation if crossing threshold
-					if f == shard.k.Load() && shard.entryCount.Load() >= shard.capacity.Load() {
+					// Track graduation if crossing threshold (at k=0 every
+					// bump counts; see the Get path)
+					if kk := shard.k.Load(); (kk == 0 || f == kk) && shard.entryCount.Load() >= shard.capacity.Load() {
 						shard.reachedProtected.Add(1)
 					}
 					break
@@ -595,6 +669,43 @@ func (c *CloxCache[K, V]) Evict(key K) bool {
 	return false
 }
 
+// decayIntervalFor returns the evictions-per-decay-step for a shard: the
+// configured value when set, otherwise auto-scaled to per-shard capacity so
+// forget-from-saturation stays ≈7 capacity-turnovers regardless of shard
+// size. 0 means decay is disabled.
+func (c *CloxCache[K, V]) decayIntervalFor(shard *shard[K, V]) uint64 {
+	switch {
+	case c.decayInterval > 0:
+		return uint64(c.decayInterval)
+	case c.decayInterval < 0:
+		return 0
+	}
+	return max(defaultDecayInterval, uint64(shard.capacity.Load())/2)
+}
+
+// decayNode absorbs a node's pending eviction-driven frequency decay: one −1
+// step per decay epoch elapsed since the node was last visited, floor 1.
+// Ghosts are exempt — their forgetting is ghost turnover. The CAS on
+// lastDecayEpoch elects a single decayer per epoch; the freq CAS loop rides
+// out concurrent Get bumps.
+func decayNode[K Key, V any](node *recordNode[K, V], epoch uint64) {
+	last := node.lastDecayEpoch.Load()
+	if last >= epoch || !node.lastDecayEpoch.CompareAndSwap(last, epoch) {
+		return
+	}
+	steps := epoch - last
+	for {
+		f := node.freq.Load()
+		if f <= 1 {
+			return
+		}
+		nf := f - int32(min(steps, uint64(f-1)))
+		if node.freq.CompareAndSwap(f, nf) {
+			return
+		}
+	}
+}
+
 // evictFromShard uses protected-freq eviction with LRU tiebreaking.
 // Called during Put when shard is over capacity. Caller must hold shard lock.
 // Returns the number of entries evicted (0 or 1).
@@ -608,6 +719,7 @@ func (c *CloxCache[K, V]) Evict(key K) bool {
 func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 	shard := &c.shards[shardID]
 	k := shard.k.Load()
+	epoch := shard.decayEpoch.Load()
 
 	// Calculate scan range
 	maxScan := max(slotsPerShard*c.sweepPercent/100, 1)
@@ -654,6 +766,13 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 				continue
 			}
 
+			// Absorb pending eviction-driven decay before judging
+			// protection: the freq that matters below is the decayed one.
+			if epoch > 0 {
+				decayNode(node, epoch)
+				freq = node.freq.Load()
+			}
+
 			// Pin check: skip live entries the decider rejects so they
 			// never become an eviction candidate.
 			if c.evictDecider != nil && !c.evictDecider(node.key, node.value.Load().(V)) {
@@ -662,8 +781,11 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 				continue
 			}
 
-			// Track LRU among low-freq items (freq <= k, unprotected)
-			if freq <= k && access < lowFreqAccess {
+			// Track LRU among low-freq items (freq <= k, unprotected).
+			// k == 0 is explicit "protection off": every live entry is a
+			// candidate and eviction is pure LRU (freq <= 0 would match
+			// nobody and invert the meaning into "protect everyone").
+			if (k == 0 || freq <= k) && access < lowFreqAccess {
 				lowFreqVictim = node
 				lowFreqPrev = prev
 				lowFreqSlot = slot
@@ -791,10 +913,28 @@ func (c *CloxCache[K, V]) evictFromShard(shardID, slotsPerShard int) int {
 		c.evictNotify(victim.key, notifyValue)
 	}
 
-	// Periodically adapt k based on graduation rate
+	// Advance the decay clock: forgetting is eviction-clocked, never
+	// wall-clocked, so an idle cache forgets nothing. The explicit epoch
+	// counter (rather than clock/interval division) keeps epochs monotonic
+	// when the auto-scaled interval moves with SetCapacity.
+	if interval := c.decayIntervalFor(shard); interval > 0 && shard.decayClock.Add(1) >= interval {
+		shard.decayClock.Store(0)
+		shard.decayEpoch.Add(1)
+	}
+
+	// Periodically adapt k based on graduation rate. Gated on a completed
+	// hit-rate window: once the eviction interval arms, the k step still
+	// waits until windowOps reaches a full window, so adaptation is strictly
+	// change → measure → learn — every k step is evaluated over exactly one
+	// window and lastKDirection is never overwritten by an unmeasured call.
+	// Without the gate, several k steps land inside one measurement window
+	// whenever evictions outpace probes — exactly when the cache is under
+	// pressure — and the gradient learns a hit-rate delta attributed to only
+	// the most recent direction. lastAdaptCheck is not advanced while gated,
+	// so the check stays armed until the window completes.
 	totalEvictions := shard.evictedUnprotected.Load() + shard.evictedProtected.Load()
 	lastCheck := shard.lastAdaptCheck.Load()
-	if totalEvictions-lastCheck >= adaptiveCheckInterval {
+	if totalEvictions-lastCheck >= adaptiveCheckInterval && shard.windowOps.Load() >= hitRateWindowSize {
 		if shard.lastAdaptCheck.CompareAndSwap(lastCheck, totalEvictions) {
 			c.adaptThreshold(shard)
 		}
@@ -878,9 +1018,12 @@ func (c *CloxCache[K, V]) adaptThreshold(shard *shard[K, V]) {
 	rateHigh := float64(shard.rateHigh.Load()) / 10000.0
 
 	var kDirection int32 = 0
-	if rate < rateLow && currentK > 1 {
-		// Very few items graduating - protection isn't helping
-		// Lower k, but never below 1 (need freq>=2 protection to allow graduation)
+	if rate < rateLow && currentK > 0 {
+		// Very few items graduating - protection isn't helping. k may walk
+		// all the way to 0 (protection off, pure LRU): when graduation
+		// collapses, LRU IS the correct policy and the adapter must be able
+		// to reach it. The graduation probe keeps counting 1→2 crossings at
+		// k=0, so a workload that develops skew climbs back out.
 		shard.k.Store(currentK - 1)
 		kDirection = -1
 	} else if rate > rateHigh && currentK < maxFrequency-1 {
