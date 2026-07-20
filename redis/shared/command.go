@@ -19,7 +19,11 @@
 
 package shared
 
-import "github.com/swytchdb/swytch/effects"
+import (
+	"unsafe"
+
+	"github.com/swytchdb/swytch/effects"
+)
 
 // CommandType represents the type of Redis command
 type CommandType int
@@ -316,6 +320,7 @@ type Command struct {
 	Transaction any
 	Context     *effects.Context
 	Runtime     *effects.Engine
+	keyScratch  [1]string
 }
 
 // Reset clears the command for reuse, preserving slice capacity
@@ -326,12 +331,33 @@ func (c *Command) Reset() {
 			PutDataBuf(arg)
 		}
 	}
+	clear(c.Args[:cap(c.Args)])
 	if c.RawName != nil {
 		PutDataBuf(c.RawName)
 	}
 	// Zero all fields while preserving Args capacity
 	args := c.Args[:0]
 	*c = Command{Args: args}
+}
+
+// SetSingleKey records arg as this command's one-key scratch value without
+// copying the pooled parser bytes. The returned string and SingleKeySlice are
+// valid only until the command is reset or returned to the pool. Code that
+// retains a key beyond command execution must clone it first.
+func (c *Command) SetSingleKey(arg []byte) string {
+	key := unsafe.String(unsafe.SliceData(arg), len(arg))
+	c.keyScratch[0] = key
+	return key
+}
+
+// SingleKeyValue returns the value installed by SetSingleKey.
+func (c *Command) SingleKeyValue() string {
+	return c.keyScratch[0]
+}
+
+// SingleKeySlice returns allocation-free one-key scratch storage.
+func (c *Command) SingleKeySlice() []string {
+	return c.keyScratch[:]
 }
 
 // LookupCommandName returns the CommandType for a given uppercase command name.

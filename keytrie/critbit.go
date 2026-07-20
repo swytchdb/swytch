@@ -97,6 +97,11 @@ type critNode[T any] struct {
 	// sweep pays one atomic load per visited leaf.
 	pins atomic.Int32      // 4 bytes,  offset 64
 	data atomic.Pointer[T] // 8 bytes,  offset 72 (leaf payload, 8-aligned)
+	// lastDecayEpoch is the eviction-decay epoch this leaf last absorbed; the
+	// sweep steps freq down by the elapsed epochs on visit (see decayLeaf).
+	// Atomic because ghost promotion resets it from the lock-free read path
+	// while the sweep writes it under evictMu.
+	lastDecayEpoch atomic.Uint64 // 8 bytes,  offset 80
 }
 
 func noop() {}
@@ -132,6 +137,9 @@ type Critbit[T any] struct {
 	// mutated only under evictMu (no atomics needed).
 	evictMu        sync.Mutex
 	evictHand      uint64
+	evictClock     uint64        // reclaims since the last decay-epoch step (under evictMu)
+	decayEvery     atomic.Uint64 // reclaims per freq-decay step (0 = auto-scale, MaxUint64 = disabled)
+	decayEpochN    atomic.Uint64 // completed decay intervals; leaves absorb the delta on sweep visit
 	evictK         atomic.Int32  // protected-freq threshold (adaptive)
 	ghostCount     atomic.Int64  // soft-deleted leaves retained for warm restart
 	windowHits     windowCounter // live accesses in the current adapt window (sharded)
@@ -444,6 +452,10 @@ func (c *Critbit[T]) allocLeafNode(key string, ts *TipSet) *critNode[T] {
 	n.tips.Store(ts)
 	n.freq.Store(1) // start warm enough to survive one sweep
 	n.lastAccess.Store(monotonic())
+	// Start the decay epoch at "now": a recycled arena slot retains the epoch
+	// of its previous occupant, and a stale epoch would make the sweep charge
+	// this leaf for decay it never lived through.
+	n.lastDecayEpoch.Store(c.decayEpoch())
 	return n
 }
 
@@ -791,6 +803,26 @@ func (c *Critbit[T]) Contains(key string) *TipSet {
 	return leaf.tips.Load()
 }
 
+// LoadData returns the existing leaf payload without installing one. Like
+// Contains, it is a lock-free, stale-tolerant read: compaction leaves relocated
+// husk payloads intact, so a reader that captured the old leaf still observes
+// the same *T. A successful lookup records the access for eviction policy.
+func (c *Critbit[T]) LoadData(key string) *T {
+	if c.closed.Load() {
+		return nil
+	}
+	rootNode := c.root.Load()
+	if rootNode == nil {
+		return nil
+	}
+	leaf := c.findBestMatch(rootNode, key)
+	if leaf == nil || leaf.key != key || leaf.isDeleted() {
+		return nil
+	}
+	c.bumpAccess(leaf)
+	return leaf.data.Load()
+}
+
 // bumpAccess records an access to leaf: it raises the frequency counter
 // (saturating at maxLeafFreq) and stamps lastAccess from the monotonic clock.
 // Lock-free; called on the hot read path. A ghost (freq < 0) is left alone —
@@ -817,9 +849,14 @@ func (c *Critbit[T]) bumpAccess(leaf *critNode[T]) {
 			// and rails k. underPressure must be the *current* over-target
 			// condition, not a "have we ever evicted" latch — a latch never falls
 			// back to false, so the rate accumulates across pauses. The predicate
-			// runs only at the f==k crossing (once per leaf lifetime), not on
-			// every read.
-			if f == c.evictK.Load() && c.underPressure != nil && c.underPressure() {
+			// runs only at the crossing (once per leaf lifetime), not on every
+			// read — except at k=0 (protection off), where every successful
+			// bump counts: the question there is "does enough recurrence exist
+			// to pay for protection at all", and once-per-residency crossings
+			// can't push the rate past rateHigh even on a hot-set workload
+			// (measured ≈0.25 on scan-burst — k never climbed and the policy
+			// stayed LRU). Resident hits per eviction can.
+			if k := c.evictK.Load(); (k == 0 || f == k) && c.underPressure != nil && c.underPressure() {
 				c.reachedProt.Add(1)
 			}
 			break

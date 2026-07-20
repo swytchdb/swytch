@@ -29,10 +29,25 @@ import (
 // as a single bounded domain (see Critbit.EvictBounded) rather than over
 // fixed-size shards, so a sweep's cost is bounded by the absolute scan budget
 // instead of a fraction of a shard.
+//
+// Boundary conditions on the policy's edge over plain LRU (measured against
+// offline Belady replay): the win lives at capacity/working-set ratios of
+// roughly 0.3–0.8 — below ~0.25 every policy produces near-identical contents,
+// above ~1 plain recency already retains the working set — and it shrinks
+// toward LRU-parity under any hot tier above the trie (subdag cache, client
+// caches), which skims the frequency skew protection feeds on. State these
+// conditions with any performance claim.
 const (
 	// defaultProtectedFreqThreshold: leaves with freq above this are
-	// protected from eviction; below-or-equal are eviction candidates.
-	defaultProtectedFreqThreshold = 2
+	// protected from eviction; below-or-equal are eviction candidates. k = 0
+	// means protection is off — every live leaf is a candidate and the sweep
+	// is pure LRU. That is the starting state: protection must earn its way
+	// in via the graduation probe (see bumpAccess) rather than being
+	// presumed, so a cache serving a low-reuse workload never starts out
+	// worse than plain LRU. On a reuse-≈1.3 real trace, starting at k=2
+	// meant every key that delivered its single re-read became a protected
+	// squatter with zero future value.
+	defaultProtectedFreqThreshold = 0
 
 	// adaptiveCheckInterval: re-evaluate k every N evictions. Kept at CloxCache's
 	// 1000: once the eviction counter was split from reclaim churn, real cold-key
@@ -65,6 +80,33 @@ const (
 	// keyspace, so eviction is O(want) and can run inline on the write path; the
 	// persistent clock hand covers the rest of the arena across successive calls.
 	minSweep = 128
+
+	// sweepSegments: the sweep window is taken as this many contiguous runs
+	// whose origins are spread evenly across the arena, not one contiguous
+	// run. Arena position correlates with insertion cohort (allocation order
+	// plus whole-chunk recycling), so a single contiguous window is
+	// age-biased sampled LRU: when the hand transits a young cohort, the
+	// "oldest in window" is itself young, and on low-reuse traces a young
+	// victim takes its only future hit with it. Measured on a reuse-≈1.3
+	// replay at the same 128-leaf budget: contiguous window −4.6pp hit rate
+	// vs true LRU (60% vs 81% of achievable re-reads); 8 spread segments
+	// recover ~97% of that gap while keeping cache locality within each run.
+	// Full 128-way striding recovers ~100% but pays a random memory access
+	// per leaf under evictMu + the reap read-lock, for ~0.1pp more.
+	sweepSegments = 8
+
+	// defaultDecayInterval: reclaims between eviction-driven frequency decay
+	// steps. Each step walks a live leaf's freq down by 1 (floor 1) as the
+	// sweep visits it, so a leaf that saturated freq while hot forgets over
+	// (maxLeafFreq-1)*interval ≈ 112 reclaims instead of squatting protected
+	// forever after the workload drifts — squatters are invisible to eviction
+	// metrics because they are never evicted at all. Linear −1 rather than
+	// halving: halving's first step (15→7) erases the hot-vs-warm ranking
+	// exactly when a starved cache needs it. The clock is reclaims, never
+	// wall time, so an idle trie forgets nothing. Too-fast decay degrades
+	// into plain LRU (never below); too-slow re-admits squatters — the knob
+	// is forgiving. Tunable via SetDecayInterval.
+	defaultDecayInterval = 8
 )
 
 // SetEvictHooks installs the consumer callbacks the eviction sweep uses.
@@ -191,6 +233,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	defer c.evictMu.Unlock()
 
 	k := c.evictK.Load()
+	epoch := c.decayEpoch()
 	// Window: wide enough to choose the want oldest cold leaves with some
 	// selectivity (so recent writes are spared), but bounded to a small multiple
 	// of want rather than a fraction of the whole keyspace. The persistent clock
@@ -206,10 +249,9 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	}
 	cands := make([]cand, 0, window)
 	var (
-		oldestGhost *critNode[T]
-		ghostAccess = uint64(math.MaxUint64)
-		fbVictim    *critNode[T]
-		fbAccess    = uint64(math.MaxUint64)
+		ghosts   []cand // ghosts seen this sweep, sorted oldest-first below
+		fbVictim *critNode[T]
+		fbAccess = uint64(math.MaxUint64)
 	)
 
 	// Hold the reap read-lock across the sweep and the claims. It excludes the
@@ -222,10 +264,16 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		access := leaf.lastAccess.Load()
 		if leaf.deleted.Load() {
 			// The sweep only forwards deleted leaves that are ghosts (freq < 0).
-			if access < ghostAccess {
-				oldestGhost, ghostAccess = leaf, access
-			}
+			ghosts = append(ghosts, cand{leaf, access})
 			return
+		}
+		// Absorb pending eviction-driven decay before judging protection: −1
+		// per elapsed epoch, floor 1, so a leaf that saturated freq while hot
+		// steps back below k after the workload drifts instead of squatting on
+		// its slot forever. Ghosts are exempt (their forgetting is turnover);
+		// pinned leaves still decay so freq stays honest if they unpin.
+		if epoch > 0 {
+			decayLeaf(leaf, epoch)
 		}
 		if leaf.pinned {
 			return // pinned (e.g. a system key) — verdict cached at leaf creation
@@ -236,7 +284,13 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		if access < fbAccess {
 			fbVictim, fbAccess = leaf, access
 		}
-		if leaf.freq.Load() <= k {
+		// k == 0 is explicit "protection off": every live leaf is a candidate
+		// and the batch is pure LRU. Without the special case, freq <= 0
+		// matches nobody and eviction would fall through to the single-victim
+		// fallback — LRU selection, but one reclaim per sweep instead of
+		// `want`, and no ghosting (which is the recurrence memory k needs to
+		// climb back out of 0).
+		if k == 0 || leaf.freq.Load() <= k {
 			cands = append(cands, cand{leaf, access})
 		}
 	})
@@ -246,6 +300,32 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	if len(cands) > want {
 		sort.Slice(cands, func(i, j int) bool { return cands[i].access < cands[j].access })
 		cands = cands[:want]
+	}
+	// Oldest-first, so the trim below and the reclaim fallback always take the
+	// least-recent ghost.
+	sort.Slice(ghosts, func(i, j int) bool { return ghosts[i].access < ghosts[j].access })
+
+	// tick advances the decay clock one reclaim: forgetting is
+	// eviction-clocked, never wall-clocked, so an idle trie forgets nothing.
+	tick := func() {
+		c.evictClock++
+		if every := c.decayIntervalNow(); every > 0 && c.evictClock >= every {
+			c.evictClock = 0
+			c.decayEpochN.Add(1)
+		}
+	}
+
+	// trimOldestGhost reclaims the least-recent ghost seen this sweep, skipping
+	// any that were concurrently promoted back to live.
+	trimOldestGhost := func() bool {
+		for len(ghosts) > 0 {
+			g := ghosts[0].leaf
+			ghosts = ghosts[1:]
+			if c.reclaimGhost(g) {
+				return true
+			}
+		}
+		return false
 	}
 
 	type evicted struct {
@@ -264,6 +344,18 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		leaf.tips.Store(nil)
 		leaf.data.Store(nil)
 		c.size.Add(-1)
+		// At ghost capacity, trim the oldest existing ghost to make room BEFORE
+		// ghosting the fresh victim. The order is load-bearing: the victim was
+		// chosen as LRU, so its recency is near-oldest — ghost-first followed by
+		// "trim the LRU ghost" would almost always trim the ghost just created.
+		// Ghost memory then freezes on a stale early cohort and every returning
+		// key re-admits at freq 1 like a stranger; nothing crashes, the policy
+		// just quietly becomes LRU-with-overhead (the colibri C port inverted
+		// this exact order). Fresh ghosts from earlier victims in this batch are
+		// not in the ghosts slice, so they can never be the trimmed one.
+		if c.ghostCount.Load() >= c.ghostCap() {
+			trimOldestGhost()
+		}
 		if c.ghostCount.Load() < c.ghostCap() {
 			// Ghost: retain the frequency (negated) for a warm restart.
 			for {
@@ -281,6 +373,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			c.deletedCount.Add(1)
 			c.enqueueReap(leaf)
 		}
+		tick()
 		victims = append(victims, evicted{leaf.key, tips, data})
 	}
 
@@ -288,13 +381,13 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 	// of evicting a hot key; only with neither do we take the LRU protected leaf.
 	reclaimedGhost := false
 	if len(victims) == 0 {
-		if oldestGhost != nil {
-			c.reclaimGhost(oldestGhost)
+		if trimOldestGhost() {
 			reclaimedGhost = true
 			// Count the reclaim as an unprotected eviction (a ghost is a
 			// previously-cold key) so the adaptive-k clock keeps advancing — without
 			// this, k freezes exactly when ghost reclaims dominate (cold-scarce).
 			c.evictedUnprot.Add(1)
+			tick()
 		} else if fbVictim != nil && c.claimForEviction(fbVictim) {
 			tips := fbVictim.tips.Load()
 			data := fbVictim.data.Load()
@@ -305,6 +398,7 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 			c.enqueueReap(fbVictim)
 			victims = append(victims, evicted{fbVictim.key, tips, data})
 			c.evictedProt.Add(1)
+			tick()
 		}
 	} else {
 		c.evictedUnprot.Add(uint64(len(victims)))
@@ -331,6 +425,67 @@ func (c *Critbit[T]) EvictBatch(want int) int {
 		return 1
 	}
 	return len(victims)
+}
+
+// SetDecayInterval overrides the eviction-driven frequency decay cadence:
+// n > 0 sets reclaims-per-step, n <= 0 disables decay entirely. Call at setup;
+// the default auto-scales with the live-leaf count (see decayIntervalNow).
+func (c *Critbit[T]) SetDecayInterval(n int) {
+	if n > 0 {
+		c.decayEvery.Store(uint64(n))
+		return
+	}
+	// MaxUint64 keeps the epoch counter frozen — decay never applies — while
+	// staying distinct from 0, which means "not configured, auto-scale".
+	c.decayEvery.Store(math.MaxUint64)
+}
+
+// decayIntervalNow returns the reclaims-per-decay-step in effect: the
+// configured value when set, otherwise auto-scaled to the current live-leaf
+// count so forget-from-saturation stays ≈7 turnovers of the resident set
+// regardless of domain size — with a fixed small interval, a large domain's
+// epochs elapse so fast that every leaf hits the floor by its next sweep
+// visit and protection degrades to plain LRU. Returns 0 when disabled.
+func (c *Critbit[T]) decayIntervalNow() uint64 {
+	switch every := c.decayEvery.Load(); every {
+	case 0:
+		return max(defaultDecayInterval, uint64(c.size.Load())/2)
+	case math.MaxUint64:
+		return 0
+	default:
+		return every
+	}
+}
+
+// decayEpoch returns the current eviction-decay epoch. Leaves store the epoch
+// they last absorbed and step down by the difference when the sweep visits
+// them. The explicit counter (rather than clock/interval division) keeps
+// epochs monotonic while the auto-scaled interval moves with the live count.
+func (c *Critbit[T]) decayEpoch() uint64 {
+	return c.decayEpochN.Load()
+}
+
+// decayLeaf absorbs a leaf's pending eviction-driven frequency decay: one −1
+// step per decay epoch elapsed since its last sweep visit, floor 1. The CAS on
+// lastDecayEpoch elects a single decayer per epoch — the sweep runs under
+// evictMu, but ghost promotion also writes the field from the lock-free read
+// path; the freq CAS loop rides out concurrent bumpAccess bumps.
+func decayLeaf[T any](leaf *critNode[T], epoch uint64) {
+	last := leaf.lastDecayEpoch.Load()
+	if last >= epoch || !leaf.lastDecayEpoch.CompareAndSwap(last, epoch) {
+		return
+	}
+	steps := epoch - last
+	for {
+		f := leaf.freq.Load()
+		if f <= 1 {
+			return // floor 1; ghosts (freq < 0) never reach here
+		}
+		nf := f - int32(min(steps, uint64(f-1)))
+		if leaf.freq.CompareAndSwap(f, nf) {
+			return
+		}
+	}
 }
 
 // claimForEviction atomically claims a live leaf as an eviction victim and
@@ -395,6 +550,11 @@ func (c *Critbit[T]) promoteIfGhost(leaf *critNode[T]) {
 		nf := min(-f+1, maxLeafFreq)
 		if leaf.freq.CompareAndSwap(f, nf) {
 			c.ghostCount.Add(-1)
+			// The ghost period is not decay debt: without this reset the next
+			// sweep visit would charge every epoch spent as a ghost against the
+			// remembered freq and collapse it to the floor, erasing the warm
+			// restart the ghost exists to provide.
+			leaf.lastDecayEpoch.Store(c.decayEpoch())
 			// A returning ghost is a window miss (op, not hit). Shard by the
 			// reactivated leaf's address, same as the live-hit path.
 			c.windowOps.add(unsafe.Pointer(leaf), 1)
@@ -426,6 +586,21 @@ func (c *Critbit[T]) maybeAdaptK() {
 	// Don't reintroduce that store. The underflow is also simply cheaper than
 	// tracking the burst with an explicit loop.
 	if total-c.lastAdaptCheck.Load() < adaptiveCheckInterval {
+		return
+	}
+	// Window gate (ported from the colibri C fix): the eviction interval arms
+	// the check, but the k step waits for a completed hit-rate window, making
+	// adaptation strictly change → measure → learn — every k step is evaluated
+	// over exactly one full window, and lastKDir is never overwritten by an
+	// unmeasured call. Without the gate, several k steps land inside one
+	// window whenever evictions outpace probes (exactly when the cache is
+	// under pressure and adaptation matters) and the gradient learns a
+	// hit-rate delta attributed to only the most recent direction — noise.
+	// lastAdaptCheck is not advanced while gated, so the check stays armed
+	// until the window completes; this also paces the post-halving underflow
+	// burst above to one k step per completed window rather than one per
+	// eviction, which is the burst's intended shape.
+	if c.windowOps.load() < hitRateWindowSize {
 		return
 	}
 	c.lastAdaptCheck.Store(total)
@@ -484,7 +659,13 @@ func (c *Critbit[T]) maybeAdaptK() {
 	rateHigh := float64(c.rateHigh.Load()) / 10000.0
 	k := c.evictK.Load()
 	var dir int32
-	if rate < rateLow && k > 1 {
+	// k may walk all the way to 0: protection off, pure LRU. When graduation
+	// collapses, LRU IS the correct policy and the adapter must be able to
+	// reach it — a floor of 1 still shields every key that was ever read
+	// once, which on low-reuse workloads is exactly the spent-key set.
+	// The graduation probe keeps counting at k=0 (see bumpAccess), so a
+	// workload that develops skew climbs back out.
+	if rate < rateLow && k > 0 {
 		c.evictK.Store(k - 1)
 		dir = -1
 	} else if rate > rateHigh && k < maxLeafFreq-1 {
@@ -526,30 +707,57 @@ func (c *Critbit[T]) sweepLeaves(base int, fn func(*critNode[T])) {
 		base = 1
 	}
 
-	hand := c.evictHand
-	live := 0
-	var i uint64
-	for ; live < base && i < total; i++ {
-		idx := (hand + i) % total
-		chunk := chunks[idx/chunkSize]
-		if chunk == nil {
-			// Chunk was reclaimed and not recycled. Jump the hand to the next
-			// chunk boundary in one step — paying one iteration per dead slot
-			// made the sweep O(high-water mark) on a churned arena, and the
-			// sweep runs under the reap read-lock with evictMu held, so every
-			// wasted iteration is serialized against writers.
-			i += chunkSize - 1 - idx%chunkSize
-			continue
-		}
-		n := &chunk[idx%chunkSize]
-		if n.deleted.Load() {
-			if n.freq.Load() < 0 {
-				fn(n) // ghost — forwarded for the reclaim fallback, not counted
-			}
-			continue // ghosts/uninitialized/unlink-pending don't count as live
-		}
-		fn(n)
-		live++
+	// Segment the window across the arena (see sweepSegments). When the whole
+	// live set fits in the window there is nothing to de-bias — a single
+	// contiguous pass keeps full deterministic coverage for small tries.
+	nSeg := sweepSegments
+	if int64(base) >= c.size.Load() || base < nSeg {
+		nSeg = 1
 	}
-	c.evictHand = hand + i
+	segLen := base / nSeg
+	segGap := total / uint64(nSeg) // origin spacing; also each segment's max span
+	if segGap == 0 {
+		segGap = total
+	}
+
+	hand := c.evictHand
+	var advance uint64
+	for s := 0; s < nSeg; s++ {
+		want := segLen
+		if s == nSeg-1 {
+			want = base - segLen*(nSeg-1) // remainder rides the last segment
+		}
+		origin := hand + uint64(s)*segGap
+		live := 0
+		var j uint64
+		for ; live < want && j < segGap; j++ {
+			idx := (origin + j) % total
+			chunk := chunks[idx/chunkSize]
+			if chunk == nil {
+				// Chunk was reclaimed and not recycled. Jump to the next
+				// chunk boundary in one step — paying one iteration per dead
+				// slot made the sweep O(high-water mark) on a churned arena,
+				// and the sweep runs under the reap read-lock with evictMu
+				// held, so every wasted iteration is serialized against
+				// writers.
+				j += chunkSize - 1 - idx%chunkSize
+				continue
+			}
+			n := &chunk[idx%chunkSize]
+			if n.deleted.Load() {
+				if n.freq.Load() < 0 {
+					fn(n) // ghost — forwarded for the reclaim fallback, not counted
+				}
+				continue // ghosts/uninitialized/unlink-pending don't count as live
+			}
+			fn(n)
+			live++
+		}
+		if s == 0 {
+			// The hand advances by segment 0's span only; every origin rotates
+			// with it, so successive sweeps still cover the entire arena.
+			advance = max(j, 1)
+		}
+	}
+	c.evictHand = hand + advance
 }

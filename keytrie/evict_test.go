@@ -20,7 +20,9 @@
 package keytrie
 
 import (
+	"container/list"
 	"fmt"
+	"math/rand"
 	"runtime"
 	"testing"
 )
@@ -165,6 +167,8 @@ func TestEvictBatch_SkipsDynamicallyPinned(t *testing.T) {
 func TestEvictBounded_ReclaimsGhostBeforeHotKey(t *testing.T) {
 	c := NewCritbit[struct{}]()
 	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+	// The scenario needs a protected class; the default k=0 is pure LRU.
+	c.evictK.Store(2)
 
 	all := []string{"cold-1", "cold-2", "hot-1", "hot-2"}
 	for _, k := range all {
@@ -356,5 +360,178 @@ func TestGraduationGatedByPressure(t *testing.T) {
 	}
 	if got := c.EvictStats().ReachedProtected; got == 0 {
 		t.Fatal("ReachedProtected = 0 with underPressure=true; want the crossing counted")
+	}
+}
+
+// findLeaf scans the leaf arena for a leaf carrying key, ghosts included
+// (Contains hides deleted leaves). Test-only; not concurrency-safe.
+func findLeaf[T any](c *Critbit[T], key string) *critNode[T] {
+	for _, chunk := range c.leafArena.list.Load().chunks {
+		for i := range chunk {
+			if n := &chunk[i]; n.key == key {
+				return n
+			}
+		}
+	}
+	return nil
+}
+
+// TestEvictBatch_GhostTrimOrder pins the ghost-trim order: at ghost capacity,
+// the oldest EXISTING ghost is trimmed to make room before the fresh victim is
+// ghosted. The inverted order (ghost first, then trim the LRU ghost) is
+// refactor-bait that survives review: the victim was chosen as LRU, so its
+// recency is near-oldest, and the just-created ghost is almost always the one
+// trimmed — ghost memory freezes on a stale cohort, every returning key
+// re-admits at freq 1, and the policy quietly becomes LRU-with-overhead.
+func TestEvictBatch_GhostTrimOrder(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+
+	// The victim-to-be goes in first, so its lastAccess predates every ghost's.
+	// Pin it so the fodder churn below can't take it early.
+	c.Insert("victim", nil, NewTipSet(tip(1)))
+	if !c.Pin("victim") {
+		t.Fatal("Pin on a live key must succeed")
+	}
+
+	// Fill the ghost cache to capacity with fodder evictions.
+	ghostCap := int(c.ghostCap())
+	for i := range ghostCap {
+		c.Insert(fmt.Sprintf("fodder-%04d", i), nil, NewTipSet(tip(uint64(i+2))))
+	}
+	for range ghostCap {
+		if !c.EvictBounded(64) {
+			t.Fatal("fodder eviction failed")
+		}
+	}
+	if got := c.ghostCount.Load(); got != int64(ghostCap) {
+		t.Fatalf("ghostCount = %d; want %d (at capacity)", got, ghostCap)
+	}
+
+	// Unpin and evict once: the victim is the LRU cold leaf and its recency is
+	// older than all existing ghosts — the doc scenario where the buggy order
+	// trims the fresh ghost.
+	if !c.Unpin("victim") {
+		t.Fatal("Unpin on a live key must succeed")
+	}
+	if !c.EvictBounded(64) {
+		t.Fatal("expected the victim to be evicted")
+	}
+
+	if got := c.ghostCount.Load(); got != int64(ghostCap) {
+		t.Fatalf("ghostCount = %d after trim+ghost; want %d (net unchanged)", got, ghostCap)
+	}
+	if n := findLeaf(c, "victim"); n == nil || n.freq.Load() >= 0 {
+		t.Fatal("fresh victim must survive as a ghost")
+	}
+	if n := findLeaf(c, "fodder-0000"); n != nil && n.freq.Load() < 0 {
+		t.Fatal("oldest existing ghost must be the one trimmed")
+	}
+	if n := findLeaf(c, "fodder-0001"); n == nil || n.freq.Load() >= 0 {
+		t.Fatal("younger ghosts must survive the trim")
+	}
+}
+
+// TestDecayStepsLeafFreqDown verifies eviction-driven frequency decay: a leaf
+// that saturated freq while hot steps down by 1 per elapsed decay epoch as the
+// sweep visits it, and an idle policy (no reclaims) decays nothing.
+func TestDecayStepsLeafFreqDown(t *testing.T) {
+	c := NewCritbit[struct{}]()
+	c.SetDecayInterval(100)
+	c.SetEvictHooks(func(string) bool { return true }, func(string, []EffectRef, *struct{}) {}, func() bool { return true })
+	// Pin a protected class so the hot leaf is never a victim; the default
+	// k=0 (pure LRU) would evict it as the oldest leaf during the churn.
+	c.evictK.Store(2)
+
+	c.Insert("hot", nil, NewTipSet(tip(1)))
+	for range 30 {
+		c.LoadData("hot") // Contains doesn't record accesses; LoadData does
+	}
+	if got := findLeaf(c, "hot").freq.Load(); got != maxLeafFreq {
+		t.Fatalf("hot freq = %d after saturation; want %d", got, maxLeafFreq)
+	}
+
+	// 150 reclaims cross one decay interval (100) exactly once: the hot leaf —
+	// protected, never a victim — must step 15 → 14, no further.
+	for i := range 150 {
+		c.Insert(fmt.Sprintf("fodder-%04d", i), nil, NewTipSet(tip(uint64(i+2))))
+		if !c.EvictBounded(64) {
+			t.Fatalf("eviction %d failed", i)
+		}
+	}
+	if got := findLeaf(c, "hot").freq.Load(); got != maxLeafFreq-1 {
+		t.Fatalf("hot freq = %d after one decay epoch; want %d", got, maxLeafFreq-1)
+	}
+}
+
+// TestSlidingWindowDriftParity is the squatter detector: a working set that
+// drifts across the keyspace. Undecayed protection collapses here (measured
+// 50.8%% hit vs plain LRU's 89.9%% on the colibri traces) because saturated
+// leaves keep their slots after the workload moves on; with eviction-driven
+// decay the policy must track LRU. Retention mistakes are invisible to
+// eviction metrics — squatters are never evicted — so hit-rate parity against
+// an LRU replay of the same trace is the only signal that catches this.
+func TestSlidingWindowDriftParity(t *testing.T) {
+	const (
+		capacity   = 128
+		windowKeys = 160 // capacity/working-set ≈ 0.8: the band where policy differences show
+		ops        = 60000
+		slideEvery = 40 // window advances one key every N ops
+	)
+	rng := rand.New(rand.NewSource(42))
+	trace := make([]int, ops)
+	for i := range trace {
+		trace[i] = i/slideEvery + rng.Intn(windowKeys)
+	}
+	key := func(id int) string { return fmt.Sprintf("key-%06d", id) }
+
+	// Plain-LRU baseline over the identical trace.
+	lru := list.New()
+	inLRU := make(map[int]*list.Element, capacity)
+	lruHits := 0
+	for _, id := range trace {
+		if el, ok := inLRU[id]; ok {
+			lruHits++
+			lru.MoveToFront(el)
+			continue
+		}
+		if lru.Len() >= capacity {
+			back := lru.Back()
+			delete(inLRU, back.Value.(int))
+			lru.Remove(back)
+		}
+		inLRU[id] = lru.PushFront(id)
+	}
+
+	c := NewCritbit[struct{}]()
+	c.SetEvictHooks(
+		func(string) bool { return true },
+		func(string, []EffectRef, *struct{}) {},
+		func() bool { return c.Size() >= capacity },
+	)
+	payload := struct{}{}
+	trieHits := 0
+	for _, id := range trace {
+		// LoadData is the probe that records the access for the policy
+		// (Contains doesn't); the payload install below makes a resident key
+		// distinguishable from a miss.
+		if c.LoadData(key(id)) != nil {
+			trieHits++
+			continue
+		}
+		c.Insert(key(id), nil, NewTipSet(tip(uint64(id))))
+		c.LoadOrStoreData(key(id), &payload)
+		for c.Size() > capacity {
+			if c.EvictBatch(int(c.Size())-capacity) == 0 {
+				break
+			}
+		}
+	}
+
+	t.Logf("sliding-window drift: LRU hits %d (%.1f%%), trie hits %d (%.1f%%)",
+		lruHits, 100*float64(lruHits)/ops, trieHits, 100*float64(trieHits)/ops)
+	if float64(trieHits) < 0.9*float64(lruHits) {
+		t.Fatalf("drift parity broken: trie hits %d < 90%% of LRU's %d — protection is squatting (decay regression?)",
+			trieHits, lruHits)
 	}
 }

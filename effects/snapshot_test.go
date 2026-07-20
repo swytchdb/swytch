@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	clox "github.com/swytchdb/swytch/cache"
@@ -139,6 +140,96 @@ func TestGetSnapshot_SingleEffect(t *testing.T) {
 	}
 	if string(r.Scalar.GetRaw()) != "hello" {
 		t.Fatalf("expected 'hello', got %q", r.Scalar.GetRaw())
+	}
+}
+
+func TestGetSnapshot_ReusesImmutableReducedMemo(t *testing.T) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+
+	off := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
+		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("hello"))},
+	})
+	e.index.Insert("k", nil, keytrie.NewTipSet(off))
+
+	first, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("stable reads should reuse the immutable reduced memo")
+	}
+	if string(second.GetScalar().GetRaw()) != "hello" {
+		t.Fatalf("expected hello, got %q", second.GetScalar().GetRaw())
+	}
+}
+
+func TestEnsureSubscribed_OwnsBorrowedKey(t *testing.T) {
+	e := newSnapshotEngine(nil)
+	buf := []byte("borrowed-key")
+	key := unsafe.String(unsafe.SliceData(buf), len(buf))
+
+	if err := e.ensureSubscribed(key); err != nil {
+		t.Fatal(err)
+	}
+	copy(buf, "overwritten!!")
+
+	if _, ok := e.subscriptions.Load("borrowed-key"); !ok {
+		t.Fatal("subscription retained the caller's borrowed key buffer")
+	}
+	if e.index.Contains("borrowed-key") == nil {
+		t.Fatal("index retained the caller's borrowed key buffer")
+	}
+}
+
+func TestFilterSnapshot_DoesNotMutateReducedMemo(t *testing.T) {
+	expired := &pb.ReducedElement{ExpiresAt: timestamppb.New(time.Now().Add(-time.Hour))}
+	live := &pb.ReducedElement{}
+	memo := &pb.ReducedEffect{
+		Collection: pb.CollectionKind_KEYED,
+		NetAdds: map[string]*pb.ReducedElement{
+			"expired": expired,
+			"live":    live,
+		},
+	}
+
+	filtered := filterSnapshot(memo)
+	if filtered == memo {
+		t.Fatal("expired-element filtering must detach from the immutable memo")
+	}
+	if _, ok := filtered.NetAdds["expired"]; ok {
+		t.Fatal("expired element remained in filtered result")
+	}
+	if _, ok := memo.NetAdds["expired"]; !ok {
+		t.Fatal("filtering mutated the cached reduced result")
+	}
+	if filtered.NetAdds["live"] != live {
+		t.Fatal("filtering should preserve live elements")
+	}
+}
+
+func BenchmarkGetSnapshot_Cached(b *testing.B) {
+	log := newSnapshotLog()
+	e := newSnapshotEngine(log)
+	off := log.putEffect(&pb.Effect{
+		Key: []byte("k"), Hlc: sTs(10), NodeId: 1,
+		Kind: &pb.Effect_Data{Data: scalarInsertRaw([]byte("hello"))},
+	})
+	e.index.Insert("k", nil, keytrie.NewTipSet(off))
+	if _, _, _, err := e.GetSnapshot("k"); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, _, err := e.GetSnapshot("k"); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

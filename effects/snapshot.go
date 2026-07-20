@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,8 +87,8 @@ type leafState struct {
 }
 
 // reducedResult is a cached materialized read keyed on the exact tip set it was
-// derived from. The result is treated as immutable: serve and store both clone,
-// so no consumer can mutate the shared copy (filterSnapshot rewrites fields).
+// derived from. The result is immutable once published. Read paths must use
+// copy-on-write before changing it (filterSnapshot and compaction do this).
 //
 // result aliases the value byte slices of the effects it was reduced from
 // (cloneData/cloneReduced share Raw slices rather than copying). Those effects
@@ -304,9 +305,10 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 		for k, elem := range result.NetAdds {
 			if elem.ExpiresAt != nil && now.After(elem.ExpiresAt.AsTime()) {
 				if !cloned {
-					na := make(map[string]*pb.ReducedElement, len(result.NetAdds))
-					maps.Copy(na, result.NetAdds)
-					result.NetAdds = na
+					// A reduced memo may own result. Clone only on the rare
+					// expired-element path; ordinary reads remain allocation-free
+					// here and never mutate the published snapshot.
+					result = cloneReduced(result)
 					cloned = true
 				}
 				delete(result.NetAdds, k)
@@ -342,6 +344,8 @@ func filterSnapshot(result *pb.ReducedEffect) *pb.ReducedEffect {
 // read-modify-write (SETBIT, INCR, etc.) must pass the returned tips
 // to Emit so the first effect depends on the tips the snapshot was
 // actually computed from, not whatever the index contains at Emit time.
+// The returned ReducedEffect is an immutable snapshot and may be shared by
+// subsequent reads; callers that need to change it must clone it first.
 //
 // Cache hit returns immediately. On miss, walks the causal DAG from
 // the index tip set and reconstructs via ReduceBranch + canonical merge.
@@ -510,7 +514,9 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 
 	// Check index for tips
 	if len(snapshotTips) == 0 {
-		slog.Debug("GetSnapshot: no tips", "key", key)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Debug("GetSnapshot: no tips", "key", key)
+		}
 		return nil, nil, 0
 	}
 
@@ -525,19 +531,22 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 	// committed answer for these exact tips, and reconstruct(key, tips) is a
 	// pure function of the tip set (the reachable DAG is immutable). Cache it in
 	// the leaf keyed on the tip set — a later write/arrival changes the tips,
-	// yielding a different key that misses. Serve and store both clone so the
-	// shared copy is never mutated (filterSnapshot rewrites fields). The memo is
+	// yielding a different key that misses. The cached result is immutable;
+	// filtering and compaction use copy-on-write before changing it. The memo is
 	// bypassed while any txn is mid-horizon: a conservative guard that keeps the
 	// cache out of the in-flight-visibility window entirely.
 	horizonClear := e.horizon == nil || e.horizon.Empty()
-	ls, _ := e.index.LoadOrStoreData(key, &leafState{})
+	ls := e.index.LoadData(key)
+	if ls == nil {
+		ls, _ = e.index.LoadOrStoreData(key, &leafState{})
+	}
 
 	var result *pb.ReducedEffect
 	var chainLen int
 	served := false
 	if horizonClear && ls != nil {
 		if rr := ls.reduced.Load(); rr != nil && tipsEqual(rr.tips, tipOffsets) {
-			result, chainLen, served = cloneReduced(rr.result), rr.chainLen, true
+			result, chainLen, served = rr.result, rr.chainLen, true
 		}
 	}
 
@@ -547,7 +556,9 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 		// avoid returning a value that excludes a bind which will be present
 		// in the next reconstruct from the same tips (the Elle :incompatible-order
 		// shape from Jepsen run 26373595271).
-		slog.Debug("GetSnapshot: reconstructing", "key", key, "tips", tipOffsets)
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Debug("GetSnapshot: reconstructing", "key", key, "tips", tipOffsets)
+		}
 		var err error
 		result, chainLen, err = e.reconstruct(key, tipOffsets, "", true)
 		if err != nil {
@@ -561,7 +572,7 @@ func (e *Engine) reconstructLocal(key string) (*pb.ReducedEffect, []Tip, int) {
 			// the memo needs no refcount of its own.
 			ls.reduced.Store(&reducedResult{
 				tips:     append([]Tip(nil), tipOffsets...),
-				result:   cloneReduced(result),
+				result:   result,
 				chainLen: chainLen,
 			})
 		}
@@ -631,11 +642,18 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	if existing, ok := e.subscriptions.Load(key); ok {
 		return e.awaitSubscription(existing, unsafe)
 	}
+	// Callers on the Redis hot path may borrow key from a pooled command
+	// buffer. A new subscription outlives that command, so own the map/trie key
+	// before publishing any state. The already-subscribed path above remains
+	// allocation-free.
+	ownedKey := strings.Clone(key)
 	state := &subscriptionState{ready: make(chan struct{})}
-	if existing, loaded := e.subscriptions.LoadOrStore(key, state); loaded {
+	if existing, loaded := e.subscriptions.LoadOrStore(ownedKey, state); loaded {
 		return e.awaitSubscription(existing, unsafe)
 	}
-	slog.Debug("ensureSubscribed: bootstrapping", "key", key)
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("ensureSubscribed: bootstrapping", "key", ownedKey)
+	}
 	succeeded := false
 	defer func() {
 		if succeeded {
@@ -645,7 +663,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 
 	hlc := timestamppb.New(e.clock.Now())
 	eff := &pb.Effect{
-		Key:            []byte(key),
+		Key:            []byte(ownedKey),
 		Hlc:            hlc,
 		NodeId:         uint64(e.nodeID),
 		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
@@ -657,7 +675,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	if err != nil {
 		// Marshal failure is a code bug; remove state so a fresh call
 		// retries from scratch and concurrent waiters re-bootstrap.
-		e.subscriptions.Delete(key)
+		e.subscriptions.Delete(ownedKey)
 		state.markFailed()
 		return err
 	}
@@ -666,7 +684,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	if e.effectCache != nil {
 		e.effectCache.PutSized(offset, eff, len(data))
 	}
-	e.updateIndex(key, nil, offset)
+	e.updateIndex(ownedKey, nil, offset)
 	e.fireLocalEffect(offset, eff)
 
 	if e.broadcaster == nil {
@@ -690,7 +708,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	// filter hasn't arrived yet forces clusterMaybeHasKey true, so a fresh
 	// node always takes the blocking bootstrap below.
 	if allowAsync &&
-		(e.inMajorityPartition() || unsafe) && !e.clusterMaybeHasKey(key) {
+		(e.inMajorityPartition() || unsafe) && !e.clusterMaybeHasKey(ownedKey) {
 		go e.broadcaster.BroadcastWithData(notify, notify.EffectData)
 		succeeded = true
 		return nil
@@ -700,8 +718,8 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 	collector := &bootstrapCollector{
 		nacks: make(chan *pb.NackNotify, 64),
 	}
-	e.pendingBootstraps.Store(key, collector)
-	defer e.pendingBootstraps.Delete(key)
+	e.pendingBootstraps.Store(ownedKey, collector)
+	defer e.pendingBootstraps.Delete(ownedKey)
 
 	// Send to each peer individually and wait for ACKs. Retry if no peers
 	// responded (e.g. noise sessions not yet established after restart).
@@ -732,7 +750,7 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 				// flushTx can address bind broadcast directly without
 				// re-deriving from the DAG.
 				if len(nacks) > 0 {
-					e.addPeerSubscriber(key, pid)
+					e.addPeerSubscriber(ownedKey, pid)
 				}
 				// Collect NACKs returned synchronously from ReplicateTo.
 				// HandleRemote on the peer generates these inline and
@@ -761,11 +779,11 @@ func (e *Engine) ensureSubscribedMode(key string, allowAsync bool) error {
 			select {
 			case <-bootstrapDeadline:
 				slog.Warn("subscription bootstrap: no peers responded after retries",
-					"key", key, "attempts", attempt+1)
+					"key", ownedKey, "attempts", attempt+1)
 				goto done
 			case <-time.After(500 * time.Millisecond):
 				slog.Debug("subscription bootstrap: retrying, no peers ACK'd",
-					"key", key, "attempt", attempt+1)
+					"key", ownedKey, "attempt", attempt+1)
 				continue
 			}
 		}
@@ -781,7 +799,7 @@ done:
 	// also surface ErrBootstrapIncomplete. UnsafeMode skips the gate:
 	// there is no majority to protect, only branches to merge.
 	if !unsafe && !e.broadcaster.InMajorityPartition() {
-		e.subscriptions.Delete(key)
+		e.subscriptions.Delete(ownedKey)
 		state.markFailed()
 		return ErrRegionPartitioned
 	}
@@ -805,7 +823,7 @@ done:
 					return
 				}
 				if len(nacks) > 0 {
-					e.addPeerSubscriber(key, pid)
+					e.addPeerSubscriber(ownedKey, pid)
 				}
 				mu.Lock()
 				for _, nack := range nacks {
@@ -834,18 +852,18 @@ done:
 		}
 	}
 
-	installed, skipped := e.walkAndInstall(key, unique)
+	installed, skipped := e.walkAndInstall(ownedKey, unique)
 
 	if installed > 0 {
 		if skipped > 0 {
 			slog.Debug("ensureSubscribed: bootstrap completed with partial reachability",
-				"key", key, "installed", installed, "skipped", skipped)
+				"key", ownedKey, "installed", installed, "skipped", skipped)
 		}
 		// Recover subscribers that have been compacted into snapshots. The
 		// NACK-response seeding above only learns peers that are live and
 		// authoritative right now; a peer subscribed before the last compaction
 		// (or one currently partitioned away) survives only in snapshot state.
-		e.seedSubscribersFromDag(key)
+		e.seedSubscribersFromDag(ownedKey)
 		succeeded = true
 		return nil
 	}
@@ -857,9 +875,9 @@ done:
 	// outward while incomplete. Leaves state in place (incomplete=true)
 	// so retryBootstrap can install tips and markReady when reachable.
 	slog.Debug("ensureSubscribed: incomplete bootstrap, retrying in background",
-		"key", key, "unreachable_tips", skipped)
+		"key", ownedKey, "unreachable_tips", skipped)
 	state.incomplete.Store(true)
-	go e.retryBootstrap(key, state, unique)
+	go e.retryBootstrap(ownedKey, state, unique)
 	if unsafe {
 		return nil
 	}

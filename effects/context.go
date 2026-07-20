@@ -215,6 +215,7 @@ func (c *Context) TraceCtx() context.Context {
 // commands' effects are in the log but not yet in the index; this method
 // reconstructs from the log so commands within the same transaction can
 // see each other's writes.
+// The returned ReducedEffect is immutable and may be shared by later reads.
 //
 // When a txSnapshot is active (MULTI/EXEC with SSI), reads for keys not
 // yet in the context use the snapshot instead of the live index, and a
@@ -261,6 +262,10 @@ func (c *Context) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, error) {
 			// so the compaction snapshot is where the set is persisted for a
 			// future bootstrapping peer to recover after the raw
 			// SubscriptionEffects have been compacted away.
+			// reconstructLocal may have returned the immutable reduced memo.
+			// Compaction owns the state it emits, so detach before stamping the
+			// subscriber set instead of forcing every read to clone up front.
+			result = cloneReduced(result)
 			result.Subscribers = c.engine.snapshotSubscribers(key)
 			snapEff := &pb.SnapshotEffect{
 				Collection: result.Collection,
@@ -751,12 +756,12 @@ func (c *Context) applySubOps(key string, ck *contextKey) {
 // effect (Key, Hlc, NodeId, ForkChoiceHash, TxnId, Deps, Kind).
 // Returns the log offset and the constructed OffsetNotify.
 func (c *Context) rawEmit(eff *pb.Effect) (Tip, *pb.OffsetNotify, error) {
-	key := string(eff.Key)
-
 	offset := c.engine.nextOffset()
 
-	slog.Debug("Emit: wrote effect",
-		"key", key, "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
+	if slog.Default().Enabled(c.TraceCtx(), slog.LevelDebug) {
+		slog.Debug("Emit: wrote effect",
+			"key", string(eff.Key), "offset", offset, "deps", eff.Deps, "tx", eff.TxnId != "")
+	}
 
 	// Marshal once and reuse the length for the pool's byte accounting (avoids
 	// a redundant proto.Size walk) and the bytes for the notify. The standalone
@@ -808,7 +813,9 @@ func (c *Context) Flush() error {
 
 // flushNonTx is the original Flush body for non-transactional writes.
 func (c *Context) flushNonTx() error {
-	slog.Debug("Flush: non-tx", "keys", len(c.keys))
+	if slog.Default().Enabled(c.TraceCtx(), slog.LevelDebug) {
+		slog.Debug("Flush: non-tx", "keys", len(c.keys))
+	}
 
 	for key, ck := range c.keys {
 		// Handle flush-all: wipe index before broadcasting
