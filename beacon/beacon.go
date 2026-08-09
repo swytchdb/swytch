@@ -60,6 +60,15 @@ type Beacon struct {
 	// additional signals during that window collapse into it.
 	topoRefresh chan struct{}
 
+	// removeQ accumulates cloud-pushed member removals for memberRemoveLoop.
+	// A dashboard cleanup can push thousands in one burst, so they are applied
+	// in batches — whatever accumulated while the previous batch flushed drains
+	// as one flush — rather than one flush per command. removeSignal coalesces
+	// like topoRefresh.
+	removeQ      []uint64
+	removeMu     sync.Mutex
+	removeSignal chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -68,10 +77,11 @@ type Beacon struct {
 // New creates a beacon. Call Start to begin discovery and membership.
 func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
 	b := &Beacon{
-		cfg:         cfg,
-		engine:      engine,
-		pm:          pm,
-		topoRefresh: make(chan struct{}, 1),
+		cfg:          cfg,
+		engine:       engine,
+		pm:           pm,
+		topoRefresh:  make(chan struct{}, 1),
+		removeSignal: make(chan struct{}, 1),
 	}
 	// A cloud-pushed "delete this server" command applies through the same
 	// membership REMOVE_OP path the local sweeps use.
@@ -81,17 +91,69 @@ func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
 	return b
 }
 
-// removeMember applies a REMOVE_OP for nodeID to the membership key so the
-// cluster stops dialing it. A failure is loud: peers keep the entry and redial
-// the removed node until an operator intervenes.
+// removeMember queues a cloud-pushed "delete this server" command for
+// memberRemoveLoop. Applying it here would run inside the cloud stream's
+// readLoop, one flush per command — a burst of thousands would serialize
+// against it.
 func (b *Beacon) removeMember(nodeID uint64) {
-	ctx := b.engine.NewContext()
-	if err := ctx.Emit(buildMemberRemove(nodeID)); err != nil {
-		slog.Error("beacon: member remove emit failed", "node_id", nodeID, "error", err)
+	b.removeMu.Lock()
+	b.removeQ = append(b.removeQ, nodeID)
+	b.removeMu.Unlock()
+	select {
+	case b.removeSignal <- struct{}{}:
+	default:
+	}
+}
+
+// memberRemoveLoop applies queued cloud-pushed removals in batches.
+func (b *Beacon) memberRemoveLoop() {
+	defer b.wg.Done()
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-b.removeSignal:
+		}
+		b.applyQueuedRemovals()
+	}
+}
+
+// applyQueuedRemovals drains the removal queue: every queued node id emits its
+// REMOVE_OP in one context with one flush, then a fresh-context read lets
+// GetSnapshot's chain compaction collapse the removals into a snapshot (the
+// emitting context cannot — a key with pending effects skips the compaction
+// branch). The compacting read is load-bearing for restart recovery: cloud
+// roster discovery walks the membership chain from the cloud's tips on every
+// boot, so an uncompacted removal burst leaves thousands of effects for each
+// future bootstrap to fetch. Failures are loud: peers keep a non-removed entry
+// and redial the dead node until an operator intervenes.
+func (b *Beacon) applyQueuedRemovals() {
+	b.removeMu.Lock()
+	batch := b.removeQ
+	b.removeQ = nil
+	b.removeMu.Unlock()
+	if len(batch) == 0 {
 		return
 	}
+
+	ctx := b.engine.NewContext()
+	for _, nodeID := range batch {
+		if err := ctx.Emit(buildMemberRemove(nodeID)); err != nil {
+			slog.Error("beacon: member remove emit failed", "node_id", nodeID, "error", err)
+		}
+	}
 	if err := ctx.Flush(); err != nil {
-		slog.Error("beacon: member remove flush failed", "node_id", nodeID, "error", err)
+		slog.Error("beacon: member remove flush failed", "batch", len(batch), "error", err)
+		return
+	}
+	slog.Info("beacon: applied member removals", "batch", len(batch))
+
+	cctx := b.engine.NewContext()
+	if _, _, err := cctx.GetSnapshot(MembershipKey); err != nil {
+		slog.Error("beacon: post-removal compaction read failed", "error", err)
+	}
+	if err := cctx.Flush(); err != nil {
+		slog.Error("beacon: post-removal compaction flush failed", "error", err)
 	}
 }
 
@@ -102,8 +164,24 @@ func (b *Beacon) removeMember(nodeID uint64) {
 // nil — a node that starts serving client traffic before bootstrap
 // completes will route writes against a synthetic topology and miss
 // remote effects that arrive before its first subscription.
-func (b *Beacon) Start(ctx context.Context) error {
+func (b *Beacon) Start(ctx context.Context) (err error) {
 	b.ctx, b.cancel = context.WithCancel(ctx)
+	// A failed Start must not leak background workers: the caller only pairs
+	// Stop with a successful Start.
+	defer func() {
+		if err != nil {
+			b.cancel()
+			b.wg.Wait()
+		}
+	}()
+
+	// Cloud-pushed removals arrive as soon as the cloud stream attaches —
+	// typically while bootstrap below is still dialing — so their applier
+	// starts before Phase 1, not after.
+	if b.cfg.Cloud != nil {
+		b.wg.Add(1)
+		go b.memberRemoveLoop()
+	}
 
 	// Phase 1: peer discovery (DNS or cloud) + temporary topology + peer
 	// reachability. Does not read authoritative membership — that would

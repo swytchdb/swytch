@@ -721,7 +721,9 @@ func (cs *CloudSync) handleMemberRemove(mr *dp.MemberRemove) {
 		slog.Warn("cloud sync: member remove received with no handler wired, dropping", "node_id", nodeID)
 		return
 	}
-	slog.Info("cloud sync: applying member remove", "node_id", nodeID)
+	// Debug, not Info: dashboard cleanups push these in bursts of thousands;
+	// the beacon's applier logs one batch summary instead.
+	slog.Debug("cloud sync: applying member remove", "node_id", nodeID)
 	(*fn)(nodeID)
 }
 
@@ -844,11 +846,11 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		return nil, fmt.Errorf("cloud get tips: %w", err)
 	}
 	// Pull the sub-DAG tips-down, seeded from the inline closure; the per-tip
-	// CDN fetch below only covers stragglers the sidecar didn't carry.
-	// Snapshot compaction keeps membership chains short; the bound only stops
-	// a runaway walk, and hitting it means the roster may be partial — say
-	// so, since discovery still works with any one live address.
-	const walkLimit = 1024
+	// CDN fetch below only covers stragglers the sidecar didn't carry. The
+	// walk is deliberately unbounded: reducing a truncated sub-DAG resurrects
+	// any member whose REMOVE was cut while its INSERT survived, and the
+	// cluster then redials the dead. A long chain (removal burst not yet
+	// compacted) costs a slow walk, never a wrong roster.
 	fetched := map[effects.Tip]*pb.Effect{}
 	var queue []effects.Tip
 	for _, kt := range resp.GetKeys() {
@@ -863,11 +865,6 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		}
 	}
 	for len(queue) > 0 {
-		if len(fetched) >= walkLimit {
-			slog.Warn("cloud discover: membership walk truncated, roster may be partial",
-				"limit", walkLimit)
-			break
-		}
 		tip := queue[0]
 		queue = queue[1:]
 		if _, ok := fetched[tip]; ok {
@@ -875,8 +872,10 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		}
 		eff, err := cs.fetchEffect(ctx, tip)
 		if err != nil {
-			slog.Warn("cloud discover: blob fetch failed", "tip", tip, "error", err)
-			continue
+			// A skipped fetch drops the tip's whole dep subtree, which is the
+			// same partial-ancestry reduce as a truncated walk. Fail instead;
+			// the caller retries with backoff.
+			return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 		}
 		fetched[tip] = eff
 		for _, dep := range eff.Deps {
