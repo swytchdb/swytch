@@ -54,12 +54,6 @@ const (
 // cloudEffectInfo is the domain-separation info for sealed effect payloads.
 var cloudEffectInfo = []byte("effect")
 
-// ErrCDNBlobMissing marks a CDN fetch that answered 404: the blob is provably
-// absent from cloud storage, as opposed to the cloud being unreachable. A
-// frontier walk failing with this is a durable hole — retrying cannot heal it,
-// only RepairFrontier can.
-var ErrCDNBlobMissing = errors.New("cdn blob missing")
-
 // Version is the swytch build, set from main.Version at startup (ldflags). The
 // cloud stream announces it — with the node id — as gRPC metadata, which is how
 // the Cloud dashboard knows each cluster's node count and running version.
@@ -976,7 +970,7 @@ func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error
 	if len(frontier) == 0 {
 		return 0, nil
 	}
-	if err := cs.engine.RepairCloudFrontier(key, frontier); err != nil {
+	if err := cs.engine.RepairCloudFrontier(key, nil, frontier); err != nil {
 		return 0, err
 	}
 	return len(frontier), nil
@@ -1223,7 +1217,7 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("cdn fetch %s: %w", url, ErrCDNBlobMissing)
+		return nil, fmt.Errorf("cdn fetch %s: %w", url, effects.ErrCDNBlobMissing)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("cdn fetch %s: status %d", url, resp.StatusCode)

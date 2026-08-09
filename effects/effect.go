@@ -102,6 +102,12 @@ type Engine struct {
 	broadcaster Broadcaster // nil for standalone
 	cloudReader CloudReader // nil when no cloud is configured (standalone/dev)
 
+	// repairMu serializes RepairCloudFrontier engine-wide: two concurrent
+	// repairs on the same key would mint sibling snapshots, and a sibling
+	// branch bypassing a snapshot keeps the walk's queue non-empty when the
+	// snapshot is dequeued, defeating the LCA stop that hides the hole.
+	repairMu sync.Mutex
+
 	nodeID pb.NodeID
 	clock  *crdt.HLC
 
@@ -621,6 +627,12 @@ const cloudTipsBackstop = 60 * time.Second
 // indistinguishable from data loss.
 var ErrCloudUnavailable = errors.New("cloud unavailable")
 
+// ErrCDNBlobMissing marks a CDN fetch that answered 404: the blob is provably
+// absent from cloud storage, as opposed to the cloud being unreachable. A
+// frontier walk failing with this is a durable hole — retrying cannot heal it,
+// only RepairCloudFrontier can. The cluster layer wraps CDN 404s with it.
+var ErrCDNBlobMissing = errors.New("cdn blob missing")
+
 // hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
 // for key's tip frontier and installs it into the index (pulling blobs via
 // FetchFromAny → CDN), so a subsequent reconstruct finds the key locally and
@@ -667,6 +679,14 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 // any tip lands in the index. Installing the reachable subset would let a
 // subsequent read reconstruct partial state as if it were the whole answer.
 // Unlike retryBootstrap's walkAndInstall, which is deliberately progressive.
+//
+// The one exception is a durable hole: a tip whose walk fails with
+// ErrCDNBlobMissing sits above ancestry provably gone from cloud storage.
+// Retrying can never heal it and no normal write ever consumes it (an emit
+// only dep-references chains it holds), so failing here would fail every
+// read and reconcile of the key forever. Instead the frontier is repaired:
+// the walkable tips' state is preserved in a superseding snapshot and the
+// holed tips are dep-named so the cloud consumes them out of its tips record.
 func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
 	// Warm the cache with the closure effects GetTips delivered inline, so the
 	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
@@ -680,17 +700,32 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 			e.putIngested(ce.Tip, ce.Eff, ce.ProtoLen)
 		}
 	}
+	var readable, holed []Tip
 	for _, tip := range tips {
 		rd := newDag(e, key, "")
-		if walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil }); walkErr != nil {
+		walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil })
+		switch {
+		case walkErr == nil:
+			readable = append(readable, tip)
+		case errors.Is(walkErr, ErrCDNBlobMissing):
+			holed = append(holed, tip)
+		default:
 			slog.Warn("cloud tip install: tip unreachable; installing nothing",
 				"key", key, "tip", tip, "error", walkErr)
 			return fmt.Errorf("%w: tip %v unreachable for %q: %w",
 				ErrCloudUnavailable, tip, key, walkErr)
 		}
 	}
-	e.installTips(key, tips)
-	return nil
+	if len(holed) == 0 {
+		e.installTips(key, tips)
+		return nil
+	}
+	// The readable tips ride into the repair un-installed: installing them
+	// first and then failing the repair would leave partial state posing as
+	// the whole answer. The repair reduces their chains into the snapshot's
+	// state and dep-names them, so their data survives the supersede and the
+	// cloud consumes them together with the holed tips.
+	return e.RepairCloudFrontier(key, readable, holed)
 }
 
 // RepairCloudFrontier supersedes a Cloud tip frontier whose ancestry is
@@ -705,27 +740,60 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 // refs — naming a tip requires no fetch of its bytes. Cloud-side, storing the
 // snapshot consumes every frontier tip out of the tips record; reader-side the
 // snapshot is the sole convergence point, so the walk's LCA rule stops at it
-// and the holed ancestry is never fetched again. The snapshot's state is this
-// node's local reduction of the key — whatever the hole made unreachable is
-// lost, which is the caller's adjudication to make before calling this.
+// and the holed ancestry is never fetched again.
+//
+// readable tips are frontier tips whose chains DO walk (validated by the
+// caller, bytes already pulled into the cache): they are reduced into the
+// snapshot's state alongside the local tips, so their data survives the
+// supersede. holed tips are dep-named only — whatever state sits beneath the
+// hole is lost, which is the caller's adjudication to make before calling
+// this.
 //
 // Callers must ensure no concurrent local emit on key: a sibling branch that
 // bypasses the snapshot keeps the walk's queue non-empty when the snapshot is
 // dequeued, defeating the LCA stop and re-exposing the hole.
-func (e *Engine) RepairCloudFrontier(key string, frontier []Tip) error {
+func (e *Engine) RepairCloudFrontier(key string, readable, holed []Tip) error {
+	e.repairMu.Lock()
+	defer e.repairMu.Unlock()
+
 	currentSet := e.index.Contains(key)
 	var localTips []Tip
 	if currentSet != nil {
 		localTips = currentSet.Tips()
 	}
 
+	reduceTips := make([]Tip, 0, len(localTips)+len(readable))
+	seenReduce := make(map[Tip]struct{}, len(localTips)+len(readable))
+	for _, t := range localTips {
+		seenReduce[t] = struct{}{}
+		reduceTips = append(reduceTips, t)
+	}
+	for _, t := range readable {
+		if _, dup := seenReduce[t]; !dup {
+			seenReduce[t] = struct{}{}
+			reduceTips = append(reduceTips, t)
+		}
+	}
+
 	var state *pb.ReducedEffect
-	if len(localTips) > 0 {
-		result, _, err := e.reconstruct(key, localTips, "", false)
-		if err != nil {
+	if len(reduceTips) > 0 {
+		result, _, err := e.reconstruct(key, reduceTips, "", false)
+		switch {
+		case err == nil:
+			state = cloneReduced(result)
+		case errors.Is(err, ErrCDNBlobMissing):
+			// Sibling repair snapshots from concurrent repairs on different
+			// nodes: each chain reduces alone (its own LCA stop holds), but
+			// jointly the walk descends beneath both snapshots into the hole.
+			// Keep the fork-choice winner's state; the losers are still
+			// dep-named and consumed, their divergent state folded away.
+			state, err = e.reduceForkChoiceWinner(key, reduceTips)
+			if err != nil {
+				return fmt.Errorf("repair %q: reduce fork-choice winner: %w", key, err)
+			}
+		default:
 			return fmt.Errorf("repair %q: reduce local state: %w", key, err)
 		}
-		state = cloneReduced(result)
 	}
 	if state == nil {
 		state = &pb.ReducedEffect{}
@@ -739,7 +807,7 @@ func (e *Engine) RepairCloudFrontier(key string, frontier []Tip) error {
 		Collection: state.Collection,
 		State:      state,
 	}
-	for _, t := range localTips {
+	for _, t := range reduceTips {
 		cached, err := e.getEffect(key, t)
 		if err != nil {
 			continue
@@ -751,11 +819,17 @@ func (e *Engine) RepairCloudFrontier(key string, frontier []Tip) error {
 	}
 
 	deps := e.resolveTipDeps(localTips)
-	seen := make(map[Tip]struct{}, len(deps)+len(frontier))
+	seen := make(map[Tip]struct{}, len(deps)+len(readable)+len(holed))
 	for _, t := range deps {
 		seen[t] = struct{}{}
 	}
-	for _, t := range frontier {
+	for _, t := range readable {
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			deps = append(deps, t)
+		}
+	}
+	for _, t := range holed {
 		if _, dup := seen[t]; !dup {
 			seen[t] = struct{}{}
 			deps = append(deps, t)
@@ -791,8 +865,51 @@ func (e *Engine) RepairCloudFrontier(key string, frontier []Tip) error {
 	}
 
 	slog.Warn("cloud frontier repaired: unreachable ancestry superseded by snapshot",
-		"key", key, "superseded_tips", len(frontier), "snapshot", snapOffset)
+		"key", key, "superseded_tips", len(holed), "preserved_tips", len(readable),
+		"snapshot", snapOffset)
 	return nil
+}
+
+// reduceForkChoiceWinner reduces the single tip that wins fork choice among
+// tips that are each readable alone but unreadable together — sibling
+// state-carrying snapshots whose joint walk descends beneath them into holed
+// ancestry. Lower ForkChoiceHash wins, same as everywhere else fork choice
+// runs. Returns nil state (no error) when nothing beneath the tips is
+// reducible at all: that state is lost to the hole.
+func (e *Engine) reduceForkChoiceWinner(key string, tips []Tip) (*pb.ReducedEffect, error) {
+	type cand struct {
+		tip Tip
+		eff *pb.Effect
+	}
+	cands := make([]cand, 0, len(tips))
+	for _, t := range tips {
+		eff, err := e.getEffect(key, t)
+		if err != nil {
+			continue // an unfetchable tip carries no state to preserve
+		}
+		cands = append(cands, cand{t, eff})
+	}
+	slices.SortFunc(cands, func(a, b cand) int {
+		if ForkChoiceLess(a.eff.ForkChoiceHash, b.eff.ForkChoiceHash) {
+			return -1
+		}
+		if ForkChoiceLess(b.eff.ForkChoiceHash, a.eff.ForkChoiceHash) {
+			return 1
+		}
+		return 0
+	})
+	for _, c := range cands {
+		result, _, err := e.reconstruct(key, []Tip{c.tip}, "", false)
+		if err == nil {
+			slog.Warn("cloud frontier repair: branches unreadable together; keeping fork-choice winner",
+				"key", key, "winner", c.tip, "discarded", len(cands)-1)
+			return cloneReduced(result), nil
+		}
+		if !errors.Is(err, ErrCDNBlobMissing) {
+			return nil, err
+		}
+	}
+	return nil, nil
 }
 
 // mintLocalEffect persists a fully-built effect as a local mint: marshal,
