@@ -94,7 +94,7 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 	reduced, err := b.discoverMembersWithRetry(ctx)
 	if err != nil {
-		if errors.Is(err, cluster.ErrCDNBlobMissing) {
+		if errors.Is(err, effects.ErrCDNBlobMissing) {
 			// The roster frontier references ancestry whose CDN blobs are
 			// gone — a durable hole, not an outage. Retrying can't heal it
 			// and every node in the fleet is equally stuck against it, so
