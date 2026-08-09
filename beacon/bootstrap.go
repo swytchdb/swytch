@@ -94,6 +94,19 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 	reduced, err := b.discoverMembersWithRetry(ctx)
 	if err != nil {
+		if errors.Is(err, cluster.ErrCDNBlobMissing) {
+			// The roster frontier references ancestry whose CDN blobs are
+			// gone — a durable hole, not an outage. Retrying can't heal it
+			// and every node in the fleet is equally stuck against it, so
+			// supersede the frontier and start solo; peers pick up the
+			// repaired roster on their next boot. Nodes restarting in the
+			// same instant can each mint a repair, leaving sibling snapshots
+			// that keep the key unreadable — accepted: the next
+			// non-simultaneous restart repairs over them, since the walk
+			// fails with the same ErrCDNBlobMissing beneath the siblings.
+			b.repairMembershipFrontier(ctx, err)
+			return nil
+		}
 		slog.Warn("beacon: cloud member discovery failed after retries, starting solo", "error", err)
 		return nil
 	}
@@ -107,6 +120,24 @@ func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 		addrs = append(addrs, m.Addr)
 	}
 	return addrs
+}
+
+// repairMembershipFrontier is the one-shot startup repair for a cloud
+// membership frontier whose ancestry is provably holed. Held under
+// membershipWriteMu so a cloud-pushed removal burst can't emit a sibling
+// branch while the repair snapshot is being minted.
+func (b *Beacon) repairMembershipFrontier(ctx context.Context, cause error) {
+	slog.Warn("beacon: cloud membership frontier is unreadable, repairing with a superseding snapshot",
+		"error", cause)
+	b.membershipWriteMu.Lock()
+	defer b.membershipWriteMu.Unlock()
+	superseded, err := b.cfg.Cloud.RepairFrontier(ctx, MembershipKey)
+	if err != nil {
+		slog.Error("beacon: membership frontier repair failed, starting solo unrepaired", "error", err)
+		return
+	}
+	slog.Warn("beacon: cloud membership frontier repaired, starting solo",
+		"superseded_tips", superseded)
 }
 
 // discoverMembersWithRetry reads the cloud membership roster, retrying on

@@ -54,6 +54,12 @@ const (
 // cloudEffectInfo is the domain-separation info for sealed effect payloads.
 var cloudEffectInfo = []byte("effect")
 
+// ErrCDNBlobMissing marks a CDN fetch that answered 404: the blob is provably
+// absent from cloud storage, as opposed to the cloud being unreachable. A
+// frontier walk failing with this is a durable hole — retrying cannot heal it,
+// only RepairFrontier can.
+var ErrCDNBlobMissing = errors.New("cdn blob missing")
+
 // Version is the swytch build, set from main.Version at startup (ldflags). The
 // cloud stream announces it — with the node id — as gRPC metadata, which is how
 // the Cloud dashboard knows each cluster's node count and running version.
@@ -943,6 +949,39 @@ func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
 	}
 }
 
+// RepairFrontier supersedes the cloud's tip frontier for key after a walk over
+// it failed with ErrCDNBlobMissing: the frontier references ancestry whose
+// blobs are gone from cloud storage, no retry can heal it, and no normal write
+// ever consumes it (a node cannot dep-reference a chain it cannot fetch).
+// GetTips names the current frontier and the engine mints the superseding
+// snapshot; when its upload lands, the cloud consumes every frontier tip out
+// of the tips record. Returns the number of tips superseded (0 = frontier
+// already empty, nothing to repair).
+func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
+	defer cancel()
+	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
+		AuthKey: cs.authKey,
+		Keys:    [][]byte{CloudKeyName(cs.keyNameKey, []byte(key))},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("cloud repair: get tips for %q: %w", key, err)
+	}
+	var frontier []effects.Tip
+	for _, kt := range resp.GetKeys() {
+		for _, ref := range kt.GetTips() {
+			frontier = append(frontier, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+	}
+	if len(frontier) == 0 {
+		return 0, nil
+	}
+	if err := cs.engine.RepairCloudFrontier(key, frontier); err != nil {
+		return 0, err
+	}
+	return len(frontier), nil
+}
+
 // CloudTips implements effects.CloudReader: it returns the tip frontier Cloud
 // holds for key, mapping key to its Cloud PRF image (CloudKeyName) and calling
 // GetTips — merged with the outbox's un-acked tips on the key, which are the
@@ -1183,6 +1222,9 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("cdn fetch %s: %w", url, ErrCDNBlobMissing)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("cdn fetch %s: status %d", url, resp.StatusCode)
 	}

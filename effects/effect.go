@@ -693,6 +693,131 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 	return nil
 }
 
+// RepairCloudFrontier supersedes a Cloud tip frontier whose ancestry is
+// provably unreachable — a hole in the CDN blob chain that InstallCloudTips'
+// all-or-nothing walk can never get past. No normal write ever consumes such a
+// frontier: consuming a cloud tip requires dep-referencing it, and a normal
+// emit only dep-references tips it holds, so the poisoned tips would sit in
+// the cloud's tips record forever, failing every reader.
+//
+// The repair mints a state-carrying SnapshotEffect whose deps name the entire
+// broken frontier plus the local tips, then a Noop above it. Deps are just
+// refs — naming a tip requires no fetch of its bytes. Cloud-side, storing the
+// snapshot consumes every frontier tip out of the tips record; reader-side the
+// snapshot is the sole convergence point, so the walk's LCA rule stops at it
+// and the holed ancestry is never fetched again. The snapshot's state is this
+// node's local reduction of the key — whatever the hole made unreachable is
+// lost, which is the caller's adjudication to make before calling this.
+//
+// Callers must ensure no concurrent local emit on key: a sibling branch that
+// bypasses the snapshot keeps the walk's queue non-empty when the snapshot is
+// dequeued, defeating the LCA stop and re-exposing the hole.
+func (e *Engine) RepairCloudFrontier(key string, frontier []Tip) error {
+	currentSet := e.index.Contains(key)
+	var localTips []Tip
+	if currentSet != nil {
+		localTips = currentSet.Tips()
+	}
+
+	var state *pb.ReducedEffect
+	if len(localTips) > 0 {
+		result, _, err := e.reconstruct(key, localTips, "", false)
+		if err != nil {
+			return fmt.Errorf("repair %q: reduce local state: %w", key, err)
+		}
+		state = cloneReduced(result)
+	}
+	if state == nil {
+		state = &pb.ReducedEffect{}
+	}
+	// Same rationale as compaction: raw SubscriptionEffects beneath the
+	// snapshot are folded away, so the snapshot is where a future
+	// bootstrapping peer recovers the subscriber set from.
+	state.Subscribers = e.snapshotSubscribers(key)
+
+	snapEff := &pb.SnapshotEffect{
+		Collection: state.Collection,
+		State:      state,
+	}
+	for _, t := range localTips {
+		cached, err := e.getEffect(key, t)
+		if err != nil {
+			continue
+		}
+		if cached.GetSnapshot() != nil {
+			snapEff.PrevSnapshot = toPbRef(t)
+			break
+		}
+	}
+
+	deps := e.resolveTipDeps(localTips)
+	seen := make(map[Tip]struct{}, len(deps)+len(frontier))
+	for _, t := range deps {
+		seen[t] = struct{}{}
+	}
+	for _, t := range frontier {
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			deps = append(deps, t)
+		}
+	}
+
+	hlc := timestamppb.New(e.clock.Now())
+	snapOffset, err := e.mintLocalEffect(key, currentSet, &pb.Effect{
+		Key:            []byte(key),
+		Hlc:            hlc,
+		NodeId:         uint64(e.nodeID),
+		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+		Deps:           toPbRefs(deps),
+		Kind:           &pb.Effect_Snapshot{Snapshot: snapEff},
+	})
+	if err != nil {
+		return fmt.Errorf("repair %q: mint snapshot: %w", key, err)
+	}
+
+	// The tip above keeps the snapshot off the frontier: readers stop AT the
+	// snapshot, and a frontier whose sole tip is the snapshot itself is an
+	// edge nothing else exercises.
+	hlc = timestamppb.New(e.clock.Now())
+	if _, err := e.mintLocalEffect(key, e.index.Contains(key), &pb.Effect{
+		Key:            []byte(key),
+		Hlc:            hlc,
+		NodeId:         uint64(e.nodeID),
+		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
+		Deps:           []*pb.EffectRef{toPbRef(snapOffset)},
+		Kind:           &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	}); err != nil {
+		return fmt.Errorf("repair %q: mint tip above snapshot: %w", key, err)
+	}
+
+	slog.Warn("cloud frontier repaired: unreachable ancestry superseded by snapshot",
+		"key", key, "superseded_tips", len(frontier), "snapshot", snapOffset)
+	return nil
+}
+
+// mintLocalEffect persists a fully-built effect as a local mint: marshal,
+// offset allocation, cache install (owned), index update consuming currentSet,
+// durability hook, broadcast. The effect must already carry its key, HLC,
+// fork-choice hash, and deps.
+func (e *Engine) mintLocalEffect(key string, currentSet *keytrie.TipSet, eff *pb.Effect) (Tip, error) {
+	data, err := MarshalEffect(eff)
+	if err != nil {
+		return Tip{}, err
+	}
+	offset := e.nextOffset()
+	if e.effectCache != nil {
+		e.effectCache.PutSized(offset, eff, len(data))
+	}
+	e.updateIndex(key, currentSet, offset)
+	e.fireLocalEffect(offset, eff)
+
+	if e.broadcaster != nil {
+		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
+		e.broadcaster.BroadcastWithData(notify, data)
+	}
+	return offset, nil
+}
+
 // fireLocalEffect invokes OnLocalEffect for a freshly-minted persisted effect.
 func (e *Engine) fireLocalEffect(offset Tip, eff *pb.Effect) {
 	e.localEffectMu.RLock()
@@ -842,20 +967,9 @@ func (e *Engine) emitSnapshot(key string, verdicts map[string]pb.Verdict) error 
 		eff.Deps = toPbRefs(e.resolveTipDeps(tips))
 	}
 
-	data, err := MarshalEffect(eff)
+	offset, err := e.mintLocalEffect(key, currentSet, eff)
 	if err != nil {
 		return err
-	}
-	offset := e.nextOffset()
-	if e.effectCache != nil {
-		e.effectCache.PutSized(offset, eff, len(data))
-	}
-	e.updateIndex(key, currentSet, offset)
-	e.fireLocalEffect(offset, eff)
-
-	if e.broadcaster != nil {
-		notify := BuildOffsetNotify(e.nodeID, offset, eff, data, context.Background())
-		e.broadcaster.BroadcastWithData(notify, data)
 	}
 
 	slog.Debug("emitSnapshot",
