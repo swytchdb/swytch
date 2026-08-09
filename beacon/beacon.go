@@ -69,14 +69,6 @@ type Beacon struct {
 	removeMu     sync.Mutex
 	removeSignal chan struct{}
 
-	// membershipWriteMu serializes the startup frontier repair against
-	// applyQueuedRemovals — the only other membership writer alive during
-	// bootstrap. A removal emit racing the repair mint would land as a sibling
-	// branch bypassing the repair snapshot, and a frontier with such a branch
-	// re-exposes the unreachable ancestry to every reader (the walk only stops
-	// at a snapshot that is the sole convergence point).
-	membershipWriteMu sync.Mutex
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -143,8 +135,6 @@ func (b *Beacon) applyQueuedRemovals() {
 	if len(batch) == 0 {
 		return
 	}
-	b.membershipWriteMu.Lock()
-	defer b.membershipWriteMu.Unlock()
 
 	// The cloud re-offers every pending removal on each presence sweep until
 	// its TTL expires — it is zero-knowledge, so it cannot see the roster and
@@ -216,14 +206,6 @@ func (b *Beacon) Start(ctx context.Context) (err error) {
 		}
 	}()
 
-	// Cloud-pushed removals arrive as soon as the cloud stream attaches —
-	// typically while bootstrap below is still dialing — so their applier
-	// starts before Phase 1, not after.
-	if b.cfg.Cloud != nil {
-		b.wg.Add(1)
-		go b.memberRemoveLoop()
-	}
-
 	// Phase 1: peer discovery (DNS or cloud) + temporary topology + peer
 	// reachability. Does not read authoritative membership — that would
 	// deadlock when every node waits for the others before registering itself.
@@ -271,6 +253,14 @@ func (b *Beacon) Start(ctx context.Context) (err error) {
 	// not paper over here.
 	b.wg.Add(1)
 	go b.topologyLoop()
+
+	// Draining only after convergence leaves bootstrap the sole membership
+	// writer, so a removal burst can't branch alongside registerSelf. Nothing
+	// is missed meanwhile: New wires the handler, and removeQ holds the burst.
+	if b.cfg.Cloud != nil {
+		b.wg.Add(1)
+		go b.memberRemoveLoop()
+	}
 
 	slog.Info("beacon started",
 		"node_id", b.cfg.NodeID,

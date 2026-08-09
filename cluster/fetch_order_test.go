@@ -116,6 +116,42 @@ func TestFetchFromAnyPreferCDNFallsBackToPeers(t *testing.T) {
 	}
 }
 
+// TestFetchFromAnyPreferCDNMissSkipsPeerLeg: a definite 404 under PreferCDN is
+// cloud's authoritative answer for a key no peer's filter claims, so the fetch
+// must surface the sentinel immediately rather than spend the peer leg's
+// timeout — the caller repairs the frontier on it, and that has to happen
+// inside the client's deadline.
+func TestFetchFromAnyPreferCDNMissSkipsPeerLeg(t *testing.T) {
+	pm := newFetchTestPM(t)
+	cdn := &recordingCDN{err: effects.ErrCDNBlobMissing}
+	pm.SetCDNFetcher(cdn)
+
+	_, err := pm.FetchFromAny(&pb.EffectRef{NodeId: 1, Offset: 1}, effects.PreferCDN)
+	if !errors.Is(err, effects.ErrCDNBlobMissing) {
+		t.Fatalf("want the CDN-missing sentinel surfaced, got: %v", err)
+	}
+	if cdn.callCount() != 1 {
+		t.Fatalf("CDN called %d times, want exactly 1", cdn.callCount())
+	}
+}
+
+// TestFetchFromAnyPreferPeersMissStillTriesCDN: the skip is scoped to
+// PreferCDN. Under PreferPeers some peer's filter claims the key, so a CDN
+// miss must not short-circuit the peer leg that might actually hold it.
+func TestFetchFromAnyPreferPeersMissStillTriesCDN(t *testing.T) {
+	pm := newFetchTestPM(t)
+	cdn := &recordingCDN{err: effects.ErrCDNBlobMissing}
+	pm.SetCDNFetcher(cdn)
+
+	_, err := pm.FetchFromAny(&pb.EffectRef{NodeId: 1, Offset: 1}, effects.PreferPeers)
+	if err == nil {
+		t.Fatal("expected an error when both peers and CDN fail")
+	}
+	if cdn.callCount() != 1 {
+		t.Fatalf("CDN called %d times, want the fallback to have run once", cdn.callCount())
+	}
+}
+
 func TestFetchFromAnyNoCDNFetcherPeersOnly(t *testing.T) {
 	pm := newFetchTestPM(t)
 

@@ -123,14 +123,10 @@ func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 }
 
 // repairMembershipFrontier is the one-shot startup repair for a cloud
-// membership frontier whose ancestry is provably holed. Held under
-// membershipWriteMu so a cloud-pushed removal burst can't emit a sibling
-// branch while the repair snapshot is being minted.
+// membership frontier whose ancestry is provably holed.
 func (b *Beacon) repairMembershipFrontier(ctx context.Context, cause error) {
 	slog.Warn("beacon: cloud membership frontier is unreadable, repairing with a superseding snapshot",
 		"error", cause)
-	b.membershipWriteMu.Lock()
-	defer b.membershipWriteMu.Unlock()
 	superseded, err := b.cfg.Cloud.RepairFrontier(ctx, MembershipKey)
 	if err != nil {
 		slog.Error("beacon: membership frontier repair failed, starting solo unrepaired", "error", err)
@@ -163,6 +159,11 @@ func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffec
 		attemptCancel()
 		if err == nil {
 			return reduced, nil
+		}
+		// A hole is durable: every retry re-pays the fetch to learn the same
+		// answer, and only the caller's repair resolves it.
+		if errors.Is(err, effects.ErrCDNBlobMissing) {
+			return nil, err
 		}
 		slog.Debug("beacon: cloud member discovery failed, retrying", "error", err, "backoff", backoff)
 
