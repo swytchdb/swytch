@@ -67,11 +67,31 @@ type Beacon struct {
 
 // New creates a beacon. Call Start to begin discovery and membership.
 func New(cfg Config, engine *effects.Engine, pm *cluster.PeerManager) *Beacon {
-	return &Beacon{
+	b := &Beacon{
 		cfg:         cfg,
 		engine:      engine,
 		pm:          pm,
 		topoRefresh: make(chan struct{}, 1),
+	}
+	// A cloud-pushed "delete this server" command applies through the same
+	// membership REMOVE_OP path the local sweeps use.
+	if cfg.Cloud != nil {
+		cfg.Cloud.SetMemberRemoveHandler(b.removeMember)
+	}
+	return b
+}
+
+// removeMember applies a REMOVE_OP for nodeID to the membership key so the
+// cluster stops dialing it. A failure is loud: peers keep the entry and redial
+// the removed node until an operator intervenes.
+func (b *Beacon) removeMember(nodeID uint64) {
+	ctx := b.engine.NewContext()
+	if err := ctx.Emit(buildMemberRemove(nodeID)); err != nil {
+		slog.Error("beacon: member remove emit failed", "node_id", nodeID, "error", err)
+		return
+	}
+	if err := ctx.Flush(); err != nil {
+		slog.Error("beacon: member remove flush failed", "node_id", nodeID, "error", err)
 	}
 }
 

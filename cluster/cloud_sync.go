@@ -175,6 +175,13 @@ type CloudSync struct {
 	filterBulk *effects.Bloom
 	filterOwn  ownFilter
 
+	// memberRemoveHandler applies a cloud-pushed "delete this server" command
+	// (WriteResponse.MemberRemove) by routing its node id into the membership
+	// removal path. Wired by the beacon after Start, so the readLoop may already
+	// be running when it lands — stored atomically. Nil until wired (and in
+	// embedder setups with no beacon), in which case the command is a no-op.
+	memberRemoveHandler atomic.Pointer[func(nodeID uint64)]
+
 	// sentCount/ackedCount mirror the prometheus counters so the progress
 	// logger can read interval deltas (prometheus counters aren't readable).
 	sentCount  atomic.Uint64
@@ -618,6 +625,8 @@ func (cs *CloudSync) readLoop(stream dp.DataPlane_WriteEffectsClient) error {
 			cs.handleFetch(m.Fetch)
 		case *dp.WriteResponse_Filter:
 			cs.handleFilter(m.Filter)
+		case *dp.WriteResponse_MemberRemove:
+			cs.handleMemberRemove(m.MemberRemove)
 		}
 	}
 }
@@ -690,6 +699,26 @@ func (cs *CloudSync) cloudMayHold(name []byte) bool {
 		return true
 	}
 	return cs.filterBulk.HasHash(h) || cs.filterOwn.has(h)
+}
+
+// SetMemberRemoveHandler wires the callback that applies a cloud-pushed
+// MemberRemove command. The beacon installs it so the removal reuses the
+// membership REMOVE_OP path; without a handler the command is a no-op.
+func (cs *CloudSync) SetMemberRemoveHandler(fn func(nodeID uint64)) {
+	cs.memberRemoveHandler.Store(&fn)
+}
+
+// handleMemberRemove routes a cloud-pushed "delete this server" command into
+// the membership removal path via the wired handler.
+func (cs *CloudSync) handleMemberRemove(mr *dp.MemberRemove) {
+	nodeID := mr.GetNodeId()
+	fn := cs.memberRemoveHandler.Load()
+	if fn == nil {
+		slog.Warn("cloud sync: member remove received with no handler wired, dropping", "node_id", nodeID)
+		return
+	}
+	slog.Info("cloud sync: applying member remove", "node_id", nodeID)
+	(*fn)(nodeID)
 }
 
 // handleFilter installs the cloud's key-name filter, replacing the previous
