@@ -872,8 +872,10 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		}
 		eff, err := cs.fetchEffect(ctx, tip)
 		if err != nil {
-			slog.Warn("cloud discover: blob fetch failed", "tip", tip, "error", err)
-			continue
+			// A skipped fetch drops the tip's whole dep subtree, which is the
+			// same partial-ancestry reduce as a truncated walk. Fail instead;
+			// the caller retries with backoff.
+			return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 		}
 		fetched[tip] = eff
 		for _, dep := range eff.Deps {

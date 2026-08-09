@@ -164,8 +164,16 @@ func (b *Beacon) applyQueuedRemovals() {
 // nil — a node that starts serving client traffic before bootstrap
 // completes will route writes against a synthetic topology and miss
 // remote effects that arrive before its first subscription.
-func (b *Beacon) Start(ctx context.Context) error {
+func (b *Beacon) Start(ctx context.Context) (err error) {
 	b.ctx, b.cancel = context.WithCancel(ctx)
+	// A failed Start must not leak background workers: the caller only pairs
+	// Stop with a successful Start.
+	defer func() {
+		if err != nil {
+			b.cancel()
+			b.wg.Wait()
+		}
+	}()
 
 	// Cloud-pushed removals arrive as soon as the cloud stream attaches —
 	// typically while bootstrap below is still dialing — so their applier
