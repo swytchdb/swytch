@@ -69,6 +69,14 @@ type Beacon struct {
 	removeMu     sync.Mutex
 	removeSignal chan struct{}
 
+	// membershipWriteMu serializes the startup frontier repair against
+	// applyQueuedRemovals — the only other membership writer alive during
+	// bootstrap. A removal emit racing the repair mint would land as a sibling
+	// branch bypassing the repair snapshot, and a frontier with such a branch
+	// re-exposes the unreachable ancestry to every reader (the walk only stops
+	// at a snapshot that is the sole convergence point).
+	membershipWriteMu sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -135,6 +143,8 @@ func (b *Beacon) applyQueuedRemovals() {
 	if len(batch) == 0 {
 		return
 	}
+	b.membershipWriteMu.Lock()
+	defer b.membershipWriteMu.Unlock()
 
 	// The cloud re-offers every pending removal on each presence sweep until
 	// its TTL expires — it is zero-knowledge, so it cannot see the roster and
