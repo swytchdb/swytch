@@ -705,6 +705,10 @@ func (cs *CloudSync) cloudMayHold(name []byte) bool {
 // MemberRemove command. The beacon installs it so the removal reuses the
 // membership REMOVE_OP path; without a handler the command is a no-op.
 func (cs *CloudSync) SetMemberRemoveHandler(fn func(nodeID uint64)) {
+	if fn == nil {
+		cs.memberRemoveHandler.Store(nil)
+		return
+	}
 	cs.memberRemoveHandler.Store(&fn)
 }
 
@@ -713,7 +717,7 @@ func (cs *CloudSync) SetMemberRemoveHandler(fn func(nodeID uint64)) {
 func (cs *CloudSync) handleMemberRemove(mr *dp.MemberRemove) {
 	nodeID := mr.GetNodeId()
 	fn := cs.memberRemoveHandler.Load()
-	if fn == nil {
+	if fn == nil || *fn == nil {
 		slog.Warn("cloud sync: member remove received with no handler wired, dropping", "node_id", nodeID)
 		return
 	}

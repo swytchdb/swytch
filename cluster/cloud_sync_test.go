@@ -177,6 +177,11 @@ func TestHandleMemberRemoveRoutesToHandler(t *testing.T) {
 	// No handler wired yet: the command is a no-op, not a panic.
 	cs.handleMemberRemove(&dp.MemberRemove{NodeId: 7})
 
+	// A nil callback stores a nil pointer and stays a no-op rather than
+	// dereferencing a pointer to a nil func.
+	cs.SetMemberRemoveHandler(nil)
+	cs.handleMemberRemove(&dp.MemberRemove{NodeId: 8})
+
 	var got uint64
 	cs.SetMemberRemoveHandler(func(nodeID uint64) { got = nodeID })
 	cs.handleMemberRemove(&dp.MemberRemove{NodeId: 42})
