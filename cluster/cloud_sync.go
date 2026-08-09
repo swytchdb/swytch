@@ -845,47 +845,102 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	if err != nil {
 		return nil, fmt.Errorf("cloud get tips: %w", err)
 	}
-	// Pull the sub-DAG tips-down, seeded from the inline closure; the per-tip
-	// CDN fetch below only covers stragglers the sidecar didn't carry. The
-	// walk is deliberately unbounded: reducing a truncated sub-DAG resurrects
-	// any member whose REMOVE was cut while its INSERT survived, and the
-	// cluster then redials the dead. A long chain (removal burst not yet
-	// compacted) costs a slow walk, never a wrong roster.
-	fetched := map[effects.Tip]*pb.Effect{}
+	// Pull the sub-DAG tips-down, seeded from the inline closure sidecar; the
+	// per-tip CDN fetch below only covers stragglers the sidecar didn't carry.
+	//
+	// The walk mirrors dag.bfs's LCA rule: a state-carrying snapshot dequeued
+	// with an empty queue is where every tip path has converged, so everything
+	// beneath it is folded into its state and the walk stops there. Stopping
+	// at the FIRST snapshot seen would be wrong — another tip can reach
+	// beneath it, making it a non-LCA sibling whose adoption would drop that
+	// tip's branch. Below the LCA the walk is deliberately unbounded:
+	// reducing a truncated sub-DAG resurrects any member whose REMOVE was cut
+	// while its INSERT survived, and the cluster then redials the dead.
+	sidecar := map[effects.Tip]*pb.Effect{}
+	visited := map[effects.Tip]bool{}
 	var queue []effects.Tip
-	for _, kt := range resp.GetKeys() {
-		for _, ce := range cs.peelSidecar(kt) {
-			fetched[ce.Tip] = ce.Eff
-			for _, dep := range ce.Eff.Deps {
-				queue = append(queue, effects.Tip{dep.NodeId, dep.Offset})
-			}
-		}
-		for _, ref := range kt.GetTips() {
-			queue = append(queue, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+	enqueue := func(t effects.Tip) {
+		if !visited[t] {
+			visited[t] = true
+			queue = append(queue, t)
 		}
 	}
+	for _, kt := range resp.GetKeys() {
+		for _, ce := range cs.peelSidecar(kt) {
+			sidecar[ce.Tip] = ce.Eff
+		}
+		for _, ref := range kt.GetTips() {
+			enqueue(effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+	}
+	fetched := map[effects.Tip]*pb.Effect{}
+	var lcaTip effects.Tip
+	lcaFound := false
 	for len(queue) > 0 {
 		tip := queue[0]
 		queue = queue[1:]
-		if _, ok := fetched[tip]; ok {
-			continue
-		}
-		eff, err := cs.fetchEffect(ctx, tip)
-		if err != nil {
-			// A skipped fetch drops the tip's whole dep subtree, which is the
-			// same partial-ancestry reduce as a truncated walk. Fail instead;
-			// the caller retries with backoff.
-			return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
+		eff, ok := sidecar[tip]
+		if !ok {
+			var err error
+			eff, err = cs.fetchEffect(ctx, tip)
+			if err != nil {
+				// A skipped fetch drops the tip's whole dep subtree, which is
+				// the same partial-ancestry reduce as a truncated walk. Fail
+				// instead; the caller retries with backoff.
+				return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
+			}
 		}
 		fetched[tip] = eff
+		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
+			lcaTip, lcaFound = tip, true
+			break
+		}
 		for _, dep := range eff.Deps {
-			queue = append(queue, effects.Tip{dep.NodeId, dep.Offset})
+			enqueue(effects.Tip{dep.NodeId, dep.Offset})
 		}
 	}
 	if len(fetched) == 0 {
 		return nil, nil // fresh cluster: nothing in the cloud yet
 	}
-	return effects.ReduceBranch(topoOrder(fetched)), nil
+	// ReduceChain skips snapshot effects (they carry no data op), so the LCA
+	// seeds the reduce as state, not as a chain entry. Its dep-ancestry is
+	// trimmed first: a tip path that dove beneath the snapshot before the
+	// walk converged fetched effects already folded into it, and reducing
+	// them again double-counts (mirrors dag.trimAncestorsOfLCA).
+	var seed *pb.ReducedEffect
+	if lcaFound {
+		trimAncestry(fetched, fetched[lcaTip])
+		seed = fetched[lcaTip].GetSnapshot().State
+		delete(fetched, lcaTip)
+	}
+	return effects.ReduceChain(seed, topoOrder(fetched)), nil
+}
+
+// trimAncestry deletes from fetched every effect in the transitive
+// dep-ancestry of eff. Only already-fetched entries are removed; nothing new
+// is fetched.
+func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
+	stack := make([]effects.Tip, 0, len(eff.Deps))
+	for _, dep := range eff.Deps {
+		stack = append(stack, effects.Tip{dep.NodeId, dep.Offset})
+	}
+	seen := map[effects.Tip]struct{}{}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, ok := seen[cur]; ok {
+			continue
+		}
+		seen[cur] = struct{}{}
+		e, ok := fetched[cur]
+		if !ok {
+			continue
+		}
+		delete(fetched, cur)
+		for _, dep := range e.Deps {
+			stack = append(stack, effects.Tip{dep.NodeId, dep.Offset})
+		}
+	}
 }
 
 // CloudTips implements effects.CloudReader: it returns the tip frontier Cloud
