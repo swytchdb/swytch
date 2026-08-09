@@ -136,17 +136,48 @@ func (b *Beacon) applyQueuedRemovals() {
 		return
 	}
 
+	// The cloud re-offers every pending removal on each presence sweep until
+	// its TTL expires — it is zero-knowledge, so it cannot see the roster and
+	// never learns a removal was enacted. A re-pushed removal for an
+	// already-absent id must reduce to a local no-op, not a fresh REMOVE
+	// effect per sweep. On a failed roster read the batch applies unfiltered:
+	// redundant effects are the safe direction, a dropped removal is not.
+	var present map[uint64]bool
+	roster, _, err := b.engine.NewReadOnlyContext().GetSnapshot(MembershipKey)
+	if err != nil {
+		slog.Warn("beacon: roster read before removals failed, applying unfiltered", "error", err)
+	} else {
+		present = make(map[uint64]bool)
+		for _, m := range parseMembership(roster) {
+			present[m.NodeID] = true
+		}
+	}
+	toApply := batch
+	if present != nil {
+		toApply = make([]uint64, 0, len(batch))
+		for _, nodeID := range batch {
+			if present[nodeID] {
+				toApply = append(toApply, nodeID)
+			}
+		}
+		if len(toApply) == 0 {
+			slog.Debug("beacon: member removals already absent", "offered", len(batch))
+			return
+		}
+	}
+
 	ctx := b.engine.NewContext()
-	for _, nodeID := range batch {
+	for _, nodeID := range toApply {
 		if err := ctx.Emit(buildMemberRemove(nodeID)); err != nil {
 			slog.Error("beacon: member remove emit failed", "node_id", nodeID, "error", err)
 		}
 	}
 	if err := ctx.Flush(); err != nil {
-		slog.Error("beacon: member remove flush failed", "batch", len(batch), "error", err)
+		slog.Error("beacon: member remove flush failed", "batch", len(toApply), "error", err)
 		return
 	}
-	slog.Info("beacon: applied member removals", "batch", len(batch))
+	slog.Info("beacon: applied member removals",
+		"batch", len(toApply), "skipped_absent", len(batch)-len(toApply))
 
 	cctx := b.engine.NewContext()
 	if _, _, err := cctx.GetSnapshot(MembershipKey); err != nil {
