@@ -835,13 +835,20 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 // then return false negatives for keys written before we joined. Discovery
 // only yields candidate addresses; the authoritative state arrives through
 // the normal join path.
+//
+// Only the GetTips round-trip is backstopped. The walk below is bounded per
+// fetch (cs.httpClient's timeout) and not in aggregate: its size is the
+// membership DAG's depth, so any fixed overall budget is a bound on unbounded
+// work, and blowing it would report "cloud unreachable" for a cloud that is
+// merely far away — an answer the caller cannot distinguish from "no members"
+// and would act on by starting solo.
 func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) (*pb.ReducedEffect, error) {
-	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
-	defer cancel()
-	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
+	tipsCtx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
+	resp, err := cs.client.GetTips(tipsCtx, &dp.GetTipsRequest{
 		AuthKey: cs.authKey,
 		Keys:    [][]byte{CloudKeyName(cs.keyNameKey, []byte(membershipKey))},
 	})
+	cancel() // unary: resp is fully materialized, nothing streams past here
 	if err != nil {
 		return nil, fmt.Errorf("cloud get tips: %w", err)
 	}
