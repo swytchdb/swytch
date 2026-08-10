@@ -22,6 +22,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -546,6 +547,12 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint
 	data, err := first()
 	if err == nil && len(data) > 0 {
 		return data, nil
+	}
+	// A 404 is cloud answering, not cloud failing, and PreferCDN means every
+	// peer's filter already disclaimed this key — the fallback would spend its
+	// full 10s re-asking nodes that said no.
+	if hint == effects.PreferCDN && errors.Is(err, effects.ErrCDNBlobMissing) {
+		return nil, err
 	}
 	fallbackData, fallbackErr := second()
 	if fallbackErr == nil && len(fallbackData) > 0 {

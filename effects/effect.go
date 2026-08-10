@@ -102,12 +102,6 @@ type Engine struct {
 	broadcaster Broadcaster // nil for standalone
 	cloudReader CloudReader // nil when no cloud is configured (standalone/dev)
 
-	// repairMu serializes RepairCloudFrontier engine-wide: two concurrent
-	// repairs on the same key would mint sibling snapshots, and a sibling
-	// branch bypassing a snapshot keeps the walk's queue non-empty when the
-	// snapshot is dequeued, defeating the LCA stop that hides the hole.
-	repairMu sync.Mutex
-
 	nodeID pb.NodeID
 	clock  *crdt.HLC
 
@@ -680,13 +674,10 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 // subsequent read reconstruct partial state as if it were the whole answer.
 // Unlike retryBootstrap's walkAndInstall, which is deliberately progressive.
 //
-// The one exception is a durable hole: a tip whose walk fails with
-// ErrCDNBlobMissing sits above ancestry provably gone from cloud storage.
-// Retrying can never heal it and no normal write ever consumes it (an emit
-// only dep-references chains it holds), so failing here would fail every
-// read and reconcile of the key forever. Instead the frontier is repaired:
-// the walkable tips' state is preserved in a superseding snapshot and the
-// holed tips are dep-named so the cloud consumes them out of its tips record.
+// A tip failing with ErrCDNBlobMissing is the exception: nothing heals it —
+// retries re-fetch a blob that is gone, and no write consumes it, since an emit
+// can only dep-reference chains it holds — so returning an error would fail
+// every read and reconcile of the key forever. Repair instead.
 func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
 	// Warm the cache with the closure effects GetTips delivered inline, so the
 	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
@@ -720,11 +711,9 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 		e.installTips(key, tips)
 		return nil
 	}
-	// The readable tips ride into the repair un-installed: installing them
-	// first and then failing the repair would leave partial state posing as
-	// the whole answer. The repair reduces their chains into the snapshot's
-	// state and dep-names them, so their data survives the supersede and the
-	// cloud consumes them together with the holed tips.
+	// Readable tips stay un-installed until the repair folds them into the
+	// snapshot: installing them first and then failing would leave partial
+	// state posing as the whole answer.
 	return e.RepairCloudFrontier(key, readable, holed)
 }
 
@@ -749,12 +738,17 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 // hole is lost, which is the caller's adjudication to make before calling
 // this.
 //
-// Callers must ensure no concurrent local emit on key: a sibling branch that
-// bypasses the snapshot keeps the walk's queue non-empty when the snapshot is
-// dequeued, defeating the LCA stop and re-exposing the hole.
+// A concurrent emit lands as a sibling of the snapshot rather than beneath it,
+// which keeps the walk's queue non-empty at the snapshot and re-exposes the
+// hole. The next walk fails with ErrCDNBlobMissing and repairs again, so this
+// converges rather than needing exclusion.
 func (e *Engine) RepairCloudFrontier(key string, readable, holed []Tip) error {
-	e.repairMu.Lock()
-	defer e.repairMu.Unlock()
+	// This mint becomes cloud's answer for the key, so the node making it must
+	// be a holder peers will route writes to. Subscribing first also keeps the
+	// SubscriptionEffect in the ancestry the snapshot folds up, not beside it.
+	if err := e.ensureSubscribed(key); err != nil {
+		return fmt.Errorf("repair %q: subscribe: %w", key, err)
+	}
 
 	currentSet := e.index.Contains(key)
 	var localTips []Tip
@@ -798,10 +792,17 @@ func (e *Engine) RepairCloudFrontier(key string, readable, holed []Tip) error {
 	if state == nil {
 		state = &pb.ReducedEffect{}
 	}
-	// Same rationale as compaction: raw SubscriptionEffects beneath the
-	// snapshot are folded away, so the snapshot is where a future
-	// bootstrapping peer recovers the subscriber set from.
-	state.Subscribers = e.snapshotSubscribers(key)
+	// A bootstrapping peer stops at this snapshot and never sees the
+	// SubscriptionEffects beneath it, so the stamp is the only surviving record
+	// of who holds the key. Self is absent from the leaf set by design
+	// (addPeerSubscriber drops it) yet has to appear here — otherwise peers
+	// reconstruct a subscriber set missing the node holding the state.
+	subs := e.snapshotSubscribers(key)
+	if subs == nil {
+		subs = make(map[uint64]bool, 1)
+	}
+	subs[uint64(e.nodeID)] = true
+	state.Subscribers = subs
 
 	snapEff := &pb.SnapshotEffect{
 		Collection: state.Collection,
