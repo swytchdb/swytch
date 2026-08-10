@@ -44,7 +44,13 @@ import (
 func (b *Beacon) bootstrap(ctx context.Context) error {
 	var candidates []string
 	if b.cfg.Cloud != nil {
-		candidates = b.cloudCandidates(ctx)
+		var err error
+		candidates, err = b.cloudCandidates(ctx)
+		if err != nil {
+			// Shutdown during discovery. Unlike the DNS path there is no solo
+			// fallback to take: we never learned whether a fleet exists.
+			return err
+		}
 	} else {
 		var err error
 		candidates, err = b.resolveJoinAddrWithRetry(ctx)
@@ -91,7 +97,14 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 // path — a transient cloud hiccup at startup must not strand this node solo
 // while the rest of the fleet joins. A *successful* read that yields no
 // members is authoritative (fresh cluster, or we're first) and starts solo.
-func (b *Beacon) cloudCandidates(ctx context.Context) []string {
+//
+// Starting solo is a claim about the whole fleet, so only an authoritative
+// answer may produce one: a successful read, or a proven-durable hole. "We
+// could not find out" is not an answer — conceding solo on it forks the
+// cluster, and a fork is silent (a solo node's members count looks exactly
+// like a legitimately fresh one) where a stalled boot is loud. So the only
+// error that reaches here is shutdown.
+func (b *Beacon) cloudCandidates(ctx context.Context) ([]string, error) {
 	reduced, err := b.discoverMembersWithRetry(ctx)
 	if err != nil {
 		if errors.Is(err, effects.ErrCDNBlobMissing) {
@@ -105,10 +118,9 @@ func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 			// non-simultaneous restart repairs over them, since the walk
 			// fails with the same ErrCDNBlobMissing beneath the siblings.
 			b.repairMembershipFrontier(ctx, err)
-			return nil
+			return nil, nil
 		}
-		slog.Warn("beacon: cloud member discovery failed after retries, starting solo", "error", err)
-		return nil
+		return nil, err
 	}
 	members := parseMembership(reduced)
 	selfID := uint64(b.cfg.NodeID)
@@ -119,7 +131,7 @@ func (b *Beacon) cloudCandidates(ctx context.Context) []string {
 		}
 		addrs = append(addrs, m.Addr)
 	}
-	return addrs
+	return addrs, nil
 }
 
 // repairMembershipFrontier is the one-shot startup repair for a cloud
@@ -137,27 +149,40 @@ func (b *Beacon) repairMembershipFrontier(ctx context.Context, cause error) {
 }
 
 // discoverMembersWithRetry reads the cloud membership roster, retrying on
-// error with capped backoff until it succeeds or the deadline passes. Same
-// rationale as resolveJoinAddrWithRetry: an error means "the cloud isn't
-// reachable yet", not "there is no cluster", and conceding solo on the first
-// error is what strands nodes in a split-brain membership.
+// error with capped backoff until it succeeds or ctx is done. Same rationale
+// as resolveJoinAddrWithRetry: an error means "the cloud isn't reachable yet",
+// not "there is no cluster", and conceding solo on the first error is what
+// strands nodes in a split-brain membership.
+//
+// There is deliberately no overall deadline, and no per-attempt one. Neither
+// bounds anything real: a discovery walk's cost is the membership DAG's depth,
+// which grows with the fleet's history, so a fixed budget is a bound on
+// unbounded work and every cluster eventually outgrows it. What the budget
+// actually produced on expiry was an error indistinguishable from an outage,
+// which the caller resolved by forking the cluster. Taking a long time is a
+// latency problem and belongs in the logs; it is never grounds to answer a
+// question we did not get an answer to. The one hard stop is ctx — the node is
+// shutting down, and then there is nothing to be correct about.
 func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffect, error) {
 	const (
-		perAttemptTimeout = 10 * time.Second
-		discoverDeadline  = 30 * time.Second
-		backoffStart      = 250 * time.Millisecond
-		backoffMax        = 3 * time.Second
+		backoffStart = 250 * time.Millisecond
+		backoffMax   = 3 * time.Second
+		// A boot that cannot reach the cloud is stuck until an operator acts,
+		// so complain on the first failure and keep complaining. Silence here
+		// is what let the old deadline pass for normal startup.
+		complainEvery = 30 * time.Second
 	)
 
-	deadlineCtx, cancel := context.WithTimeout(ctx, discoverDeadline)
-	defer cancel()
-
+	started := time.Now()
+	var lastComplaint time.Time // zero value: the first failure warns
 	backoff := backoffStart
-	for {
-		attemptCtx, attemptCancel := context.WithTimeout(deadlineCtx, perAttemptTimeout)
-		reduced, err := b.cfg.Cloud.DiscoverMembers(attemptCtx, MembershipKey)
-		attemptCancel()
+	for attempt := 1; ; attempt++ {
+		reduced, err := b.cfg.Cloud.DiscoverMembers(ctx, MembershipKey)
 		if err == nil {
+			if attempt > 1 {
+				slog.Info("beacon: cloud member discovery succeeded after retries",
+					"attempts", attempt, "elapsed", time.Since(started))
+			}
 			return reduced, nil
 		}
 		// A hole is durable: every retry re-pays the fetch to learn the same
@@ -165,11 +190,20 @@ func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffec
 		if errors.Is(err, effects.ErrCDNBlobMissing) {
 			return nil, err
 		}
-		slog.Debug("beacon: cloud member discovery failed, retrying", "error", err, "backoff", backoff)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if time.Since(lastComplaint) >= complainEvery {
+			slog.Warn("beacon: cloud member discovery failing, still retrying — will NOT start solo",
+				"error", err, "attempts", attempt, "elapsed", time.Since(started))
+			lastComplaint = time.Now()
+		} else {
+			slog.Debug("beacon: cloud member discovery failed, retrying", "error", err, "backoff", backoff)
+		}
 
 		select {
-		case <-deadlineCtx.Done():
-			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, backoffMax)
