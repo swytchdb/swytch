@@ -92,6 +92,11 @@ const (
 	// answers in seconds, and failing at 5s manufactured errors for reads that
 	// were about to succeed.
 	cloudBackstopTimeout = 60 * time.Second
+	// discoverWalkProgressInterval paces the membership-walk progress line.
+	// The walk has no overall deadline (see DiscoverMembers), and it runs
+	// before the metrics listener is up, so this log is the ONLY way to tell a
+	// deep chain apart from a wedge while a node is blocked in bootstrap.
+	discoverWalkProgressInterval = 10 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
 	// cloudProgressInterval paces the outbox drain log line: pending/queued/
@@ -883,6 +888,9 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	fetched := map[effects.Tip]*pb.Effect{}
 	var lcaTip effects.Tip
 	lcaFound := false
+	walkStarted := time.Now()
+	lastProgress := walkStarted
+	progressed := false
 	for len(queue) > 0 {
 		tip := queue[0]
 		queue = queue[1:]
@@ -897,6 +905,15 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 				return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 			}
 		}
+		// Subscription effects are commutative metadata, not data. They are
+		// dep-less roots that accumulate as permanent cloud tips; including
+		// them defeats the LCA rule (the snapshot is dequeued with
+		// subscription tips still queued, so len(queue)!=0). Skip them,
+		// matching the non-bootstrap paths (flushTx, subscriptionOnlyTips,
+		// ReduceChain).
+		if eff.GetSubscription() != nil {
+			continue
+		}
 		fetched[tip] = eff
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
 			lcaTip, lcaFound = tip, true
@@ -905,6 +922,22 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		for _, dep := range eff.Deps {
 			enqueue(effects.Tip{dep.NodeId, dep.Offset})
 		}
+		// A prune of thousands of dead members leaves a chain that takes
+		// minutes to walk. Without this the node is opaque for the whole of
+		// it — blocked in bootstrap, so the metrics listener is not up yet and
+		// nothing else logs. `queued` is the useful half: falling means the
+		// walk is converging on the LCA, climbing means the DAG is still
+		// fanning out.
+		if time.Since(lastProgress) >= discoverWalkProgressInterval {
+			slog.Info("cloud discover: membership walk in progress",
+				"fetched", len(fetched), "queued", len(queue), "elapsed", time.Since(walkStarted))
+			lastProgress = time.Now()
+			progressed = true
+		}
+	}
+	if progressed {
+		slog.Info("cloud discover: membership walk complete",
+			"fetched", len(fetched), "elapsed", time.Since(walkStarted))
 	}
 	if len(fetched) == 0 {
 		return nil, nil // fresh cluster: nothing in the cloud yet
