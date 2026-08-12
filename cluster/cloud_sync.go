@@ -877,13 +877,34 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 			queue = append(queue, t)
 		}
 	}
+	var initialTips []effects.Tip
 	for _, kt := range resp.GetKeys() {
 		for _, ce := range cs.peelSidecar(kt) {
 			sidecar[ce.Tip] = ce.Eff
 		}
 		for _, ref := range kt.GetTips() {
-			enqueue(effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+			initialTips = append(initialTips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
+	}
+	// Pre-resolve initial tips and filter subscriptions before the BFS.
+	// Subscription effects are dep-less metadata that accumulate as permanent
+	// frontier entries. Enqueueing them alongside data tips defeats the LCA
+	// rule: a state-carrying snapshot dequeued while subscription tips are
+	// still queued fails the len(queue)==0 gate. Data effects never depend on
+	// subscriptions (flushTx skips them), so filtering here is complete.
+	for _, t := range initialTips {
+		if _, ok := sidecar[t]; !ok {
+			eff, err := cs.fetchEffect(ctx, t)
+			if err != nil {
+				return nil, fmt.Errorf("cloud discover: fetch %v: %w", t, err)
+			}
+			sidecar[t] = eff
+		}
+		if sidecar[t].GetSubscription() != nil {
+			visited[t] = true
+			continue
+		}
+		enqueue(t)
 	}
 	fetched := map[effects.Tip]*pb.Effect{}
 	var lcaTip effects.Tip
@@ -904,15 +925,6 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 				// instead; the caller retries with backoff.
 				return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 			}
-		}
-		// Subscription effects are commutative metadata, not data. They are
-		// dep-less roots that accumulate as permanent cloud tips; including
-		// them defeats the LCA rule (the snapshot is dequeued with
-		// subscription tips still queued, so len(queue)!=0). Skip them,
-		// matching the non-bootstrap paths (flushTx, subscriptionOnlyTips,
-		// ReduceChain).
-		if eff.GetSubscription() != nil {
-			continue
 		}
 		fetched[tip] = eff
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
