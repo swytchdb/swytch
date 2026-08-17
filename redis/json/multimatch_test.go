@@ -73,6 +73,15 @@ func TestJSON_MultiMatch_Filter(t *testing.T) {
 	if got := h.run(handleJSONGet, "sc", `$.x[?(@>2)]`); !strings.Contains(got, `[3,4]`) {
 		t.Errorf("filter bare @: %q", got)
 	}
+	// A quote escaped inside a literal is content, not the terminator, and the
+	// literal is compared against the decoded value.
+	h.run(handleJSONSet, "q", "$", `{"x":[{"n":"a\"b"},{"n":"c"}]}`)
+	if got := h.run(handleJSONGet, "q", `$.x[?(@.n=="a\"b")].n`); !strings.Contains(got, `["a\"b"]`) {
+		t.Errorf("filter escaped quote: %q", got)
+	}
+	if got := h.run(handleJSONGet, "q", `$.x[?(@.n=='c')].n`); !strings.Contains(got, `["c"]`) {
+		t.Errorf("filter single-quoted: %q", got)
+	}
 }
 
 func TestJSON_MultiMatch_NumIncrBy(t *testing.T) {

@@ -65,6 +65,19 @@ func TestParse_PreservesObjectOrder(t *testing.T) {
 	}
 }
 
+func TestParse_DuplicateMemberTakesLast(t *testing.T) {
+	v, err := Parse([]byte(`{"a":1,"b":9,"a":2}`))
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(v.Obj) != 2 {
+		t.Fatalf("got %d members, want 2: %s", len(v.Obj), Serialize(v))
+	}
+	if got := string(Serialize(v)); got != `{"a":2,"b":9}` {
+		t.Fatalf("serialized = %s, want {\"a\":2,\"b\":9}", got)
+	}
+}
+
 func TestParse_IntVsFloat(t *testing.T) {
 	cases := []struct {
 		in   string
