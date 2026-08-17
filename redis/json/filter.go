@@ -20,6 +20,7 @@
 package json
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -187,6 +188,10 @@ func parseFilterBracket(s string, i int) (segment, int, error) {
 	for ; j < len(s); j++ {
 		c := s[j]
 		if quote != 0 {
+			if c == '\\' && j+1 < len(s) {
+				j++ // an escaped character cannot close the string
+				continue
+			}
 			if c == quote {
 				quote = 0
 			}
@@ -409,7 +414,12 @@ func isFilterDelim(c byte) bool {
 func (fp *filterParser) parseStringLiteral(q byte) (operand, error) {
 	fp.pos++ // opening quote
 	start := fp.pos
+	escaped := false
 	for fp.pos < len(fp.s) && fp.s[fp.pos] != q {
+		if fp.s[fp.pos] == '\\' && fp.pos+1 < len(fp.s) {
+			escaped = true
+			fp.pos++ // an escaped character cannot close the string
+		}
 		fp.pos++
 	}
 	if fp.pos >= len(fp.s) {
@@ -417,7 +427,49 @@ func (fp *filterParser) parseStringLiteral(q byte) (operand, error) {
 	}
 	str := fp.s[start:fp.pos]
 	fp.pos++ // closing quote
+	if escaped {
+		decoded, ok := decodeFilterString(str, q)
+		if !ok {
+			return nil, errBadPath
+		}
+		str = decoded
+	}
 	return litOperand{newString(str)}, nil
+}
+
+// decodeFilterString resolves the escapes in a string literal body, so the
+// operand compares equal to the decoded JSON value it is tested against. The
+// body is decoded as a JSON string, covering the RFC 8259 escapes including
+// \uXXXX surrogate pairs.
+func decodeFilterString(body string, q byte) (string, bool) {
+	if q == '\'' {
+		// A single-quoted body is not a JSON string body: \' is not a JSON
+		// escape, and a bare " would terminate it early.
+		var sb strings.Builder
+		sb.Grow(len(body))
+		for i := 0; i < len(body); i++ {
+			switch {
+			case body[i] == '\\' && i+1 < len(body):
+				if body[i+1] == '\'' {
+					sb.WriteByte('\'')
+				} else {
+					sb.WriteByte('\\')
+					sb.WriteByte(body[i+1])
+				}
+				i++
+			case body[i] == '"':
+				sb.WriteString(`\"`)
+			default:
+				sb.WriteByte(body[i])
+			}
+		}
+		body = sb.String()
+	}
+	var s string
+	if err := json.Unmarshal([]byte(`"`+body+`"`), &s); err != nil {
+		return "", false
+	}
+	return s, true
 }
 
 func (fp *filterParser) parseNumberLiteral() (operand, error) {

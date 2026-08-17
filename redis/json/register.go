@@ -19,7 +19,11 @@
 
 package json
 
-import "github.com/swytchdb/swytch/redis/shared"
+import (
+	"strings"
+
+	"github.com/swytchdb/swytch/redis/shared"
+)
 
 // keysJSONMSet extracts the keys from a JSON.MSET (every third arg: the key of
 // each key/path/value triplet).
@@ -31,19 +35,28 @@ func keysJSONMSet(cmd *shared.Command) []string {
 	return keys
 }
 
+// keysJSONDebug extracts the key from JSON.DEBUG MEMORY <key> [path]. The HELP
+// subcommand names no key.
+func keysJSONDebug(cmd *shared.Command) []string {
+	if len(cmd.Args) >= 2 && strings.EqualFold(string(cmd.Args[0]), "MEMORY") {
+		return []string{string(cmd.Args[1])}
+	}
+	return nil
+}
+
 func init() {
 	shared.RegisterModuleCommands(
 		// Read-only commands (no Keys/Flags → read-only context fast path).
-		shared.ModuleEntry{Cmd: shared.CmdJSONGet, Entry: &shared.CommandEntry{Handler: handleJSONGet}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONGet, Entry: &shared.CommandEntry{Handler: handleJSONGet, Keys: shared.KeysFirst}},
 		shared.ModuleEntry{Cmd: shared.CmdJSONMGet, Entry: &shared.CommandEntry{Handler: handleJSONMGet, Keys: shared.KeysAllButLast}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONType, Entry: &shared.CommandEntry{Handler: handleJSONType}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONArrLen, Entry: &shared.CommandEntry{Handler: handleJSONArrLen}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONArrIndex, Entry: &shared.CommandEntry{Handler: handleJSONArrIndex}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONStrLen, Entry: &shared.CommandEntry{Handler: handleJSONStrLen}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONObjKeys, Entry: &shared.CommandEntry{Handler: handleJSONObjKeys}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONObjLen, Entry: &shared.CommandEntry{Handler: handleJSONObjLen}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONResp, Entry: &shared.CommandEntry{Handler: handleJSONResp}},
-		shared.ModuleEntry{Cmd: shared.CmdJSONDebug, Entry: &shared.CommandEntry{Handler: handleJSONDebug}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONType, Entry: &shared.CommandEntry{Handler: handleJSONType, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONArrLen, Entry: &shared.CommandEntry{Handler: handleJSONArrLen, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONArrIndex, Entry: &shared.CommandEntry{Handler: handleJSONArrIndex, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONStrLen, Entry: &shared.CommandEntry{Handler: handleJSONStrLen, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONObjKeys, Entry: &shared.CommandEntry{Handler: handleJSONObjKeys, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONObjLen, Entry: &shared.CommandEntry{Handler: handleJSONObjLen, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONResp, Entry: &shared.CommandEntry{Handler: handleJSONResp, Keys: shared.KeysFirst}},
+		shared.ModuleEntry{Cmd: shared.CmdJSONDebug, Entry: &shared.CommandEntry{Handler: handleJSONDebug, Keys: keysJSONDebug}},
 
 		// Write commands.
 		shared.ModuleEntry{Cmd: shared.CmdJSONSet, Entry: &shared.CommandEntry{Handler: handleJSONSet, Keys: shared.KeysFirst, Flags: shared.FlagWrite}},

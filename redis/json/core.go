@@ -263,7 +263,13 @@ func handleJSONMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		w.WriteArray(len(keys))
 		for _, k := range keys {
 			root, _, exists, wrongType, err := getJSONSnapshot(cmd, k)
-			if err != nil || !exists || wrongType {
+			if err != nil {
+				// The array header is already on the wire, so the failure has to
+				// ride as this element rather than replace the whole reply.
+				w.WriteError(err.Error())
+				continue
+			}
+			if !exists || wrongType {
 				w.WriteNullBulkString()
 				continue
 			}

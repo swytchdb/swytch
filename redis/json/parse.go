@@ -77,7 +77,20 @@ func parseFromToken(dec *json.Decoder, tok json.Token) (*Value, error) {
 				if err != nil {
 					return nil, err
 				}
-				obj.Obj = append(obj.Obj, Member{Key: key, Val: val})
+				// A repeated member name takes the last value at the position of
+				// the first, so a lookup and a re-parse of the serialized form
+				// agree on which one is live.
+				replaced := false
+				for i := range obj.Obj {
+					if obj.Obj[i].Key == key {
+						obj.Obj[i].Val = val
+						replaced = true
+						break
+					}
+				}
+				if !replaced {
+					obj.Obj = append(obj.Obj, Member{Key: key, Val: val})
+				}
 			}
 			if _, err := dec.Token(); err != nil { // consume '}'
 				return nil, err
