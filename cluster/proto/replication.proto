@@ -76,6 +76,7 @@ message DataEffect {
     sint64 int_val = 11;
     double float_val = 12;
     CompressedValue compressed = 13;
+    bytes child = 14;      // element references a child container partition (JSON); value lives in partition <child>
   }
 }
 
@@ -90,6 +91,9 @@ enum ValueType {
   TYPE_HLL = 7;
   TYPE_BITMAP = 8;
   TYPE_GEO = 9;
+  TYPE_JSON = 10;        // JSON key; root is a scalar leaf
+  TYPE_JSON_OBJECT = 11; // a JSON object node (ORDERED partition, elements keyed by member name)
+  TYPE_JSON_ARRAY = 12;  // a JSON array node (ORDERED partition, elements keyed by generated id)
 }
 
 // MetaEffect marks a causal dependency without changing state.
@@ -164,6 +168,12 @@ message ReducedEffect {
 
   // Fork-choice hash propagated from the tip effect during reduction
   bytes fork_choice_hash = 24;
+
+  // Non-root virtual partitions of this key, keyed by full virtual path.
+  // Empty/nil for flat keys (byte-identical to pre-nesting behavior). Each
+  // entry is itself a flat ReducedEffect (its own partitions map is empty) —
+  // a flat partition map linked at container markers, not a recursive tree.
+  map<string, ReducedEffect> partitions = 25;
 }
 
 // Verdict is the adjudication outcome for a transaction recorded in a snapshot.
@@ -321,6 +331,7 @@ message Effect {
   repeated EffectRef deps = 4;    // causal dependencies (empty = root)
   string txn_id = 5;              // transaction ID (empty = non-transactional)
   bytes fork_choice_hash = 6;     // SHA-256(node_id_LE8 || hlc_LE8), computed at emit time
+  bytes virtual = 7;              // partition key WITHIN the key (empty = root partition); enables nested values
 
   // The effect payload — exactly one of these is set.
   oneof kind {

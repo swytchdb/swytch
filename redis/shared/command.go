@@ -298,6 +298,33 @@ const (
 	// ACL commands
 	CmdAcl
 
+	// RedisJSON (JSON.*) commands
+	CmdJSONSet
+	CmdJSONGet
+	CmdJSONMGet
+	CmdJSONMSet
+	CmdJSONMerge
+	CmdJSONDel
+	CmdJSONForget
+	CmdJSONClear
+	CmdJSONType
+	CmdJSONNumIncrBy
+	CmdJSONNumMultBy
+	CmdJSONNumPowBy
+	CmdJSONArrLen
+	CmdJSONArrAppend
+	CmdJSONArrInsert
+	CmdJSONArrPop
+	CmdJSONArrTrim
+	CmdJSONArrIndex
+	CmdJSONStrLen
+	CmdJSONStrAppend
+	CmdJSONObjKeys
+	CmdJSONObjLen
+	CmdJSONToggle
+	CmdJSONResp
+	CmdJSONDebug
+
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
 	CmdMax
@@ -649,6 +676,33 @@ var commandNames = map[string]CommandType{
 
 	// ACL
 	"ACL": CmdAcl,
+
+	// RedisJSON
+	"JSON.SET":    CmdJSONSet,
+	"JSON.GET":    CmdJSONGet,
+	"JSON.MGET":   CmdJSONMGet,
+	"JSON.MSET":   CmdJSONMSet,
+	"JSON.MERGE":  CmdJSONMerge,
+	"JSON.DEL":    CmdJSONDel,
+	"JSON.FORGET": CmdJSONForget,
+	"JSON.CLEAR":  CmdJSONClear,
+	"JSON.TYPE":   CmdJSONType,
+	"JSON.NUMINCRBY": CmdJSONNumIncrBy,
+	"JSON.NUMMULTBY": CmdJSONNumMultBy,
+	"JSON.NUMPOWBY":  CmdJSONNumPowBy,
+	"JSON.ARRLEN":    CmdJSONArrLen,
+	"JSON.ARRAPPEND": CmdJSONArrAppend,
+	"JSON.ARRINSERT": CmdJSONArrInsert,
+	"JSON.ARRPOP":    CmdJSONArrPop,
+	"JSON.ARRTRIM":   CmdJSONArrTrim,
+	"JSON.ARRINDEX":  CmdJSONArrIndex,
+	"JSON.STRLEN":    CmdJSONStrLen,
+	"JSON.STRAPPEND": CmdJSONStrAppend,
+	"JSON.OBJKEYS":   CmdJSONObjKeys,
+	"JSON.OBJLEN":    CmdJSONObjLen,
+	"JSON.TOGGLE":    CmdJSONToggle,
+	"JSON.RESP":      CmdJSONResp,
+	"JSON.DEBUG":     CmdJSONDebug,
 }
 
 // commandStrings maps CommandType to command name strings
@@ -883,6 +937,31 @@ var commandStrings = map[CommandType]string{
 	CmdGeoSearch:           "geosearch",
 	CmdGeoSearchStore:      "geosearchstore",
 	CmdAcl:                 "acl",
+	CmdJSONSet:             "json.set",
+	CmdJSONGet:             "json.get",
+	CmdJSONMGet:            "json.mget",
+	CmdJSONMSet:            "json.mset",
+	CmdJSONMerge:           "json.merge",
+	CmdJSONDel:             "json.del",
+	CmdJSONForget:          "json.forget",
+	CmdJSONClear:           "json.clear",
+	CmdJSONType:            "json.type",
+	CmdJSONNumIncrBy:       "json.numincrby",
+	CmdJSONNumMultBy:       "json.nummultby",
+	CmdJSONNumPowBy:        "json.numpowby",
+	CmdJSONArrLen:          "json.arrlen",
+	CmdJSONArrAppend:       "json.arrappend",
+	CmdJSONArrInsert:       "json.arrinsert",
+	CmdJSONArrPop:          "json.arrpop",
+	CmdJSONArrTrim:         "json.arrtrim",
+	CmdJSONArrIndex:        "json.arrindex",
+	CmdJSONStrLen:          "json.strlen",
+	CmdJSONStrAppend:       "json.strappend",
+	CmdJSONObjKeys:         "json.objkeys",
+	CmdJSONObjLen:          "json.objlen",
+	CmdJSONToggle:          "json.toggle",
+	CmdJSONResp:            "json.resp",
+	CmdJSONDebug:           "json.debug",
 }
 
 // String returns the command name

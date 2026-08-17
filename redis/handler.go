@@ -43,6 +43,7 @@ import (
 	_ "github.com/swytchdb/swytch/redis/geo"    // Register geo module commands via init()
 	_ "github.com/swytchdb/swytch/redis/hash"   // Register hash module commands via init()
 	_ "github.com/swytchdb/swytch/redis/hll"    // Register hll module commands via init()
+	_ "github.com/swytchdb/swytch/redis/json"   // Register RedisJSON module commands via init()
 	_ "github.com/swytchdb/swytch/redis/list"   // Register list module commands via init()
 	_ "github.com/swytchdb/swytch/redis/set"    // Register set module commands via init()
 	_ "github.com/swytchdb/swytch/redis/str"    // Register string/key/expiry module commands via init()
