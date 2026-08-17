@@ -311,6 +311,11 @@ var (
 		Help: "Local effects enqueued for cloud upload",
 	})
 
+	cloudAncestryUploadedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cluster_cloud_ancestry_uploaded_total",
+		Help: "Dep-ancestors enqueued alongside a mint because the cloud was missing them (a hole being healed)",
+	})
+
 	cloudEffectsSentTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cluster_cloud_effects_sent_total",
 		Help: "Effect envelopes handed to the upload stream (includes re-sends after reconnect)",

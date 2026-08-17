@@ -460,3 +460,124 @@ func TestBuildEnvelopeDeclaresRawSize(t *testing.T) {
 		t.Fatal("sealed length equals raw_size; the test payload no longer exercises the divergence")
 	}
 }
+
+// ancestrySync builds a CloudSync over a peer chain root <- mid with one local
+// mint on top, where only the mint reaches OnLocalEffect. The peer that
+// authored root and mid is, as far as this node can tell, never going to
+// upload them.
+func ancestrySync(t *testing.T, engine *effects.Engine) (*CloudSync, effects.Tip, effects.Tip, effects.Tip, *pb.Effect) {
+	t.Helper()
+	enc, err := effects.NewEncryptorFromIKM([]byte("ancestry-test-ikm"))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	cs := &CloudSync{
+		engine:      engine,
+		enc:         enc,
+		keyNameKey:  DeriveKeyNameKey("ancestry-secret"),
+		pending:     make(map[effects.Tip]*pb.Effect),
+		pendingKeys: make(map[string]*pendingKeyEntry),
+		wake:        make(chan struct{}, 1),
+	}
+
+	root, mid, ours := effects.Tip{7, 1}, effects.Tip{7, 2}, effects.Tip{1, 3}
+	rootEff := &pb.Effect{Key: []byte("k")}
+	midEff := &pb.Effect{Key: []byte("k"), Deps: []*pb.EffectRef{{NodeId: root[0], Offset: root[1]}}}
+	oursEff := &pb.Effect{Key: []byte("k"), Deps: []*pb.EffectRef{{NodeId: mid[0], Offset: mid[1]}}}
+	engine.EffectCache().PutSized(root, rootEff, 64)
+	engine.EffectCache().PutSized(mid, midEff, 64)
+	engine.EffectCache().PutSized(ours, oursEff, 64)
+	return cs, root, mid, ours, oursEff
+}
+
+// TestUnsentAncestryUploads: the cloud only ever receives what a node mints, so
+// a mint whose deps were authored by a peer that never uploaded them lands in
+// the cloud as a dangling reference — permanently, since nothing re-asks and a
+// bootstrapping node's walk over the cloud frontier dies on the missing blob.
+// An upload therefore carries its unsent history: the mint's deps go out with
+// it, and each expands again as it is sent, out to the first effect the cloud
+// already holds.
+func TestUnsentAncestryUploads(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, oursEff := ancestrySync(t, engine)
+
+	cs.handleLocalEffect(ours, oursEff)
+
+	// The emit path walks one dep level; chasing the rest of the closure there
+	// would put an unbounded walk inside every write.
+	if _, queued := cs.pending[mid]; !queued {
+		t.Fatal("the mint's own dep must be enqueued on the emit path")
+	}
+	if _, queued := cs.pending[root]; queued {
+		t.Fatal("the deeper ancestor must wait for the send-path walk")
+	}
+
+	for range 8 {
+		if _, ok := cs.nextEnvelope(); !ok {
+			break
+		}
+	}
+	if _, queued := cs.pending[root]; !queued {
+		t.Fatal("draining the outbox must complete the ancestry closure")
+	}
+
+	// Ancestors are interior nodes of someone else's chain, not this node's
+	// frontier: answering a read-miss with them would name an effect and its
+	// own ancestor as the key's tips.
+	got := cs.pendingTipsFor("k")
+	if len(got) != 1 || got[0] != ours {
+		t.Fatalf("outbox frontier on k = %v, want only the local mint %v", got, ours)
+	}
+}
+
+// TestCloudHeldAncestryStops: the cloud served the rehydrated part of this
+// chain in the first place, so re-uploading it on every local write to the key
+// is pure waste. Acks and cloud-served effects are the walk's stop rule.
+func TestCloudHeldAncestryStops(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, oursEff := ancestrySync(t, engine)
+
+	cs.markCloudHolds(mid)
+	cs.handleLocalEffect(ours, oursEff)
+	for range 8 {
+		if _, ok := cs.nextEnvelope(); !ok {
+			break
+		}
+	}
+
+	if _, queued := cs.pending[mid]; queued {
+		t.Fatal("an effect the cloud already holds must not be re-uploaded")
+	}
+	if _, queued := cs.pending[root]; queued {
+		t.Fatal("the walk must stop at the first cloud-held ancestor, not walk past it")
+	}
+}
+
+// TestTipGenSetRotation: the known-in-cloud set is bounded, and overflowing it
+// may only cost a re-upload the cloud re-acks — never a skipped ancestor,
+// which would leave exactly the hole the walk exists to close.
+func TestTipGenSetRotation(t *testing.T) {
+	var s tipGenSet
+	for i := range cloudHasGenSize*2 + 1 {
+		s.add(effects.Tip{1, uint64(i)})
+	}
+	if newest := (effects.Tip{1, cloudHasGenSize * 2}); !s.has(newest) {
+		t.Fatalf("most recent add %v missing after rotation", newest)
+	}
+	if s.has(effects.Tip{1, 0}) {
+		t.Fatal("the oldest generation should have been dropped")
+	}
+	if total := len(s.cur) + len(s.prev); total > 2*cloudHasGenSize {
+		t.Fatalf("set holds %d tips, above the %d bound", total, 2*cloudHasGenSize)
+	}
+}
