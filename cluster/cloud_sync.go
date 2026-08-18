@@ -366,6 +366,11 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	if !cloudUploadable(eff) {
 		return
 	}
+	// Queue the first ancestry level before the new head. The sender continues
+	// the walk off-path and keeps moving each parent behind any newly discovered
+	// deps, producing root-to-head wire order instead of advertising the head
+	// first and trying to fill its hole afterwards.
+	cs.expandAncestry(eff)
 	// OnLocalEffect fires synchronously in emit, after PutSized installed the
 	// vertex with its creation ref — the incref cannot find it missing or
 	// claimed, and a freshly-allocated offset cannot already be queued. If it
@@ -375,7 +380,6 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 	if !cs.enqueueUpload(offset, eff, true) {
 		panic(fmt.Sprintf("cloud sync: outbox enqueue failed for just-emitted %v — vertex missing, claimed, or already queued at emit time", offset))
 	}
-	cs.expandAncestry(eff)
 	cs.wakeSender()
 }
 
@@ -469,7 +473,8 @@ func (cs *CloudSync) enqueueUpload(tip effects.Tip, eff *pb.Effect, frontier boo
 // Referencing each dep before walking past it is what keeps the walk alive
 // across a stream outage: the frontier it stopped at is pinned in the pool, so
 // the closure resumes on reconnect instead of restarting into evicted ancestry.
-func (cs *CloudSync) expandAncestry(eff *pb.Effect) {
+func (cs *CloudSync) expandAncestry(eff *pb.Effect) []effects.Tip {
+	var queued []effects.Tip
 	for _, dep := range eff.GetDeps() {
 		tip := effects.Tip{dep.GetNodeId(), dep.GetOffset()}
 		if cs.cloudHolds(tip) {
@@ -484,8 +489,37 @@ func (cs *CloudSync) expandAncestry(eff *pb.Effect) {
 		}
 		if cs.enqueueUpload(tip, anc, false) {
 			cloudAncestryUploadedTotal.Inc()
+			queued = append(queued, tip)
 		}
 	}
+	return queued
+}
+
+// deferUploadBehind moves tip behind deps that its ancestry walk just queued,
+// ahead of unrelated work already in the FIFO. Repeating this as each dep is
+// considered turns the incremental one-level walk into root-to-head send order
+// without putting an unbounded traversal on the emit path.
+func (cs *CloudSync) deferUploadBehind(tip effects.Tip, deps []effects.Tip) {
+	depSet := make(map[effects.Tip]struct{}, len(deps))
+	for _, dep := range deps {
+		depSet[dep] = struct{}{}
+	}
+
+	cs.mu.Lock()
+	deferred := make([]effects.Tip, 0, len(cs.sendQ)+1)
+	deferred = append(deferred, deps...)
+	deferred = append(deferred, tip)
+	for _, queued := range cs.sendQ {
+		if queued == tip {
+			continue
+		}
+		if _, moved := depSet[queued]; moved {
+			continue
+		}
+		deferred = append(deferred, queued)
+	}
+	cs.sendQ = deferred
+	cs.mu.Unlock()
 }
 
 // tipGenSet is a bounded exact set of tips: two generations, the older dropped
@@ -722,7 +756,10 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 		// Continue the unsent-history walk off the emit path. The outbox
 		// reference on this effect keeps its deps resolvable here even if the
 		// key was evicted since the mint.
-		cs.expandAncestry(eff)
+		if deps := cs.expandAncestry(eff); len(deps) > 0 {
+			cs.deferUploadBehind(tip, deps)
+			continue
+		}
 
 		env, err := cs.buildEnvelope(tip, eff)
 		if err != nil {

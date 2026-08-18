@@ -21,6 +21,7 @@ package cluster
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -532,6 +533,34 @@ func TestUnsentAncestryUploads(t *testing.T) {
 	got := cs.pendingTipsFor("k")
 	if len(got) != 1 || got[0] != ours {
 		t.Fatalf("outbox frontier on k = %v, want only the local mint %v", got, ours)
+	}
+}
+
+// TestUnsentAncestryUploadsOldestFirst covers the shutdown-sensitive ordering:
+// the cloud must see root and mid before it sees the new head that names them.
+// Sending head-first lets the cloud advertise a dangling frontier if this node
+// exits as the last holder before the ancestry backfill completes.
+func TestUnsentAncestryUploadsOldestFirst(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, oursEff := ancestrySync(t, engine)
+
+	cs.handleLocalEffect(ours, oursEff)
+	var got []effects.Tip
+	for range 3 {
+		env, ok := cs.nextEnvelope()
+		if !ok {
+			t.Fatalf("outbox ended after %d envelopes", len(got))
+		}
+		got = append(got, effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()})
+	}
+	want := []effects.Tip{root, mid, ours}
+	if !slices.Equal(got, want) {
+		t.Fatalf("upload order = %v, want oldest-first %v", got, want)
 	}
 }
 
