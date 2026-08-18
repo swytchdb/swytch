@@ -308,7 +308,7 @@ var (
 
 	cloudOutboxEnqueuedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "cluster_cloud_outbox_enqueued_total",
-		Help: "Local effects enqueued for cloud upload",
+		Help: "Effects enqueued for cloud upload, including local mints, ancestry backfills, and fetch replies",
 	})
 
 	cloudAncestryUploadedTotal = promauto.NewCounter(prometheus.CounterOpts{

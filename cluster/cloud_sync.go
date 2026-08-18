@@ -99,8 +99,8 @@ const (
 	discoverWalkProgressInterval = 10 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
-	// cloudProgressInterval paces the outbox drain log line: pending/queued/
-	// in-flight and the interval's send/ack deltas, so a backlog is always
+	// cloudProgressInterval paces the outbox drain log line: pending/queued and
+	// the interval's send/ack deltas, so a backlog is always
 	// attributable to a stage (nothing queued vs sends stalled vs acks
 	// stalled) instead of just a growing pending gauge.
 	cloudProgressInterval = 30 * time.Second
@@ -129,10 +129,10 @@ type pendingKeyEntry struct {
 // replication).
 //
 // The response stream also carries FetchRequests: the cloud asking the cluster
-// for an effect it's missing. Those are answered from the vertex pool — any
-// resident effect, not just our own, since the cloud broadcasts the ask to
-// whichever streams are open — and silence is the correct reply for an effect
-// we no longer hold.
+// for an effect it's missing. Those are admitted to the same pinned, retrying
+// outbox as local uploads — any resident effect, not just our own, since the
+// cloud broadcasts the ask to whichever streams are open. Silence is the
+// correct reply for an effect we no longer hold.
 type CloudSync struct {
 	engine     *effects.Engine
 	enc        *effects.Encryptor
@@ -153,7 +153,7 @@ type CloudSync struct {
 	httpClient   *http.Client
 
 	mu      sync.Mutex
-	pending map[effects.Tip]*pb.Effect // un-acked mints; the held pointer keeps the effect reachable even if its pool ref is consumed
+	pending map[effects.Tip]*pb.Effect // un-acked uploads; the held pointer keeps the effect reachable even if its pool ref is consumed
 	// pendingKeys indexes pending by plaintext key, so CloudTips can answer a
 	// read-miss from the outbox: an evicted-before-ack key has no index tips
 	// and no cloud tips, but its effects sit refcount-pinned in the pool — the
@@ -165,7 +165,6 @@ type CloudSync struct {
 	// pin count would underflow.
 	pendingKeys map[string]*pendingKeyEntry
 	sendQ       []effects.Tip
-	relayQ      []*dp.Effect // fetch-request replies, already enveloped
 	// reconcile holds keys whose read was answered from the outbox while
 	// GetTips was failing. The cloud may hold tips for them we've never seen
 	// (another node's uploads); reconcileLoop re-consults until the cloud
@@ -570,8 +569,8 @@ func (cs *CloudSync) wakeSender() {
 }
 
 // retire removes an outbox entry and releases its pool reference. Returns
-// whether the tip was actually held — false for acks of fetch-relays and
-// duplicate acks, which were never outbox entries.
+// whether the tip was actually held — false for duplicate or stale acks after
+// the outbox entry was already retired.
 func (cs *CloudSync) retire(tip effects.Tip) bool {
 	cs.mu.Lock()
 	eff, held := cs.pending[tip]
@@ -710,38 +709,36 @@ func (cs *CloudSync) logOutboxProgress(lastSent, lastAcked uint64) (uint64, uint
 	cs.mu.Lock()
 	pending := len(cs.pending)
 	queued := len(cs.sendQ)
-	relays := len(cs.relayQ)
 	cs.mu.Unlock()
-	if pending == 0 && queued == 0 && relays == 0 {
+	if pending == 0 && queued == 0 {
 		return sent, acked
 	}
 	if sent == lastSent && acked == lastAcked {
 		slog.Warn("cloud sync: outbox stalled",
-			"pending", pending, "queued", queued, "relays", relays,
-			"inflight", sent-acked, "interval", cloudProgressInterval)
+			"pending", pending, "queued", queued,
+			"interval", cloudProgressInterval)
 	} else {
 		slog.Info("cloud sync: outbox progress",
-			"pending", pending, "queued", queued, "relays", relays,
-			"inflight", sent-acked,
+			"pending", pending, "queued", queued,
 			"sent_delta", sent-lastSent, "acked_delta", acked-lastAcked,
 			"interval", cloudProgressInterval)
 	}
 	return sent, acked
 }
 
-// nextEnvelope pops the next upload: fetch-relays first (the cloud is blocked
-// on them mid-scan), then outbox mints. Sealing happens here, on the sync
+// nextEnvelope pops the next outbox upload. Sealing happens here, on the sync
 // goroutine, never on the emit path.
 func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
+	cs.mu.Lock()
+	// Bound one pass to the uploads that were queued when it began. A blocked
+	// descendant is put back for a dependency ACK to wake; without the bound, a
+	// queue containing only blocked descendants would spin forever.
+	remaining := len(cs.sendQ)
+	cs.mu.Unlock()
+
 	for {
 		cs.mu.Lock()
-		if len(cs.relayQ) > 0 {
-			env := cs.relayQ[0]
-			cs.relayQ = cs.relayQ[1:]
-			cs.mu.Unlock()
-			return env, true
-		}
-		if len(cs.sendQ) == 0 {
+		if len(cs.sendQ) == 0 || remaining == 0 {
 			cs.mu.Unlock()
 			return nil, false
 		}
@@ -749,6 +746,7 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 		cs.sendQ = cs.sendQ[1:]
 		eff := cs.pending[tip]
 		cs.mu.Unlock()
+		remaining--
 
 		if eff == nil {
 			continue // acked while queued
@@ -758,6 +756,31 @@ func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
 		// key was evicted since the mint.
 		if deps := cs.expandAncestry(eff); len(deps) > 0 {
 			cs.deferUploadBehind(tip, deps)
+			// These deps were not in the queue when the pass was bounded. Count
+			// each newly pinned vertex once so a final-slot expansion cannot leave
+			// ancestry queued with nobody left to wake the sender.
+			remaining += len(deps)
+			continue
+		}
+
+		// Stream order is not Cloud commit order: its shared worker pool may
+		// process a child before an earlier parent. Keep descendants queued until
+		// every locally-uploadable dependency has been durably ACKed and retired
+		// from the outbox. Independent effects can still fill the pipeline.
+		cs.mu.Lock()
+		blocked := false
+		for _, dep := range eff.GetDeps() {
+			depTip := effects.Tip{dep.GetNodeId(), dep.GetOffset()}
+			if _, pending := cs.pending[depTip]; pending {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			cs.sendQ = append(cs.sendQ, tip)
+		}
+		cs.mu.Unlock()
+		if blocked {
 			continue
 		}
 
@@ -805,17 +828,19 @@ func (cs *CloudSync) readLoop(stream dp.DataPlane_WriteEffectsClient) error {
 }
 
 // handleAck retires a durably-stored effect, or schedules a nacked one for
-// re-send. Acks for fetch-relays land here too — they were never in the
-// outbox, so they fall through both paths untouched.
+// re-send. Local mints, ancestry backfills, and fetch replies all use the same
+// outbox so Cloud's concurrent workers cannot strand one category on a NACK.
 func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 	tip := effects.Tip{ack.GetId().GetNodeId(), ack.GetId().GetOffset()}
 	if ack.GetOk() {
-		// Marked before the retire, and for relays too: an acked effect is one
+		// Marked before the retire: an acked effect is one
 		// the ancestry walk must stop at, whichever path put it on the wire.
 		cs.markCloudHolds(tip)
 		if cs.retire(tip) {
 			cloudEffectsAckedTotal.Inc()
 			cs.ackedCount.Add(1)
+			// A descendant may be waiting for this dependency to become durable.
+			cs.wakeSender()
 		}
 		return
 	}
@@ -840,8 +865,10 @@ func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 }
 
 // handleFetch answers the cloud's ask for an effect it is missing. Served from
-// the vertex pool regardless of author; a non-resident effect gets silence and
-// the cloud re-asks elsewhere or later.
+// the vertex pool regardless of author and admitted to the normal pinned
+// outbox, so its ancestry is ACK-gated and the effect survives NACK/reconnect
+// retries. A non-resident effect gets silence and the cloud re-asks elsewhere
+// or later.
 func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 	ref := req.GetRef()
 	tip := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -849,18 +876,17 @@ func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 	if !ok {
 		return
 	}
-	env, err := cs.buildEnvelope(tip, eff)
-	if err != nil {
-		slog.Error("cloud sync: fetch-relay envelope build failed", "tip", tip, "error", err)
+	if !cs.enqueueUpload(tip, eff, false) {
+		// Already pending means the request is scheduled or in flight. Any
+		// other failure means the vertex could not be pinned long enough for an
+		// asynchronous reply, so silence is the only safe response.
 		return
 	}
-	cs.mu.Lock()
-	cs.relayQ = append(cs.relayQ, env)
-	cs.mu.Unlock()
 	// The ask is the cloud stating outright that its chain is holed here, so
-	// send this effect's unsent history behind it rather than waiting to be
-	// asked one dep at a time down a chain we already hold whole.
-	cs.expandAncestry(eff)
+	// prioritize this effect behind its unsent history rather than waiting to
+	// be asked one dep at a time down a chain we already hold whole.
+	deps := cs.expandAncestry(eff)
+	cs.deferUploadBehind(tip, deps)
 	cs.wakeSender()
 }
 

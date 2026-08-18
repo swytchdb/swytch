@@ -580,10 +580,128 @@ func TestUnsentAncestryUploadsOldestFirst(t *testing.T) {
 			t.Fatalf("outbox ended after %d envelopes", len(got))
 		}
 		got = append(got, effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()})
+		cs.handleAck(&dp.WriteAck{Id: env.GetId(), Ok: true})
 	}
 	want := []effects.Tip{root, mid, ours}
 	if !slices.Equal(got, want) {
 		t.Fatalf("upload order = %v, want oldest-first %v", got, want)
+	}
+}
+
+// TestUnsentAncestryWaitsForParentAck covers the distinction between send
+// order and Cloud commit order. Cloud pipelines one stream through a shared
+// worker pool, so merely putting root before child on the wire still lets the
+// child's dependency check win the race. The child must remain queued until
+// the parent is durably ACKed.
+func TestUnsentAncestryWaitsForParentAck(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, oursEff := ancestrySync(t, engine)
+
+	cs.handleLocalEffect(ours, oursEff)
+	assertNext := func(want effects.Tip) *dp.Effect {
+		t.Helper()
+		env, ok := cs.nextEnvelope()
+		if !ok {
+			t.Fatalf("outbox ended before %v", want)
+		}
+		got := effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}
+		if got != want {
+			t.Fatalf("next upload = %v, want %v", got, want)
+		}
+		return env
+	}
+
+	rootEnv := assertNext(root)
+	if env, ok := cs.nextEnvelope(); ok {
+		t.Fatalf("uploaded %v before parent %v was ACKed", env.GetId(), root)
+	}
+	cs.handleAck(&dp.WriteAck{Id: rootEnv.GetId(), Ok: true})
+
+	midEnv := assertNext(mid)
+	if env, ok := cs.nextEnvelope(); ok {
+		t.Fatalf("uploaded %v before parent %v was ACKed", env.GetId(), mid)
+	}
+	cs.handleAck(&dp.WriteAck{Id: midEnv.GetId(), Ok: true})
+	assertNext(ours)
+}
+
+// TestUnsentAncestryReconnectOrderDoesNotStrand covers runStream rebuilding
+// sendQ from a map in arbitrary order. If the last item inspected discovers a
+// deeper ancestor, that newly queued work must remain in the current scan;
+// there is no ACK yet to wake another one.
+func TestUnsentAncestryReconnectOrderDoesNotStrand(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, oursEff := ancestrySync(t, engine)
+
+	cs.handleLocalEffect(ours, oursEff)
+	cs.mu.Lock()
+	cs.sendQ = []effects.Tip{ours, mid}
+	cs.mu.Unlock()
+
+	env, ok := cs.nextEnvelope()
+	if !ok {
+		t.Fatal("adverse reconnect order stranded newly discovered ancestry")
+	}
+	if got := (effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}); got != root {
+		t.Fatalf("first upload after reconnect = %v, want root %v", got, root)
+	}
+}
+
+// TestFetchReplyUsesAckGatedOutbox ensures a Cloud-requested peer effect takes
+// the same pinned, retryable path as a local upload. Sending a prebuilt relay
+// ahead of its ancestry would let Cloud's worker pool NACK it permanently.
+func TestFetchReplyUsesAckGatedOutbox(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, root, mid, ours, _ := ancestrySync(t, engine)
+
+	cs.handleFetch(&dp.FetchRequest{Ref: &dp.EffectRef{NodeId: ours[0], Offset: ours[1]}})
+	assertNext := func(want effects.Tip) *dp.Effect {
+		t.Helper()
+		env, ok := cs.nextEnvelope()
+		if !ok {
+			t.Fatalf("fetch outbox ended before %v", want)
+		}
+		got := effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}
+		if got != want {
+			t.Fatalf("next fetch upload = %v, want %v", got, want)
+		}
+		return env
+	}
+
+	rootEnv := assertNext(root)
+	if _, ok := cs.nextEnvelope(); ok {
+		t.Fatal("fetch reply advanced before root ACK")
+	}
+	cs.handleAck(&dp.WriteAck{Id: rootEnv.GetId(), Ok: true})
+
+	midEnv := assertNext(mid)
+	if _, ok := cs.nextEnvelope(); ok {
+		t.Fatal("fetch reply advanced before mid ACK")
+	}
+	cs.handleAck(&dp.WriteAck{Id: midEnv.GetId(), Ok: true})
+
+	oursEnv := assertNext(ours)
+	cs.handleAck(&dp.WriteAck{Id: oursEnv.GetId(), Ok: true})
+	cs.mu.Lock()
+	pending := len(cs.pending)
+	cs.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("fetch outbox retained %d effects after ACKs", pending)
 	}
 }
 
