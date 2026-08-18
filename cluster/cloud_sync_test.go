@@ -387,6 +387,29 @@ func TestSubscriptionMintDoesNotOpenGate(t *testing.T) {
 	}
 }
 
+func TestDiscoverySkipsOnlyDependencyLessSubscriptions(t *testing.T) {
+	plainSub := &pb.Effect{
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{}},
+	}
+	unsub := &pb.Effect{
+		Deps: []*pb.EffectRef{{NodeId: 7, Offset: 3}},
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+			Unsubscribe: true,
+		}},
+	}
+	data := &pb.Effect{Kind: &pb.Effect_Data{Data: &pb.DataEffect{}}}
+
+	if !discoverySkipsTip(plainSub) {
+		t.Fatal("dependency-less subscription must not keep the LCA queue open")
+	}
+	if discoverySkipsTip(unsub) {
+		t.Fatal("unsubscribe dependencies must remain reachable from the cloud frontier")
+	}
+	if discoverySkipsTip(data) {
+		t.Fatal("data tip was mistaken for subscription metadata")
+	}
+}
+
 // TestCloudTipsGatedSkipsRPC: a filter-negative CloudTips returns nil without
 // touching the network — the nil client proves it, since any RPC attempt
 // would panic.

@@ -1006,6 +1006,15 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 	return MarshalEffectWire(eff)
 }
 
+// discoverySkipsTip reports whether an initial cloud frontier tip is metadata
+// with no ancestry to walk. Dependency-less subscriptions accumulate as
+// permanent tips and must not keep the LCA queue open. An unsubscribe carries
+// the tips it consumed as deps, however, so it must enter the walk even though
+// ReduceChain later ignores the subscription effect itself.
+func discoverySkipsTip(eff *pb.Effect) bool {
+	return eff.GetSubscription() != nil && len(eff.GetDeps()) == 0
+}
+
 // DiscoverMembers reads the membership roster from the cloud for peer
 // discovery: GetTips names the frontier and delivers the closure effects
 // inline, and ReduceBranch — the real reducer — produces the roster.
@@ -1062,11 +1071,12 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		}
 	}
 	// Pre-resolve initial tips and filter subscriptions before the BFS.
-	// Subscription effects are dep-less metadata that accumulate as permanent
-	// frontier entries. Enqueueing them alongside data tips defeats the LCA
-	// rule: a state-carrying snapshot dequeued while subscription tips are
-	// still queued fails the len(queue)==0 gate. Data effects never depend on
-	// subscriptions (flushTx skips them), so filtering here is complete.
+	// Dependency-less subscription effects are metadata that accumulate as
+	// permanent frontier entries. Enqueueing them alongside data tips defeats
+	// the LCA rule: a state-carrying snapshot dequeued while subscription tips
+	// are still queued fails the len(queue)==0 gate. Dependency-bearing
+	// unsubscribes are different: their deps are the dropped tips they consumed,
+	// so the walk must traverse them; ReduceChain skips the subscription itself.
 	for _, t := range initialTips {
 		if _, ok := sidecar[t]; !ok {
 			eff, err := cs.fetchEffect(ctx, t)
@@ -1075,7 +1085,7 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 			}
 			sidecar[t] = eff
 		}
-		if sidecar[t].GetSubscription() != nil {
+		if discoverySkipsTip(sidecar[t]) {
 			visited[t] = true
 			continue
 		}

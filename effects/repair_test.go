@@ -273,7 +273,7 @@ func TestRepairCloudFrontierKeepsForkChoiceWinnerAcrossSiblingRepairs(t *testing
 		Key:            []byte("k"),
 		Hlc:            hlc,
 		ForkChoiceHash: ComputeForkChoiceHash(7777, hlc),
-		Deps:           []*pb.EffectRef{toPbRef(Tip{55555, 9})},
+		Deps:           []*pb.EffectRef{toPbRef(Tip{55555, 3})},
 		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
 			Collection: pb.CollectionKind_SCALAR,
 			State: &pb.ReducedEffect{
