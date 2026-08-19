@@ -20,7 +20,9 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -429,6 +431,31 @@ func TestDiscoverySkipsOnlyDependencyLessSubscriptions(t *testing.T) {
 	}
 }
 
+func TestReduceCandidateForkWinnerRejectsIndependentlyHoledBranch(t *testing.T) {
+	readable := effects.Tip{7, 1}
+	holed := effects.Tip{8, 1}
+	readableEff := &pb.Effect{
+		ForkChoiceHash: make([]byte, 32),
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: &pb.ReducedEffect{
+			Collection: pb.CollectionKind_SCALAR,
+		}}},
+	}
+	load := func(tip effects.Tip) (*pb.Effect, error) {
+		if tip == readable {
+			return readableEff, nil
+		}
+		return nil, fmt.Errorf("fetch %v: %w", tip, effects.ErrCDNBlobMissing)
+	}
+
+	state, _, ok, err := reduceCandidateForkWinner([]effects.Tip{readable, holed}, load)
+	if err != nil {
+		t.Fatalf("candidate fork choice: %v", err)
+	}
+	if ok || state != nil {
+		t.Fatalf("independently holed branch was discarded as a fork loser: ok=%v state=%v", ok, state)
+	}
+}
+
 // TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict pins the
 // Cloud tips contract: returned refs are marker candidates, not authoritative
 // logical tips. A stale marker whose blob is gone must not poison discovery
@@ -487,6 +514,72 @@ func TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict(t *testin
 	}
 	if missingFetches != 1 {
 		t.Fatalf("missing stale marker fetched %d times, want one normalization probe", missingFetches)
+	}
+}
+
+func TestDiscoverMembersUsesForkChoiceForReadableSiblingCandidates(t *testing.T) {
+	enc, err := effects.NewEncryptorFromIKM([]byte("candidate-fork-test-ikm"))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	hole := effects.Tip{99, 1}
+	winner := effects.Tip{100, 2}
+	loser := effects.Tip{101, 2}
+	snapshot := func(value string, forkHash []byte) *pb.Effect {
+		return &pb.Effect{
+			Key:            []byte("__swytch:members"),
+			ForkChoiceHash: forkHash,
+			Deps:           []*pb.EffectRef{{NodeId: hole[0], Offset: hole[1]}},
+			Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: &pb.ReducedEffect{
+				Collection: pb.CollectionKind_SCALAR,
+				Scalar: &pb.DataEffect{
+					Collection: pb.CollectionKind_SCALAR,
+					Value:      &pb.DataEffect_Raw{Raw: []byte(value)},
+				},
+			}}},
+		}
+	}
+	winnerEff := snapshot("winner", make([]byte, 32))
+	loserEff := snapshot("loser", bytes.Repeat([]byte{0xff}, 32))
+	cs := &CloudSync{
+		enc:        enc,
+		keyNameKey: DeriveKeyNameKey("candidate-fork-test-secret"),
+		folder:     "test-folder",
+	}
+	winnerEnv, err := cs.buildEnvelope(winner, winnerEff)
+	if err != nil {
+		t.Fatalf("build winner envelope: %v", err)
+	}
+	loserEnv, err := cs.buildEnvelope(loser, loserEff)
+	if err != nil {
+		t.Fatalf("build loser envelope: %v", err)
+	}
+	cs.client = &staticTipsClient{response: &dp.GetTipsResponse{Keys: []*dp.KeyTips{{
+		Tips: []*dp.EffectRef{
+			{NodeId: winner[0], Offset: winner[1]},
+			{NodeId: loser[0], Offset: loser[1]},
+		},
+		Closure: []*dp.Effect{winnerEnv, loserEnv},
+	}}}}
+	missingFetches := 0
+	cs.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		missingFetches++
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	got, err := cs.DiscoverMembers(context.Background(), "__swytch:members")
+	if err != nil {
+		t.Fatalf("discover members: %v", err)
+	}
+	if got == nil || got.GetScalar() == nil || string(got.GetScalar().GetRaw()) != "winner" {
+		t.Fatalf("discovered state = %v, want fork-choice winner", got)
+	}
+	if missingFetches != 2 {
+		t.Fatalf("shared hole fetched %d times, want normalization plus joint-frontier proof", missingFetches)
 	}
 }
 

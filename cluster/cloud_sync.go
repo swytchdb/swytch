@@ -1100,14 +1100,6 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	// reducing a truncated sub-DAG resurrects any member whose REMOVE was cut
 	// while its INSERT survived, and the cluster then redials the dead.
 	sidecar := map[effects.Tip]*pb.Effect{}
-	visited := map[effects.Tip]bool{}
-	var queue []effects.Tip
-	enqueue := func(t effects.Tip) {
-		if !visited[t] {
-			visited[t] = true
-			queue = append(queue, t)
-		}
-	}
 	var initialTips []effects.Tip
 	for _, kt := range resp.GetKeys() {
 		for _, ce := range cs.peelSidecar(kt) {
@@ -1142,6 +1134,47 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	if len(superseded) > 0 {
 		slog.Info("cloud discover: normalized candidate markers to real tips",
 			"candidates", candidateCount, "real_tips", len(initialTips), "superseded", len(superseded))
+	}
+
+	reduced, err := reduceDiscoveredTips(initialTips, load)
+	if err == nil {
+		return reduced, nil
+	}
+	if !errors.Is(err, effects.ErrCDNBlobMissing) {
+		return nil, err
+	}
+
+	// Concurrent repair snapshots are sibling maximal candidates. Each branch
+	// is independently readable because its state snapshot is the branch LCA,
+	// but walking all siblings together keeps the queue open at every snapshot
+	// and descends into the shared hole. That does not make the logical frontier
+	// unreadable: normal fork choice selects one branch. Consolidating the raw
+	// markers with another snapshot is cleanup and must not block bootstrap.
+	winnerState, winner, ok, winnerErr := reduceCandidateForkWinner(initialTips, load)
+	if winnerErr != nil {
+		return nil, winnerErr
+	}
+	if ok {
+		slog.Warn("cloud discover: candidate branches unreadable together; using fork-choice winner",
+			"winner", winner, "discarded", len(initialTips)-1)
+		return winnerState, nil
+	}
+	return nil, err
+}
+
+type cloudEffectLoader func(effects.Tip) (*pb.Effect, error)
+
+// reduceDiscoveredTips reconstructs one normalized candidate frontier without
+// mutating the engine. A missing blob remains an error; the caller decides
+// whether independently readable sibling candidates make fork choice possible.
+func reduceDiscoveredTips(initialTips []effects.Tip, load cloudEffectLoader) (*pb.ReducedEffect, error) {
+	visited := map[effects.Tip]bool{}
+	var queue []effects.Tip
+	enqueue := func(t effects.Tip) {
+		if !visited[t] {
+			visited[t] = true
+			queue = append(queue, t)
+		}
 	}
 
 	// Pre-resolve the real tips and filter subscriptions before the BFS.
@@ -1218,6 +1251,44 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 		delete(fetched, lcaTip)
 	}
 	return effects.ReduceChain(seed, topoOrder(fetched)), nil
+}
+
+// reduceCandidateForkWinner proves every state-bearing candidate branch is
+// readable alone, then returns the normal fork-choice winner's reduced state.
+// A single independently holed branch means the frontier genuinely needs
+// repair; a transport failure is returned so it cannot be mistaken for a
+// durable hole.
+func reduceCandidateForkWinner(tips []effects.Tip, load cloudEffectLoader) (*pb.ReducedEffect, effects.Tip, bool, error) {
+	var winner effects.Tip
+	var winnerEff *pb.Effect
+	var winnerState *pb.ReducedEffect
+	candidates := 0
+	for _, tip := range tips {
+		eff, err := load(tip)
+		if err != nil {
+			if errors.Is(err, effects.ErrCDNBlobMissing) {
+				return nil, effects.Tip{}, false, nil
+			}
+			return nil, effects.Tip{}, false, err
+		}
+		if discoverySkipsTip(eff) {
+			continue
+		}
+		state, err := reduceDiscoveredTips([]effects.Tip{tip}, load)
+		if err != nil {
+			if errors.Is(err, effects.ErrCDNBlobMissing) {
+				return nil, effects.Tip{}, false, nil
+			}
+			return nil, effects.Tip{}, false, err
+		}
+		candidates++
+		if winnerEff == nil || effects.ForkChoiceLess(eff.GetForkChoiceHash(), winnerEff.GetForkChoiceHash()) {
+			winner = tip
+			winnerEff = eff
+			winnerState = state
+		}
+	}
+	return winnerState, winner, candidates > 1, nil
 }
 
 // trimAncestry deletes from fetched every effect in the transitive
