@@ -485,10 +485,8 @@ func TestBuildEnvelopeDeclaresRawSize(t *testing.T) {
 	}
 }
 
-// ancestrySync builds a CloudSync over a peer chain root <- mid with one local
-// mint on top, where only the mint reaches OnLocalEffect. The peer that
-// authored root and mid is, as far as this node can tell, never going to
-// upload them.
+// ancestrySync builds a CloudSync over a locally-authored chain root <- mid <-
+// ours, where only the newest mint reaches OnLocalEffect.
 func ancestrySync(t *testing.T, engine *effects.Engine) (*CloudSync, effects.Tip, effects.Tip, effects.Tip, *pb.Effect) {
 	t.Helper()
 	enc, err := effects.NewEncryptorFromIKM([]byte("ancestry-test-ikm"))
@@ -504,7 +502,8 @@ func ancestrySync(t *testing.T, engine *effects.Engine) (*CloudSync, effects.Tip
 		wake:        make(chan struct{}, 1),
 	}
 
-	root, mid, ours := effects.Tip{7, 1}, effects.Tip{7, 2}, effects.Tip{1, 3}
+	localNode := uint64(engine.NodeID())
+	root, mid, ours := effects.Tip{localNode, 1}, effects.Tip{localNode, 2}, effects.Tip{localNode, 3}
 	rootEff := &pb.Effect{Key: []byte("k")}
 	midEff := &pb.Effect{Key: []byte("k"), Deps: []*pb.EffectRef{{NodeId: root[0], Offset: root[1]}}}
 	oursEff := &pb.Effect{Key: []byte("k"), Deps: []*pb.EffectRef{{NodeId: mid[0], Offset: mid[1]}}}
@@ -514,13 +513,8 @@ func ancestrySync(t *testing.T, engine *effects.Engine) (*CloudSync, effects.Tip
 	return cs, root, mid, ours, oursEff
 }
 
-// TestUnsentAncestryUploads: the cloud only ever receives what a node mints, so
-// a mint whose deps were authored by a peer that never uploaded them lands in
-// the cloud as a dangling reference — permanently, since nothing re-asks and a
-// bootstrapping node's walk over the cloud frontier dies on the missing blob.
-// An upload therefore carries its unsent history: the mint's deps go out with
-// it, and each expands again as it is sent, out to the first effect the cloud
-// already holds.
+// TestUnsentAncestryUploads verifies that a local mint carries the locally-
+// authored history Cloud may not have seen yet.
 func TestUnsentAncestryUploads(t *testing.T) {
 	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
 	defer func() {
@@ -556,6 +550,52 @@ func TestUnsentAncestryUploads(t *testing.T) {
 	got := cs.pendingTipsFor("k")
 	if len(got) != 1 || got[0] != ours {
 		t.Fatalf("outbox frontier on k = %v, want only the local mint %v", got, ours)
+	}
+}
+
+func TestForeignDependenciesRequireExplicitCloudFetch(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	cs, _, _, ours, oursEff := ancestrySync(t, engine)
+	foreignNode := uint64(engine.NodeID()) ^ 1
+	foreignRoot := effects.Tip{foreignNode, 1}
+	foreignDep := effects.Tip{foreignNode, 2}
+	rootEff := &pb.Effect{Key: []byte("k")}
+	depEff := &pb.Effect{Key: []byte("k"), Deps: []*pb.EffectRef{{NodeId: foreignRoot[0], Offset: foreignRoot[1]}}}
+	engine.EffectCache().PutSized(foreignRoot, rootEff, 64)
+	engine.EffectCache().PutSized(foreignDep, depEff, 64)
+	oursEff.Deps = []*pb.EffectRef{{NodeId: foreignDep[0], Offset: foreignDep[1]}}
+
+	cs.handleLocalEffect(ours, oursEff)
+	if _, queued := cs.pending[foreignDep]; queued {
+		t.Fatal("foreign dependency entered the outbox without a Cloud fetch")
+	}
+	if _, queued := cs.pending[foreignRoot]; queued {
+		t.Fatal("foreign ancestry entered the outbox without a Cloud fetch")
+	}
+	if env, ok := cs.nextEnvelope(); !ok {
+		t.Fatal("local mint was not queued")
+	} else if got := (effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}); got != ours {
+		t.Fatalf("first upload = %v, want local mint %v", got, ours)
+	}
+
+	cs.handleFetch(&dp.FetchRequest{Ref: &dp.EffectRef{NodeId: foreignDep[0], Offset: foreignDep[1]}})
+	if _, queued := cs.pending[foreignDep]; !queued {
+		t.Fatal("explicitly requested foreign dependency did not enter the outbox")
+	}
+	env, ok := cs.nextEnvelope()
+	if !ok {
+		t.Fatal("explicitly requested foreign dependency was not sent")
+	}
+	if got := (effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}); got != foreignDep {
+		t.Fatalf("fetch reply = %v, want exactly %v", got, foreignDep)
+	}
+	if _, queued := cs.pending[foreignRoot]; queued {
+		t.Fatal("fetch reply recursively queued a dependency Cloud did not request")
 	}
 }
 
@@ -657,9 +697,9 @@ func TestUnsentAncestryReconnectOrderDoesNotStrand(t *testing.T) {
 	}
 }
 
-// TestFetchReplyUsesAckGatedOutbox ensures a Cloud-requested peer effect takes
-// the same pinned, retryable path as a local upload. Sending a prebuilt relay
-// ahead of its ancestry would let Cloud's worker pool NACK it permanently.
+// TestFetchReplyUsesAckGatedOutbox ensures a Cloud-requested effect takes the
+// pinned, retryable path but does not recursively queue refs Cloud did not ask
+// for. The dataplane lands the requested repair and asks for deeper holes itself.
 func TestFetchReplyUsesAckGatedOutbox(t *testing.T) {
 	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
 	defer func() {
@@ -683,19 +723,13 @@ func TestFetchReplyUsesAckGatedOutbox(t *testing.T) {
 		return env
 	}
 
-	rootEnv := assertNext(root)
-	if _, ok := cs.nextEnvelope(); ok {
-		t.Fatal("fetch reply advanced before root ACK")
-	}
-	cs.handleAck(&dp.WriteAck{Id: rootEnv.GetId(), Ok: true})
-
-	midEnv := assertNext(mid)
-	if _, ok := cs.nextEnvelope(); ok {
-		t.Fatal("fetch reply advanced before mid ACK")
-	}
-	cs.handleAck(&dp.WriteAck{Id: midEnv.GetId(), Ok: true})
-
 	oursEnv := assertNext(ours)
+	if _, queued := cs.pending[mid]; queued {
+		t.Fatal("fetch reply recursively queued its direct dependency")
+	}
+	if _, queued := cs.pending[root]; queued {
+		t.Fatal("fetch reply recursively queued deeper ancestry")
+	}
 	cs.handleAck(&dp.WriteAck{Id: oursEnv.GetId(), Ok: true})
 	cs.mu.Lock()
 	pending := len(cs.pending)
