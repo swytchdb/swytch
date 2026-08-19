@@ -679,6 +679,56 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 // can only dep-reference chains it holds — so returning an error would fail
 // every read and reconcile of the key forever. Repair instead.
 func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
+	readable, holed, err := e.classifyCloudTips(key, tips, sidecar)
+	if err != nil {
+		return err
+	}
+	if len(holed) == 0 {
+		e.installTips(key, tips)
+		return nil
+	}
+	// Readable tips stay un-installed until the repair folds them into the
+	// snapshot: installing them first and then failing would leave partial
+	// state posing as the whole answer.
+	return e.RepairCloudFrontier(key, readable, holed)
+}
+
+// RepairCloudTips classifies a Cloud frontier after discovery proved that at
+// least one path is holed, then repairs only when the current frontier still
+// contains a durable hole. Readable sibling branches are folded into the repair
+// snapshot instead of being discarded. A concurrently healed frontier is left
+// uninstalled: membership discovery must not pre-load Cloud state into the
+// engine before the normal peer bootstrap path runs.
+func (e *Engine) RepairCloudTips(key string, tips []Tip, sidecar []CloudEffect) (bool, error) {
+	readable, holed, err := e.classifyCloudTips(key, tips, sidecar)
+	if err != nil {
+		return false, err
+	}
+	if len(holed) == 0 {
+		return false, nil
+	}
+	// Dependency-less subscriptions are frontier metadata, not state branches.
+	// Including one beside a state snapshot defeats the walk's empty-queue LCA
+	// stop and can force reconstruction beneath that snapshot into the very hole
+	// being repaired. Consume these tips, but never reduce them as preserved
+	// state—the same rule membership discovery applies to its initial frontier.
+	preserved := readable[:0]
+	consumeOnly := append([]Tip(nil), holed...)
+	for _, tip := range readable {
+		eff, getErr := e.getEffect(key, tip)
+		if getErr == nil && eff.GetSubscription() != nil && len(eff.GetDeps()) == 0 {
+			consumeOnly = append(consumeOnly, tip)
+			continue
+		}
+		preserved = append(preserved, tip)
+	}
+	if err := e.RepairCloudFrontier(key, preserved, consumeOnly); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (e *Engine) classifyCloudTips(key string, tips []Tip, sidecar []CloudEffect) (readable, holed []Tip, err error) {
 	// Warm the cache with the closure effects GetTips delivered inline, so the
 	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
 	// owned-vs-cache routing as every other ingest path; stragglers the
@@ -691,7 +741,6 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 			e.putIngested(ce.Tip, ce.Eff, ce.ProtoLen)
 		}
 	}
-	var readable, holed []Tip
 	for _, tip := range tips {
 		rd := newDag(e, key, "")
 		walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil })
@@ -701,20 +750,13 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 		case errors.Is(walkErr, ErrCDNBlobMissing):
 			holed = append(holed, tip)
 		default:
-			slog.Warn("cloud tip install: tip unreachable; installing nothing",
+			slog.Warn("cloud tip classification: tip unreachable; changing nothing",
 				"key", key, "tip", tip, "error", walkErr)
-			return fmt.Errorf("%w: tip %v unreachable for %q: %w",
+			return nil, nil, fmt.Errorf("%w: tip %v unreachable for %q: %w",
 				ErrCloudUnavailable, tip, key, walkErr)
 		}
 	}
-	if len(holed) == 0 {
-		e.installTips(key, tips)
-		return nil
-	}
-	// Readable tips stay un-installed until the repair folds them into the
-	// snapshot: installing them first and then failing would leave partial
-	// state posing as the whole answer.
-	return e.RepairCloudFrontier(key, readable, holed)
+	return readable, holed, nil
 }
 
 // RepairCloudFrontier supersedes a Cloud tip frontier whose ancestry is
@@ -758,11 +800,21 @@ func (e *Engine) RepairCloudFrontier(key string, readable, holed []Tip) error {
 
 	reduceTips := make([]Tip, 0, len(localTips)+len(readable))
 	seenReduce := make(map[Tip]struct{}, len(localTips)+len(readable))
+	isMetadataTip := func(t Tip) bool {
+		eff, err := e.getEffect(key, t)
+		return err == nil && eff.GetSubscription() != nil && len(eff.GetDeps()) == 0
+	}
 	for _, t := range localTips {
+		if isMetadataTip(t) {
+			continue
+		}
 		seenReduce[t] = struct{}{}
 		reduceTips = append(reduceTips, t)
 	}
 	for _, t := range readable {
+		if isMetadataTip(t) {
+			continue
+		}
 		if _, dup := seenReduce[t]; !dup {
 			seenReduce[t] = struct{}{}
 			reduceTips = append(reduceTips, t)

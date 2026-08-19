@@ -1230,10 +1230,11 @@ func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
 // it failed with ErrCDNBlobMissing: the frontier references ancestry whose
 // blobs are gone from cloud storage, no retry can heal it, and no normal write
 // ever consumes it (a node cannot dep-reference a chain it cannot fetch).
-// GetTips names the current frontier and the engine mints the superseding
-// snapshot; when its upload lands, the cloud consumes every frontier tip out
-// of the tips record. Returns the number of tips superseded (0 = frontier
-// already empty, nothing to repair).
+// GetTips names the current frontier and supplies its closure sidecar. The
+// engine re-walks each tip independently, folds readable siblings into the
+// superseding snapshot, and dep-names only genuinely holed branches as lost.
+// When the snapshot lands, Cloud consumes the old frontier. Returns the number
+// of tips superseded (0 = empty or concurrently healed, nothing to repair).
 func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
 	defer cancel()
@@ -1245,7 +1246,9 @@ func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error
 		return 0, fmt.Errorf("cloud repair: get tips for %q: %w", key, err)
 	}
 	var frontier []effects.Tip
+	var sidecar []effects.CloudEffect
 	for _, kt := range resp.GetKeys() {
+		sidecar = append(sidecar, cs.peelSidecar(kt)...)
 		for _, ref := range kt.GetTips() {
 			frontier = append(frontier, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
@@ -1253,8 +1256,12 @@ func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error
 	if len(frontier) == 0 {
 		return 0, nil
 	}
-	if err := cs.engine.RepairCloudFrontier(key, nil, frontier); err != nil {
+	repaired, err := cs.engine.RepairCloudTips(key, frontier, sidecar)
+	if err != nil {
 		return 0, err
+	}
+	if !repaired {
+		return 0, nil
 	}
 	return len(frontier), nil
 }

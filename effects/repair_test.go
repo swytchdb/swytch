@@ -243,6 +243,133 @@ func TestInstallCloudTipsPreservesReadableSiblings(t *testing.T) {
 	}
 }
 
+func TestRepairCloudTipsPreservesReadableSiblings(t *testing.T) {
+	e := newTxnTestEngine(&holedFetchBroadcaster{})
+	defer func() { _ = e.Close() }()
+
+	hlc := timestamppb.New(time.Now())
+	readableTip := Tip{2222, 1}
+	readableEff := &pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            hlc,
+		ForkChoiceHash: ComputeForkChoiceHash(2222, hlc),
+		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+			Op:         pb.EffectOp_INSERT_OP,
+			Merge:      pb.MergeRule_LAST_WRITE_WINS,
+			Collection: pb.CollectionKind_SCALAR,
+			Value:      &pb.DataEffect_Raw{Raw: []byte("preserved")},
+		}},
+	}
+	holedTip := Tip{54321, 7}
+	sidecar := []CloudEffect{{Tip: readableTip, Eff: readableEff, ProtoLen: proto.Size(readableEff)}}
+
+	repaired, err := e.RepairCloudTips("k", []Tip{readableTip, holedTip}, sidecar)
+	if err != nil {
+		t.Fatalf("repair cloud tips: %v", err)
+	}
+	if !repaired {
+		t.Fatal("holed frontier was not repaired")
+	}
+	snap := requireRepairedFrontier(t, e, "k")
+	requireDep(t, snap, readableTip)
+	requireDep(t, snap, holedTip)
+
+	result, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatalf("post-repair read: %v", err)
+	}
+	if result == nil || result.Scalar == nil || string(result.Scalar.GetRaw()) != "preserved" {
+		t.Fatalf("post-repair state = %v, want readable sibling state %q", result, "preserved")
+	}
+}
+
+func TestRepairCloudTipsLeavesHealedFrontierUninstalled(t *testing.T) {
+	e := newTxnTestEngine(&holedFetchBroadcaster{})
+	defer func() { _ = e.Close() }()
+
+	hlc := timestamppb.New(time.Now())
+	tip := Tip{3333, 1}
+	eff := &pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            hlc,
+		ForkChoiceHash: ComputeForkChoiceHash(3333, hlc),
+		Kind:           &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
+	}
+	sidecar := []CloudEffect{{Tip: tip, Eff: eff, ProtoLen: proto.Size(eff)}}
+
+	repaired, err := e.RepairCloudTips("k", []Tip{tip}, sidecar)
+	if err != nil {
+		t.Fatalf("classify healed frontier: %v", err)
+	}
+	if repaired {
+		t.Fatal("healthy frontier was unnecessarily repaired")
+	}
+	if got := e.index.Contains("k"); got != nil {
+		t.Fatalf("healthy discovery frontier was installed before peer bootstrap: %v", got.Tips())
+	}
+}
+
+func TestRepairCloudTipsConsumesSubscriptionMetadataWithoutDefeatingSnapshotLCA(t *testing.T) {
+	e := newTxnTestEngine(&holedFetchBroadcaster{})
+	defer func() { _ = e.Close() }()
+
+	hlc := timestamppb.New(time.Now())
+	foldedHole := Tip{4444, 1}
+	snapshotTip := Tip{4444, 2}
+	snapshotEff := &pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            hlc,
+		ForkChoiceHash: bytes.Repeat([]byte{0xff}, 32),
+		Deps:           []*pb.EffectRef{toPbRef(foldedHole)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{
+			Collection: pb.CollectionKind_SCALAR,
+			State: &pb.ReducedEffect{
+				Collection: pb.CollectionKind_SCALAR,
+				Scalar: &pb.DataEffect{
+					Op:         pb.EffectOp_INSERT_OP,
+					Merge:      pb.MergeRule_LAST_WRITE_WINS,
+					Collection: pb.CollectionKind_SCALAR,
+					Value:      &pb.DataEffect_Raw{Raw: []byte("snapshot-state")},
+				},
+			},
+		}},
+	}
+	subTip := Tip{5555, 1}
+	subEff := &pb.Effect{
+		Key:            []byte("k"),
+		Hlc:            hlc,
+		ForkChoiceHash: make([]byte, 32),
+		Kind: &pb.Effect_Subscription{Subscription: &pb.SubscriptionEffect{
+			SubscriberNodeId: 5555,
+		}},
+	}
+	triggerHole := Tip{6666, 1}
+	sidecar := []CloudEffect{
+		{Tip: snapshotTip, Eff: snapshotEff, ProtoLen: proto.Size(snapshotEff)},
+		{Tip: subTip, Eff: subEff, ProtoLen: proto.Size(subEff)},
+	}
+
+	repaired, err := e.RepairCloudTips("k", []Tip{snapshotTip, subTip, triggerHole}, sidecar)
+	if err != nil {
+		t.Fatalf("repair mixed membership frontier: %v", err)
+	}
+	if !repaired {
+		t.Fatal("mixed frontier was not repaired")
+	}
+	snap := requireRepairedFrontier(t, e, "k")
+	requireDep(t, snap, snapshotTip)
+	requireDep(t, snap, subTip)
+	requireDep(t, snap, triggerHole)
+
+	result, _, _, err := e.GetSnapshot("k")
+	if err != nil {
+		t.Fatalf("post-repair read: %v", err)
+	}
+	if result == nil || result.Scalar == nil || string(result.Scalar.GetRaw()) != "snapshot-state" {
+		t.Fatalf("post-repair state = %v, want folded snapshot state", result)
+	}
+}
+
 // TestRepairCloudFrontierKeepsForkChoiceWinnerAcrossSiblingRepairs: two nodes
 // racing the repair each mint a sibling snapshot above the same hole. Each
 // chain reads alone (its own LCA stop holds) but the joint walk descends
