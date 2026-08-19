@@ -21,14 +21,33 @@ package cluster
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
 	dp "github.com/swytchdb/swytch/cluster/proto/dataplane"
 	"github.com/swytchdb/swytch/effects"
+	"google.golang.org/grpc"
 )
+
+type staticTipsClient struct {
+	dp.DataPlaneClient
+	response *dp.GetTipsResponse
+}
+
+func (c *staticTipsClient) GetTips(context.Context, *dp.GetTipsRequest, ...grpc.CallOption) (*dp.GetTipsResponse, error) {
+	return c.response, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // TestStopWaitsForInflightEnqueue pins the shutdown boundary: Stop must not
 // observe an empty outbox and cancel the sender while a synchronous local-mint
@@ -407,6 +426,67 @@ func TestDiscoverySkipsOnlyDependencyLessSubscriptions(t *testing.T) {
 	}
 	if discoverySkipsTip(data) {
 		t.Fatal("data tip was mistaken for subscription metadata")
+	}
+}
+
+// TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict pins the
+// Cloud tips contract: returned refs are marker candidates, not authoritative
+// logical tips. A stale marker whose blob is gone must not poison discovery
+// when a readable state snapshot candidate dep-references and supersedes it.
+func TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict(t *testing.T) {
+	enc, err := effects.NewEncryptorFromIKM([]byte("candidate-frontier-test-ikm"))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	stale := effects.Tip{77, 1}
+	real := effects.Tip{88, 2}
+	wantState := &pb.ReducedEffect{
+		Collection: pb.CollectionKind_SCALAR,
+		Scalar: &pb.DataEffect{
+			Collection: pb.CollectionKind_SCALAR,
+			Value:      &pb.DataEffect_Raw{Raw: []byte("membership-state")},
+		},
+	}
+	realEff := &pb.Effect{
+		Key:  []byte("__swytch:members"),
+		Deps: []*pb.EffectRef{{NodeId: stale[0], Offset: stale[1]}},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: wantState}},
+	}
+	cs := &CloudSync{
+		enc:        enc,
+		keyNameKey: DeriveKeyNameKey("candidate-frontier-test-secret"),
+		folder:     "test-folder",
+	}
+	realEnv, err := cs.buildEnvelope(real, realEff)
+	if err != nil {
+		t.Fatalf("build envelope: %v", err)
+	}
+	cs.client = &staticTipsClient{response: &dp.GetTipsResponse{Keys: []*dp.KeyTips{{
+		Tips: []*dp.EffectRef{
+			{NodeId: stale[0], Offset: stale[1]},
+			{NodeId: real[0], Offset: real[1]},
+		},
+		Closure: []*dp.Effect{realEnv},
+	}}}}
+	missingFetches := 0
+	cs.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		missingFetches++
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	got, err := cs.DiscoverMembers(context.Background(), "__swytch:members")
+	if err != nil {
+		t.Fatalf("discover members: %v", err)
+	}
+	if got == nil || got.GetScalar() == nil || string(got.GetScalar().GetRaw()) != "membership-state" {
+		t.Fatalf("discovered state = %v, want snapshot scalar %q", got, "membership-state")
+	}
+	if missingFetches != 1 {
+		t.Fatalf("missing stale marker fetched %d times, want one normalization probe", missingFetches)
 	}
 }
 

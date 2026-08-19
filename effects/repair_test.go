@@ -22,6 +22,7 @@ package effects
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,6 +30,98 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestNormalizeCloudTipCandidatesDropsMissingStaleMarker(t *testing.T) {
+	stale := Tip{111, 1}
+	realTip := Tip{222, 2}
+	realEff := &pb.Effect{Deps: []*pb.EffectRef{toPbRef(stale)}}
+
+	real, superseded, err := NormalizeCloudTipCandidates("k", []Tip{stale, realTip}, func(tip Tip) (*pb.Effect, error) {
+		if tip == realTip {
+			return realEff, nil
+		}
+		return nil, fmt.Errorf("fetch %v: %w", tip, ErrCDNBlobMissing)
+	})
+	if err != nil {
+		t.Fatalf("normalize candidates: %v", err)
+	}
+	if !slices.Equal(real, []Tip{realTip}) {
+		t.Fatalf("real tips = %v, want %v", real, []Tip{realTip})
+	}
+	if !slices.Equal(superseded, []Tip{stale}) {
+		t.Fatalf("superseded candidates = %v, want %v", superseded, []Tip{stale})
+	}
+}
+
+func TestRepairCloudTipsIgnoresMissingCandidateFoldedBySnapshot(t *testing.T) {
+	e := newTxnTestEngine(&holedFetchBroadcaster{})
+	defer func() { _ = e.Close() }()
+
+	stale := Tip{333, 1}
+	snapshotTip := Tip{444, 2}
+	snapshotEff := &pb.Effect{
+		Key:  []byte("k"),
+		Deps: []*pb.EffectRef{toPbRef(stale)},
+		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: &pb.ReducedEffect{
+			Subscribers: map[uint64]bool{99: true},
+		}}},
+	}
+	sidecar := []CloudEffect{{Tip: snapshotTip, Eff: snapshotEff, ProtoLen: proto.Size(snapshotEff)}}
+
+	repaired, err := e.RepairCloudTips("k", []Tip{stale, snapshotTip}, sidecar)
+	if err != nil {
+		t.Fatalf("repair cloud candidates: %v", err)
+	}
+	if repaired {
+		t.Fatal("missing non-maximal candidate triggered an unnecessary repair")
+	}
+	if got := e.index.Contains("k"); got != nil {
+		t.Fatalf("healthy normalized frontier was installed during discovery repair: %v", got.Tips())
+	}
+}
+
+func TestRepairCloudTipsRepairsJointlyUnreadableRealTips(t *testing.T) {
+	e := newTxnTestEngine(&holedFetchBroadcaster{})
+	defer func() { _ = e.Close() }()
+
+	hole := Tip{555, 1}
+	firstTip := Tip{666, 2}
+	secondTip := Tip{777, 2}
+	snapshot := func(value string, forkHash []byte) *pb.Effect {
+		return &pb.Effect{
+			Key:            []byte("k"),
+			ForkChoiceHash: forkHash,
+			Deps:           []*pb.EffectRef{toPbRef(hole)},
+			Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: &pb.ReducedEffect{
+				Collection: pb.CollectionKind_SCALAR,
+				Scalar: &pb.DataEffect{
+					Collection: pb.CollectionKind_SCALAR,
+					Value:      &pb.DataEffect_Raw{Raw: []byte(value)},
+				},
+			}}},
+		}
+	}
+	first := snapshot("winner", make([]byte, 32))
+	second := snapshot("loser", bytes.Repeat([]byte{0xff}, 32))
+	sidecar := []CloudEffect{
+		{Tip: firstTip, Eff: first, ProtoLen: proto.Size(first)},
+		{Tip: secondTip, Eff: second, ProtoLen: proto.Size(second)},
+	}
+
+	repaired, err := e.RepairCloudTips("k", []Tip{firstTip, secondTip}, sidecar)
+	if err != nil {
+		t.Fatalf("repair jointly unreadable tips: %v", err)
+	}
+	if !repaired {
+		t.Fatal("jointly unreadable real frontier was mistaken for healthy tips")
+	}
+	snap := requireRepairedFrontier(t, e, "k")
+	requireDep(t, snap, firstTip)
+	requireDep(t, snap, secondTip)
+	if got := string(snap.GetSnapshot().GetState().GetScalar().GetRaw()); got != "winner" {
+		t.Fatalf("repair snapshot state = %q, want fork-choice winner", got)
+	}
+}
 
 // holedFetchBroadcaster answers every fetch with the CDN-404 sentinel: any
 // offset not already in the engine's cache is a provable durable hole.

@@ -1062,8 +1062,9 @@ func discoverySkipsTip(eff *pb.Effect) bool {
 }
 
 // DiscoverMembers reads the membership roster from the cloud for peer
-// discovery: GetTips names the frontier and delivers the closure effects
-// inline, and ReduceBranch — the real reducer — produces the roster.
+// discovery: GetTips names candidate marker tips and delivers the closure
+// effects inline. The candidates are first reduced to the maximal tips of the
+// actual DAG, then ReduceBranch — the real reducer — produces the roster.
 // Deliberately zero engine interaction: pre-loading membership into the
 // engine makes this node non-divergent at subscription bootstrap, so peers
 // ACK instead of NACK and their key filters never arrive — free-read-misses
@@ -1116,7 +1117,34 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 			initialTips = append(initialTips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
 	}
-	// Pre-resolve initial tips and filter subscriptions before the BFS.
+	// Cloud's tips directory is a marker index, not an authoritative DAG
+	// frontier. A consumed marker can survive beside the newer candidate that
+	// references it, and its blob may later disappear. Walk all readable
+	// candidate ancestry first so such a marker is removed as non-maximal before
+	// a missing fetch is allowed to become a repair verdict.
+	load := func(t effects.Tip) (*pb.Effect, error) {
+		if eff, ok := sidecar[t]; ok {
+			return eff, nil
+		}
+		eff, err := cs.fetchEffect(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		sidecar[t] = eff
+		return eff, nil
+	}
+	candidateCount := len(initialTips)
+	var superseded []effects.Tip
+	initialTips, superseded, err = effects.NormalizeCloudTipCandidates(membershipKey, initialTips, load)
+	if err != nil {
+		return nil, fmt.Errorf("cloud discover: normalize candidate frontier: %w", err)
+	}
+	if len(superseded) > 0 {
+		slog.Info("cloud discover: normalized candidate markers to real tips",
+			"candidates", candidateCount, "real_tips", len(initialTips), "superseded", len(superseded))
+	}
+
+	// Pre-resolve the real tips and filter subscriptions before the BFS.
 	// Dependency-less subscription effects are metadata that accumulate as
 	// permanent frontier entries. Enqueueing them alongside data tips defeats
 	// the LCA rule: a state-carrying snapshot dequeued while subscription tips
@@ -1124,14 +1152,11 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	// unsubscribes are different: their deps are the dropped tips they consumed,
 	// so the walk must traverse them; ReduceChain skips the subscription itself.
 	for _, t := range initialTips {
-		if _, ok := sidecar[t]; !ok {
-			eff, err := cs.fetchEffect(ctx, t)
-			if err != nil {
-				return nil, fmt.Errorf("cloud discover: fetch %v: %w", t, err)
-			}
-			sidecar[t] = eff
+		eff, err := load(t)
+		if err != nil {
+			return nil, fmt.Errorf("cloud discover: fetch real tip %v: %w", t, err)
 		}
-		if discoverySkipsTip(sidecar[t]) {
+		if discoverySkipsTip(eff) {
 			visited[t] = true
 			continue
 		}
@@ -1146,16 +1171,12 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	for len(queue) > 0 {
 		tip := queue[0]
 		queue = queue[1:]
-		eff, ok := sidecar[tip]
-		if !ok {
-			var err error
-			eff, err = cs.fetchEffect(ctx, tip)
-			if err != nil {
-				// A skipped fetch drops the tip's whole dep subtree, which is
-				// the same partial-ancestry reduce as a truncated walk. Fail
-				// instead; the caller retries with backoff.
-				return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
-			}
+		eff, err := load(tip)
+		if err != nil {
+			// A skipped fetch drops the tip's whole dep subtree, which is
+			// the same partial-ancestry reduce as a truncated walk. Fail
+			// instead; the caller retries with backoff.
+			return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 		}
 		fetched[tip] = eff
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
@@ -1226,15 +1247,16 @@ func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
 	}
 }
 
-// RepairFrontier supersedes the cloud's tip frontier for key after a walk over
-// it failed with ErrCDNBlobMissing: the frontier references ancestry whose
+// RepairFrontier supersedes the cloud's candidate frontier for key after a
+// walk over its normalized real tips failed with ErrCDNBlobMissing: the DAG
+// references ancestry whose
 // blobs are gone from cloud storage, no retry can heal it, and no normal write
 // ever consumes it (a node cannot dep-reference a chain it cannot fetch).
 // GetTips names the current frontier and supplies its closure sidecar. The
-// engine re-walks each tip independently, folds readable siblings into the
-// superseding snapshot, and dep-names only genuinely holed branches as lost.
-// When the snapshot lands, Cloud consumes the old frontier. Returns the number
-// of tips superseded (0 = empty or concurrently healed, nothing to repair).
+// engine reconstructs the maximal tips, folds readable siblings into the
+// superseding snapshot, and dep-names all candidate markers so Cloud consumes
+// the stale index entries too. Returns the number of markers superseded (0 =
+// empty or concurrently healed, nothing to repair).
 func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
 	defer cancel()
