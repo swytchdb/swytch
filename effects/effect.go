@@ -622,32 +622,113 @@ const cloudTipsBackstop = 60 * time.Second
 var ErrCloudUnavailable = errors.New("cloud unavailable")
 
 // ErrCDNBlobMissing marks a CDN fetch that answered 404: the blob is provably
-// absent from cloud storage, as opposed to the cloud being unreachable. A
-// frontier walk failing with this is a durable hole — retrying cannot heal it,
-// only RepairCloudFrontier can. The cluster layer wraps CDN 404s with it.
+// absent from cloud storage, as opposed to the cloud being unreachable. Cloud
+// tip markers are candidates, never an authoritative frontier — a node builds
+// its own truth by walking the DAG it can actually read — so a hole under
+// this sentinel is not this engine's to repair. classifyCloudTips reports the
+// holed tip as pending; the cluster layer's reconcile loop retries it, and
+// Cloud's own billing sweep is what eventually heals or prunes the marker.
 var ErrCDNBlobMissing = errors.New("cdn blob missing")
 
-// hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks Cloud
-// for key's tip frontier and installs it into the index (pulling blobs via
-// FetchFromAny → CDN), so a subsequent reconstruct finds the key locally and
-// the cluster owns it thereafter. installed reports whether the frontier
-// landed in the index; consulted reports whether Cloud gave a complete
-// answer — including "holds nothing" — so GetSnapshot can mark the leaf as
-// authoritative and stop re-consulting for a key whose state reduces to nil.
+// NormalizeCloudTipCandidates reduces Cloud's marker candidates to the
+// maximal tips of the effect DAG. Cloud's tips directory is an index: stale
+// markers can remain after a newer effect has dep-referenced them, so callers
+// must not treat every returned marker as an independent logical frontier
+// branch. localRoots seeds the same walk with this node's own current tips
+// for key, so a candidate already covered by local ancestry the cluster
+// itself produced — not yet reflected in Cloud's index — is dropped as
+// superseded too. Only candidates, never localRoots, can be marked
+// superseded: local tips aren't entries in Cloud's index and have nothing
+// there to correct.
 //
-// A transport error, a timeout, or a partially-unreachable frontier returns
-// ErrCloudUnavailable — the read fails rather than fabricating a miss (or,
-// worse, a subset of the frontier posing as the whole state). The install is
-// all-or-nothing for the same reason: installing the reachable subset would
-// let the NEXT read reconstruct partial state locally and skip the consult
-// entirely. The leaf stays unconsulted on failure, so a later read retries.
+// Missing blobs do not abort normalization. A missing candidate can still be
+// proven non-maximal when another candidate's or local root's readable
+// ancestry names it. Any missing candidate that cannot be so proven remains a
+// real tip and the caller's classification decides what to do with it.
+func NormalizeCloudTipCandidates(key string, candidates, localRoots []Tip, load func(Tip) (*pb.Effect, error)) (real, superseded []Tip, err error) {
+	candidateSet := make(map[Tip]struct{}, len(candidates))
+	unique := make([]Tip, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, exists := candidateSet[candidate]; exists {
+			continue
+		}
+		candidateSet[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+
+	supersededSet := make(map[Tip]struct{}, len(unique))
+	visited := make(map[Tip]struct{}, (len(unique)+len(localRoots))*8)
+	queue := make([]Tip, 0, len(unique)+len(localRoots))
+	queue = append(queue, unique...)
+	queue = append(queue, localRoots...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if _, seen := visited[cur]; seen {
+			continue
+		}
+		visited[cur] = struct{}{}
+
+		eff, loadErr := load(cur)
+		if loadErr != nil {
+			if errors.Is(loadErr, ErrCDNBlobMissing) {
+				continue
+			}
+			return nil, nil, loadErr
+		}
+
+		var refs []*pb.EffectRef
+		if bind := eff.GetTxnBind(); bind != nil {
+			for _, kb := range bind.Keys {
+				if string(kb.Key) == key {
+					refs = []*pb.EffectRef{kb.NewTip}
+					break
+				}
+			}
+		} else {
+			refs = eff.GetDeps()
+		}
+		for _, ref := range refs {
+			dep := r(ref)
+			if _, candidate := candidateSet[dep]; candidate && dep != cur {
+				supersededSet[dep] = struct{}{}
+			}
+			queue = append(queue, dep)
+		}
+	}
+
+	for _, candidate := range unique {
+		if _, stale := supersededSet[candidate]; stale {
+			superseded = append(superseded, candidate)
+		} else {
+			real = append(real, candidate)
+		}
+	}
+	return real, superseded, nil
+}
+
+// hydrateFromCloud is the tiered-storage rehydrate on a read-miss: it asks
+// Cloud for key's candidate tip frontier and installs whatever portion of it
+// is locally walkable (pulling blobs via FetchFromAny → CDN), so a subsequent
+// reconstruct finds that portion locally. installed reports whether the index
+// now holds anything for key (already-present tips count, so the caller
+// always re-tries reconstructLocal after a successful consult); consulted
+// reports whether Cloud's answer was fully resolved — no pending holes — so
+// GetSnapshot can mark the leaf authoritative and stop re-consulting for a key
+// whose state reduces to nil. A partially or wholly holed frontier is not an
+// error: the holed tips are reported to Cloud's reconcile loop via
+// MarkPending and retried there, on Cloud's own schedule, without blocking
+// this read.
+//
+// A transport error or timeout returns ErrCloudUnavailable — the read fails
+// rather than fabricating a miss for data Cloud may hold.
 func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err error) {
 	if e.cloudReader == nil {
 		return false, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cloudTipsBackstop)
 	defer cancel()
-	tips, sidecar, err := e.cloudReader.CloudTips(ctx, key)
+	tips, sidecar, missing, err := e.cloudReader.CloudTips(ctx, key)
 	if err != nil {
 		slog.Warn("cloud read-miss backstop: get tips failed; failing read", "key", key, "error", err)
 		return false, false, fmt.Errorf("%w: get tips for %q: %w", ErrCloudUnavailable, key, err)
@@ -655,30 +736,69 @@ func (e *Engine) hydrateFromCloud(key string) (installed, consulted bool, err er
 	if len(tips) == 0 {
 		return false, true, nil // Cloud holds nothing either: an authoritative miss.
 	}
-	if err := e.InstallCloudTips(key, tips, sidecar); err != nil {
+	pending, err := e.InstallCloudTips(key, tips, sidecar, missing)
+	if err != nil {
 		return false, false, err
 	}
-	return true, true, nil
+	if len(pending) > 0 {
+		e.cloudReader.MarkPending(key)
+		slog.Warn("cloud read-miss backstop: frontier partially holed; serving readable subset, leaving the rest pending for reconcile",
+			"key", key, "pending", pending)
+	}
+	return e.index.Contains(key) != nil, len(pending) == 0, nil
 }
 
-// InstallCloudTips validates and installs a Cloud-provided tip frontier for
-// key, merging it with whatever the index already holds (the DAG reduces the
-// union; a tip that is an ancestor of an existing tip is redundant but
-// harmless — the next write consumes and collapses it). Besides the read-miss
-// rehydrate it serves the cloud-sync reconcile path: a read served from the
-// outbox during a Cloud outage installs the missed Cloud frontier here once
-// Cloud answers again.
+// InstallCloudTips classifies Cloud-provided marker candidates into the
+// subset that is locally walkable (install) and the subset still holed
+// (pending), merges the walkable subset into the index alongside whatever is
+// already there, and returns the holed subset for the caller to track. Besides
+// the read-miss rehydrate it serves the cloud-sync reconcile path: a read
+// served from the outbox during a Cloud outage re-installs the missed Cloud
+// frontier here once Cloud answers again.
 //
-// The install is all-or-nothing: the whole frontier is walk-validated before
-// any tip lands in the index. Installing the reachable subset would let a
-// subsequent read reconstruct partial state as if it were the whole answer.
-// Unlike retryBootstrap's walkAndInstall, which is deliberately progressive.
+// It never mints and never consumes local tips: Cloud's tips directory is a
+// candidate index, not authoritative state, so nothing here may supersede
+// local ancestry. A hole is not this engine's to repair — see ErrCDNBlobMissing.
+func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect, missing []Tip) (pending []Tip, err error) {
+	classification, err := e.classifyCloudTips(key, tips, sidecar, missing)
+	if err != nil {
+		return nil, err
+	}
+	if len(classification.install) > 0 {
+		slog.Debug("cloud tips: installing readable frontier", "key", key, "tips", classification.install)
+		e.installTips(key, classification.install)
+	}
+	if len(classification.dropped) > 0 {
+		slog.Debug("cloud tips: dropped candidate markers superseded by ancestry", "key", key, "tips", classification.dropped)
+	}
+	if len(classification.pending) > 0 {
+		slog.Debug("cloud tips: tips left pending on a hole", "key", key, "tips", classification.pending)
+	}
+	return classification.pending, nil
+}
+
+type cloudTipClassification struct {
+	install []Tip
+	pending []Tip
+	dropped []Tip
+}
+
+// classifyCloudTips splits Cloud's candidate tips for key into three sets:
+// install (readable state tips plus dependency-less subscription metadata),
+// pending (tips whose ancestry hits ErrCDNBlobMissing somewhere in the walk —
+// a durable hole, not a transport failure), and dropped (candidates
+// NormalizeCloudTipCandidates proved non-maximal). A transport error or
+// timeout anywhere in the walk returns ErrCloudUnavailable instead of
+// classifying anything, since that failure mode is retryable and must not be
+// confused with a durable hole.
 //
-// A tip failing with ErrCDNBlobMissing is the exception: nothing heals it —
-// retries re-fetch a blob that is gone, and no write consumes it, since an emit
-// can only dep-reference chains it holds — so returning an error would fail
-// every read and reconcile of the key forever. Repair instead.
-func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect) error {
+// missing is GetTips' own report of refs its closure walk found reachable but
+// whose blobs it does not hold — stated as fact by the storage side. Tips
+// named there classify pending without paying a redundant CDN round trip to
+// re-learn the same 404; anything the walk discovers missing on its own still
+// gets the network round trip, since Cloud's declared list is a hint, not a
+// complete inventory of every hole beneath the frontier.
+func (e *Engine) classifyCloudTips(key string, tips []Tip, sidecar []CloudEffect, missing []Tip) (cloudTipClassification, error) {
 	// Warm the cache with the closure effects GetTips delivered inline, so the
 	// walk below runs locally instead of one WAN fetch per dep (n+1). Same
 	// owned-vs-cache routing as every other ingest path; stragglers the
@@ -691,226 +811,85 @@ func (e *Engine) InstallCloudTips(key string, tips []Tip, sidecar []CloudEffect)
 			e.putIngested(ce.Tip, ce.Eff, ce.ProtoLen)
 		}
 	}
-	var readable, holed []Tip
-	for _, tip := range tips {
+
+	missingSet := make(map[Tip]struct{}, len(missing))
+	for _, t := range missing {
+		missingSet[t] = struct{}{}
+	}
+	load := func(tip Tip) (*pb.Effect, error) {
+		if _, known := missingSet[tip]; known {
+			return nil, ErrCDNBlobMissing
+		}
+		return e.getEffect(key, tip)
+	}
+
+	var localRoots []Tip
+	if currentSet := e.index.Contains(key); currentSet != nil {
+		localRoots = currentSet.Tips()
+	}
+
+	var classification cloudTipClassification
+	real, superseded, err := NormalizeCloudTipCandidates(key, tips, localRoots, load)
+	if err != nil {
+		return classification, fmt.Errorf("normalize cloud candidates for %q: %w", key, err)
+	}
+	classification.dropped = superseded
+
+	// Dependency-less subscriptions are frontier metadata, not state
+	// branches: they install unconditionally, since they carry no ancestry
+	// for a hole to hide in. State tips still need walk validation below.
+	stateTips := make([]Tip, 0, len(real))
+	for _, tip := range real {
+		eff, getErr := load(tip)
+		switch {
+		case getErr == nil:
+			if eff.GetSubscription() != nil && len(eff.GetDeps()) == 0 {
+				classification.install = append(classification.install, tip)
+				continue
+			}
+			stateTips = append(stateTips, tip)
+		case errors.Is(getErr, ErrCDNBlobMissing):
+			classification.pending = append(classification.pending, tip)
+		default:
+			return cloudTipClassification{}, fmt.Errorf("%w: cloud tip %v unreachable for %q: %w",
+				ErrCloudUnavailable, tip, key, getErr)
+		}
+	}
+	if len(stateTips) == 0 {
+		return classification, nil
+	}
+
+	// Validate the joint frontier first. Each sibling branch can be
+	// independently readable while their union descends beneath both into a
+	// shared hole below their LCA, so per-tip validation alone is
+	// insufficient to prove the whole frontier installable together.
+	rd := newDag(e, key, "")
+	walkErr := rd.walk(stateTips, func(*pb.Effect) error { return nil })
+	switch {
+	case walkErr == nil:
+		classification.install = append(classification.install, stateTips...)
+		return classification, nil
+	case errors.Is(walkErr, ErrCDNBlobMissing):
+		// Fall through: split per-tip below.
+	default:
+		return cloudTipClassification{}, fmt.Errorf("%w: real frontier for %q unreachable: %w",
+			ErrCloudUnavailable, key, walkErr)
+	}
+
+	for _, tip := range stateTips {
 		rd := newDag(e, key, "")
 		walkErr := rd.walk([]Tip{tip}, func(*pb.Effect) error { return nil })
 		switch {
 		case walkErr == nil:
-			readable = append(readable, tip)
+			classification.install = append(classification.install, tip)
 		case errors.Is(walkErr, ErrCDNBlobMissing):
-			holed = append(holed, tip)
+			classification.pending = append(classification.pending, tip)
 		default:
-			slog.Warn("cloud tip install: tip unreachable; installing nothing",
-				"key", key, "tip", tip, "error", walkErr)
-			return fmt.Errorf("%w: tip %v unreachable for %q: %w",
+			return cloudTipClassification{}, fmt.Errorf("%w: tip %v unreachable for %q: %w",
 				ErrCloudUnavailable, tip, key, walkErr)
 		}
 	}
-	if len(holed) == 0 {
-		e.installTips(key, tips)
-		return nil
-	}
-	// Readable tips stay un-installed until the repair folds them into the
-	// snapshot: installing them first and then failing would leave partial
-	// state posing as the whole answer.
-	return e.RepairCloudFrontier(key, readable, holed)
-}
-
-// RepairCloudFrontier supersedes a Cloud tip frontier whose ancestry is
-// provably unreachable — a hole in the CDN blob chain that InstallCloudTips'
-// all-or-nothing walk can never get past. No normal write ever consumes such a
-// frontier: consuming a cloud tip requires dep-referencing it, and a normal
-// emit only dep-references tips it holds, so the poisoned tips would sit in
-// the cloud's tips record forever, failing every reader.
-//
-// The repair mints a state-carrying SnapshotEffect whose deps name the entire
-// broken frontier plus the local tips, then a Noop above it. Deps are just
-// refs — naming a tip requires no fetch of its bytes. Cloud-side, storing the
-// snapshot consumes every frontier tip out of the tips record; reader-side the
-// snapshot is the sole convergence point, so the walk's LCA rule stops at it
-// and the holed ancestry is never fetched again.
-//
-// readable tips are frontier tips whose chains DO walk (validated by the
-// caller, bytes already pulled into the cache): they are reduced into the
-// snapshot's state alongside the local tips, so their data survives the
-// supersede. holed tips are dep-named only — whatever state sits beneath the
-// hole is lost, which is the caller's adjudication to make before calling
-// this.
-//
-// A concurrent emit lands as a sibling of the snapshot rather than beneath it,
-// which keeps the walk's queue non-empty at the snapshot and re-exposes the
-// hole. The next walk fails with ErrCDNBlobMissing and repairs again, so this
-// converges rather than needing exclusion.
-func (e *Engine) RepairCloudFrontier(key string, readable, holed []Tip) error {
-	// This mint becomes cloud's answer for the key, so the node making it must
-	// be a holder peers will route writes to. Subscribing first also keeps the
-	// SubscriptionEffect in the ancestry the snapshot folds up, not beside it.
-	if err := e.ensureSubscribed(key); err != nil {
-		return fmt.Errorf("repair %q: subscribe: %w", key, err)
-	}
-
-	currentSet := e.index.Contains(key)
-	var localTips []Tip
-	if currentSet != nil {
-		localTips = currentSet.Tips()
-	}
-
-	reduceTips := make([]Tip, 0, len(localTips)+len(readable))
-	seenReduce := make(map[Tip]struct{}, len(localTips)+len(readable))
-	for _, t := range localTips {
-		seenReduce[t] = struct{}{}
-		reduceTips = append(reduceTips, t)
-	}
-	for _, t := range readable {
-		if _, dup := seenReduce[t]; !dup {
-			seenReduce[t] = struct{}{}
-			reduceTips = append(reduceTips, t)
-		}
-	}
-
-	var state *pb.ReducedEffect
-	if len(reduceTips) > 0 {
-		result, _, err := e.reconstruct(key, reduceTips, "", false)
-		switch {
-		case err == nil:
-			state = cloneReduced(result)
-		case errors.Is(err, ErrCDNBlobMissing):
-			// Sibling repair snapshots from concurrent repairs on different
-			// nodes: each chain reduces alone (its own LCA stop holds), but
-			// jointly the walk descends beneath both snapshots into the hole.
-			// Keep the fork-choice winner's state; the losers are still
-			// dep-named and consumed, their divergent state folded away.
-			state, err = e.reduceForkChoiceWinner(key, reduceTips)
-			if err != nil {
-				return fmt.Errorf("repair %q: reduce fork-choice winner: %w", key, err)
-			}
-		default:
-			return fmt.Errorf("repair %q: reduce local state: %w", key, err)
-		}
-	}
-	if state == nil {
-		state = &pb.ReducedEffect{}
-	}
-	// A bootstrapping peer stops at this snapshot and never sees the
-	// SubscriptionEffects beneath it, so the stamp is the only surviving record
-	// of who holds the key. Self is absent from the leaf set by design
-	// (addPeerSubscriber drops it) yet has to appear here — otherwise peers
-	// reconstruct a subscriber set missing the node holding the state.
-	subs := e.snapshotSubscribers(key)
-	if subs == nil {
-		subs = make(map[uint64]bool, 1)
-	}
-	subs[uint64(e.nodeID)] = true
-	state.Subscribers = subs
-
-	snapEff := &pb.SnapshotEffect{
-		Collection: state.Collection,
-		State:      state,
-	}
-	for _, t := range reduceTips {
-		cached, err := e.getEffect(key, t)
-		if err != nil {
-			continue
-		}
-		if cached.GetSnapshot() != nil {
-			snapEff.PrevSnapshot = toPbRef(t)
-			break
-		}
-	}
-
-	deps := e.resolveTipDeps(localTips)
-	seen := make(map[Tip]struct{}, len(deps)+len(readable)+len(holed))
-	for _, t := range deps {
-		seen[t] = struct{}{}
-	}
-	for _, t := range readable {
-		if _, dup := seen[t]; !dup {
-			seen[t] = struct{}{}
-			deps = append(deps, t)
-		}
-	}
-	for _, t := range holed {
-		if _, dup := seen[t]; !dup {
-			seen[t] = struct{}{}
-			deps = append(deps, t)
-		}
-	}
-
-	hlc := timestamppb.New(e.clock.Now())
-	snapOffset, err := e.mintLocalEffect(key, currentSet, &pb.Effect{
-		Key:            []byte(key),
-		Hlc:            hlc,
-		NodeId:         uint64(e.nodeID),
-		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
-		Deps:           toPbRefs(deps),
-		Kind:           &pb.Effect_Snapshot{Snapshot: snapEff},
-	})
-	if err != nil {
-		return fmt.Errorf("repair %q: mint snapshot: %w", key, err)
-	}
-
-	// The tip above keeps the snapshot off the frontier: readers stop AT the
-	// snapshot, and a frontier whose sole tip is the snapshot itself is an
-	// edge nothing else exercises.
-	hlc = timestamppb.New(e.clock.Now())
-	if _, err := e.mintLocalEffect(key, e.index.Contains(key), &pb.Effect{
-		Key:            []byte(key),
-		Hlc:            hlc,
-		NodeId:         uint64(e.nodeID),
-		ForkChoiceHash: ComputeForkChoiceHash(e.nodeID, hlc),
-		Deps:           []*pb.EffectRef{toPbRef(snapOffset)},
-		Kind:           &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
-	}); err != nil {
-		return fmt.Errorf("repair %q: mint tip above snapshot: %w", key, err)
-	}
-
-	slog.Warn("cloud frontier repaired: unreachable ancestry superseded by snapshot",
-		"key", key, "superseded_tips", len(holed), "preserved_tips", len(readable),
-		"snapshot", snapOffset)
-	return nil
-}
-
-// reduceForkChoiceWinner reduces the single tip that wins fork choice among
-// tips that are each readable alone but unreadable together — sibling
-// state-carrying snapshots whose joint walk descends beneath them into holed
-// ancestry. Lower ForkChoiceHash wins, same as everywhere else fork choice
-// runs. Returns nil state (no error) when nothing beneath the tips is
-// reducible at all: that state is lost to the hole.
-func (e *Engine) reduceForkChoiceWinner(key string, tips []Tip) (*pb.ReducedEffect, error) {
-	type cand struct {
-		tip Tip
-		eff *pb.Effect
-	}
-	cands := make([]cand, 0, len(tips))
-	for _, t := range tips {
-		eff, err := e.getEffect(key, t)
-		if err != nil {
-			continue // an unfetchable tip carries no state to preserve
-		}
-		cands = append(cands, cand{t, eff})
-	}
-	slices.SortFunc(cands, func(a, b cand) int {
-		if ForkChoiceLess(a.eff.ForkChoiceHash, b.eff.ForkChoiceHash) {
-			return -1
-		}
-		if ForkChoiceLess(b.eff.ForkChoiceHash, a.eff.ForkChoiceHash) {
-			return 1
-		}
-		return 0
-	})
-	for _, c := range cands {
-		result, _, err := e.reconstruct(key, []Tip{c.tip}, "", false)
-		if err == nil {
-			slog.Warn("cloud frontier repair: branches unreadable together; keeping fork-choice winner",
-				"key", key, "winner", c.tip, "discarded", len(cands)-1)
-			return cloneReduced(result), nil
-		}
-		if !errors.Is(err, ErrCDNBlobMissing) {
-			return nil, err
-		}
-	}
-	return nil, nil
+	return classification, nil
 }
 
 // mintLocalEffect persists a fully-built effect as a local mint: marshal,

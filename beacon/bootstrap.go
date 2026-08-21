@@ -99,27 +99,17 @@ func (b *Beacon) bootstrap(ctx context.Context) error {
 // members is authoritative (fresh cluster, or we're first) and starts solo.
 //
 // Starting solo is a claim about the whole fleet, so only an authoritative
-// answer may produce one: a successful read, or a proven-durable hole. "We
-// could not find out" is not an answer — conceding solo on it forks the
-// cluster, and a fork is silent (a solo node's members count looks exactly
-// like a legitimately fresh one) where a stalled boot is loud. So the only
-// error that reaches here is shutdown.
+// answer may produce one: a successful read. "We could not find out" is not
+// an answer — conceding solo on it forks the cluster, and a fork is silent (a
+// solo node's members count looks exactly like a legitimately fresh one)
+// where a stalled boot is loud. A durable frontier hole (ErrCDNBlobMissing)
+// is not grounds for solo either: Cloud's own reconcile/billing sweep owns
+// healing or pruning holed markers, so this just keeps retrying with the
+// existing loud complaint until the cloud does so. So the only error that
+// reaches here is shutdown.
 func (b *Beacon) cloudCandidates(ctx context.Context) ([]string, error) {
 	reduced, err := b.discoverMembersWithRetry(ctx)
 	if err != nil {
-		if errors.Is(err, effects.ErrCDNBlobMissing) {
-			// The roster frontier references ancestry whose CDN blobs are
-			// gone — a durable hole, not an outage. Retrying can't heal it
-			// and every node in the fleet is equally stuck against it, so
-			// supersede the frontier and start solo; peers pick up the
-			// repaired roster on their next boot. Nodes restarting in the
-			// same instant can each mint a repair, leaving sibling snapshots
-			// that keep the key unreadable — accepted: the next
-			// non-simultaneous restart repairs over them, since the walk
-			// fails with the same ErrCDNBlobMissing beneath the siblings.
-			b.repairMembershipFrontier(ctx, err)
-			return nil, nil
-		}
 		return nil, err
 	}
 	members := parseMembership(reduced)
@@ -132,20 +122,6 @@ func (b *Beacon) cloudCandidates(ctx context.Context) ([]string, error) {
 		addrs = append(addrs, m.Addr)
 	}
 	return addrs, nil
-}
-
-// repairMembershipFrontier is the one-shot startup repair for a cloud
-// membership frontier whose ancestry is provably holed.
-func (b *Beacon) repairMembershipFrontier(ctx context.Context, cause error) {
-	slog.Warn("beacon: cloud membership frontier is unreadable, repairing with a superseding snapshot",
-		"error", cause)
-	superseded, err := b.cfg.Cloud.RepairFrontier(ctx, MembershipKey)
-	if err != nil {
-		slog.Error("beacon: membership frontier repair failed, starting solo unrepaired", "error", err)
-		return
-	}
-	slog.Warn("beacon: cloud membership frontier repaired, starting solo",
-		"superseded_tips", superseded)
 }
 
 // discoverMembersWithRetry reads the cloud membership roster, retrying on
@@ -184,11 +160,6 @@ func (b *Beacon) discoverMembersWithRetry(ctx context.Context) (*pb.ReducedEffec
 					"attempts", attempt, "elapsed", time.Since(started))
 			}
 			return reduced, nil
-		}
-		// A hole is durable: every retry re-pays the fetch to learn the same
-		// answer, and only the caller's repair resolves it.
-		if errors.Is(err, effects.ErrCDNBlobMissing) {
-			return nil, err
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

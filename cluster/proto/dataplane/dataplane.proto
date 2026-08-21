@@ -164,4 +164,10 @@ message KeyTips {
   // cluster) — the node's own walk remains the authority and pulls any
   // missing effect on demand.
   repeated Effect closure = 3;
+  // missing lists refs the closure walk found reachable via deps but whose
+  // blobs the cloud does not hold — holes in the closure. Stated as fact by
+  // the storage side; the node classifies these tips as pending rather than
+  // treating the hole as its own to repair, leaving them for the cloud's own
+  // reconcile/billing sweep to heal or prune.
+  repeated EffectRef missing = 4;
 }

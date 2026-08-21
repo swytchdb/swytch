@@ -42,7 +42,8 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 
 if (-not $Version) {
     Info 'resolving latest release'
-    $latest = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"    $Version = $latest.tag_name
+    $latest = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
+    $Version = $latest.tag_name
     if (-not $Version) { Fail 'could not determine latest version' }
 }
 $versionNum = $Version.TrimStart('v')

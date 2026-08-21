@@ -22,6 +22,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -149,6 +150,25 @@ func TestFetchFromAnyPreferPeersMissStillTriesCDN(t *testing.T) {
 	}
 	if cdn.callCount() != 1 {
 		t.Fatalf("CDN called %d times, want the fallback to have run once", cdn.callCount())
+	}
+}
+
+// TestFetchFromAnyCDN404NotMaskedByPeerError: under PreferPeers, when both
+// legs fail, a durable CDN 404 must still surface as ErrCDNBlobMissing —
+// not be swallowed by whichever peer error happened to run first — since
+// classifyCloudTips keys its pending-vs-install split on errors.Is against
+// the sentinel. The peer error's text must still be present for diagnosis.
+func TestFetchFromAnyCDN404NotMaskedByPeerError(t *testing.T) {
+	pm := newFetchTestPM(t)
+	cdn := &recordingCDN{err: effects.ErrCDNBlobMissing}
+	pm.SetCDNFetcher(cdn)
+
+	_, err := pm.FetchFromAny(&pb.EffectRef{NodeId: 1, Offset: 1}, effects.PreferPeers)
+	if !errors.Is(err, effects.ErrCDNBlobMissing) {
+		t.Fatalf("want the CDN-missing sentinel preserved through errors.Is, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), ErrPeerUnavailable.Error()) {
+		t.Fatalf("want the peer failure text preserved alongside the sentinel, got: %v", err)
 	}
 }
 

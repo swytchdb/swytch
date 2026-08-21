@@ -99,11 +99,16 @@ const (
 	discoverWalkProgressInterval = 10 * time.Second
 	// backlogWarnEvery paces the "cloud unreachable, backlog growing" warning.
 	backlogWarnEvery = 1024
-	// cloudProgressInterval paces the outbox drain log line: pending/queued/
-	// in-flight and the interval's send/ack deltas, so a backlog is always
+	// cloudProgressInterval paces the outbox drain log line: pending/queued and
+	// the interval's send/ack deltas, so a backlog is always
 	// attributable to a stage (nothing queued vs sends stalled vs acks
 	// stalled) instead of just a growing pending gauge.
 	cloudProgressInterval = 30 * time.Second
+	// cloudHasGenSize bounds one generation of knownInCloud before it rotates.
+	// Overflowing costs a re-upload of effects the cloud already holds — which
+	// it re-acks — so the bound trades memory against bandwidth and never
+	// against completeness.
+	cloudHasGenSize = 1 << 16
 )
 
 // pendingKeyEntry is one key's slice of the outbox: its un-acked tips and
@@ -124,10 +129,10 @@ type pendingKeyEntry struct {
 // replication).
 //
 // The response stream also carries FetchRequests: the cloud asking the cluster
-// for an effect it's missing. Those are answered from the vertex pool — any
-// resident effect, not just our own, since the cloud broadcasts the ask to
-// whichever streams are open — and silence is the correct reply for an effect
-// we no longer hold.
+// for an effect it's missing. Those are admitted to the same pinned, retrying
+// outbox as local uploads — any resident effect, not just our own, since the
+// cloud broadcasts the ask to whichever streams are open. Silence is the
+// correct reply for an effect we no longer hold.
 type CloudSync struct {
 	engine     *effects.Engine
 	enc        *effects.Encryptor
@@ -148,7 +153,11 @@ type CloudSync struct {
 	httpClient   *http.Client
 
 	mu      sync.Mutex
-	pending map[effects.Tip]*pb.Effect // un-acked mints; the held pointer keeps the effect reachable even if its pool ref is consumed
+	pending map[effects.Tip]*pb.Effect // un-acked uploads; the held pointer keeps the effect reachable even if its pool ref is consumed
+	// expandable marks locally-authored uploads whose locally-authored ancestry
+	// may be added to the outbox. Fetch replies are deliberately absent: Cloud
+	// asked for exactly that ref and must explicitly ask for each deeper hole.
+	expandable map[effects.Tip]struct{}
 	// pendingKeys indexes pending by plaintext key, so CloudTips can answer a
 	// read-miss from the outbox: an evicted-before-ack key has no index tips
 	// and no cloud tips, but its effects sit refcount-pinned in the pool — the
@@ -160,7 +169,6 @@ type CloudSync struct {
 	// pin count would underflow.
 	pendingKeys map[string]*pendingKeyEntry
 	sendQ       []effects.Tip
-	relayQ      []*dp.Effect // fetch-request replies, already enveloped
 	// reconcile holds keys whose read was answered from the outbox while
 	// GetTips was failing. The cloud may hold tips for them we've never seen
 	// (another node's uploads); reconcileLoop re-consults until the cloud
@@ -179,6 +187,15 @@ type CloudSync struct {
 	filterMu   sync.RWMutex
 	filterBulk *effects.Bloom
 	filterOwn  ownFilter
+
+	// knownInCloud is the stop rule for the unsent-history walk: tips the cloud
+	// demonstrably holds, being our own acked uploads plus every effect the
+	// cloud itself served us (GetTips sidecars, CDN blobs). Without it a
+	// rehydrated key's entire chain would re-upload on the next local write to
+	// it. Its own mutex, not mu: the walk runs on the emit path and the feed
+	// runs on the read path, and neither should queue behind the outbox.
+	knownMu      sync.Mutex
+	knownInCloud tipGenSet
 
 	// memberRemoveHandler applies a cloud-pushed "delete this server" command
 	// (WriteResponse.MemberRemove) by routing its node id into the membership
@@ -333,20 +350,57 @@ func (cs *CloudSync) waitDrained(timeout time.Duration) {
 	}
 }
 
-// handleLocalEffect is the engine's OnLocalEffect hook: enqueue the mint and
-// return. Runs inside the emit path, so it must not block. The pool Incref is
-// the outbox's DAG reference — the effect stays resident across evictions until
-// the cloud's ack releases it.
-func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
-	// Wire-only kinds never persist and never reach this hook today; the guard
-	// keeps a future mint-path change from silently uploading them.
+// cloudUploadable reports whether an effect belongs in the cloud at all.
+// Wire-only kinds never persist, so they are never a mint the hook sees and
+// never a dep the ancestry walk reaches; the guard keeps a future mint-path
+// change from silently uploading them.
+func cloudUploadable(eff *pb.Effect) bool {
 	if sub := eff.GetSubscription(); sub != nil && (sub.Discovery || sub.Ephemeral) {
-		return
+		return false
 	}
-	if eff.GetPubsubMessage() != nil {
-		return
-	}
+	return eff.GetPubsubMessage() == nil
+}
 
+// handleLocalEffect is the engine's OnLocalEffect hook: enqueue the mint with
+// whatever locally-authored history the cloud is still missing, and return.
+// Runs inside the emit path, so it must not block — the walk is one dep level
+// here and continues off-path as each entry is sent.
+func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
+	if !cloudUploadable(eff) {
+		return
+	}
+	// Queue the first ancestry level before the new head. The sender continues
+	// the walk off-path and keeps moving each parent behind any newly discovered
+	// deps, producing root-to-head wire order instead of advertising the head
+	// first and trying to fill its hole afterwards.
+	cs.expandAncestry(eff)
+	// OnLocalEffect fires synchronously in emit, after PutSized installed the
+	// vertex with its creation ref — the incref cannot find it missing or
+	// claimed, and a freshly-allocated offset cannot already be queued. If it
+	// ever is, the ref protocol is broken and retire's Decref would steal
+	// another holder's reference (premature reclaim of a vertex someone still
+	// reads); fail at the violation, same policy as decref's underflow panic.
+	if !cs.enqueueUpload(offset, eff, true, true) {
+		panic(fmt.Sprintf("cloud sync: outbox enqueue failed for just-emitted %v — vertex missing, claimed, or already queued at emit time", offset))
+	}
+	cs.wakeSender()
+}
+
+// enqueueUpload adds one effect to the outbox: the pool Incref that is the
+// outbox's DAG reference (the effect stays resident across evictions until the
+// cloud's ack releases it), the per-key index entry, and the send queue slot.
+//
+// frontier marks the effect as one of this node's own un-acked writes, the
+// tips pendingTipsFor answers reads with and the reason the key holds an
+// eviction pin. Ancestry and fetch replies are interior uploads rather than
+// this node's new frontier, so they take neither: naming one as a tip could hand
+// a reader a frontier containing an effect and its own ancestor.
+//
+// Reports false when the tip is already queued or its vertex could not be
+// referenced — evicted, or claimed for reclamation. For an ancestor that
+// simply means the cloud keeps whatever hole it has there; nothing local can
+// fill it.
+func (cs *CloudSync) enqueueUpload(tip effects.Tip, eff *pb.Effect, frontier, expand bool) bool {
 	// Anything cloud-bound is filter-positive from the moment it's enqueued,
 	// even if it's later evicted locally before the cloud's push reflects it.
 	// Except subscriptions: ensureSubscribed mints one on every read of an
@@ -361,45 +415,169 @@ func (cs *CloudSync) handleLocalEffect(offset effects.Tip, eff *pb.Effect) {
 		cs.filterMu.Unlock()
 	}
 
-	// OnLocalEffect fires synchronously in emit, after PutSized installed the
-	// vertex with its creation ref — the incref cannot find it missing or
-	// claimed. If it ever does, the ref protocol is broken and retire's Decref
-	// would steal another holder's reference (premature reclaim of a vertex
-	// someone still reads); fail at the violation, same policy as decref's
-	// underflow panic.
-	if !cs.engine.EffectCache().Incref(offset) {
-		panic(fmt.Sprintf("cloud sync: outbox incref failed for just-emitted %v — vertex missing or claimed at emit time", offset))
+	// Reference before claiming the slot, so a duplicate loses its own ref
+	// rather than the ref the existing entry is holding.
+	if !cs.engine.EffectCache().Incref(tip) {
+		return false
 	}
 	cs.mu.Lock()
-	cs.pending[offset] = eff
-	k := string(eff.Key)
-	entry := cs.pendingKeys[k]
-	if entry == nil {
-		// First un-acked upload on this key: hold it in the index until the
-		// cloud acks everything. Evicting it early frees almost nothing (the
-		// outbox pins the bytes) but unsubscribes and drops the tips, making
-		// data only this node holds invisible to every reader in the cluster
-		// until the upload drains. Pin/Unpin ride cs.mu so the first-effect /
-		// last-ack transitions can't interleave their index calls. PinKey
-		// reports false when the key has no live leaf (the eviction path's own
-		// unsubscribe mint) — nothing to keep findable, nothing to unpin later.
-		entry = &pendingKeyEntry{
-			tips:   make(map[effects.Tip]struct{}),
-			pinned: cs.engine.PinKey(k),
-		}
-		cs.pendingKeys[k] = entry
+	if _, dup := cs.pending[tip]; dup {
+		cs.mu.Unlock()
+		cs.engine.EffectCache().Decref(tip)
+		return false
 	}
-	entry.tips[offset] = struct{}{}
-	cs.sendQ = append(cs.sendQ, offset)
+	cs.pending[tip] = eff
+	if expand {
+		if cs.expandable == nil {
+			cs.expandable = make(map[effects.Tip]struct{})
+		}
+		cs.expandable[tip] = struct{}{}
+	}
+	if frontier {
+		k := string(eff.Key)
+		entry := cs.pendingKeys[k]
+		if entry == nil {
+			// First un-acked upload on this key: hold it in the index until the
+			// cloud acks everything. Evicting it early frees almost nothing (the
+			// outbox pins the bytes) but unsubscribes and drops the tips, making
+			// data only this node holds invisible to every reader in the cluster
+			// until the upload drains. Pin/Unpin ride cs.mu so the first-effect /
+			// last-ack transitions can't interleave their index calls. PinKey
+			// reports false when the key has no live leaf (the eviction path's own
+			// unsubscribe mint) — nothing to keep findable, nothing to unpin later.
+			entry = &pendingKeyEntry{
+				tips:   make(map[effects.Tip]struct{}),
+				pinned: cs.engine.PinKey(k),
+			}
+			cs.pendingKeys[k] = entry
+		}
+		entry.tips[tip] = struct{}{}
+	}
+	cs.sendQ = append(cs.sendQ, tip)
 	backlog := len(cs.pending)
 	cs.mu.Unlock()
 	cloudOutboxEnqueuedTotal.Inc()
 	cloudOutboxPending.Set(float64(backlog))
-	cs.wakeSender()
 
 	if backlog%backlogWarnEvery == 0 {
 		slog.Warn("cloud sync: upload backlog growing", "pending", backlog)
 	}
+	return true
+}
+
+// expandAncestry queues the locally-authored dep-ancestry of eff that the cloud
+// has not seen.
+//
+// The cloud only ever receives what some node uploads, and a node uploads only
+// what it mints. An effect whose author died with an un-acked outbox — or that
+// predates this node's cloud attach — never reaches the cloud, and every
+// descendant we upload then names a dep the cloud cannot resolve. That hole is
+// permanent: no retry heals it, and a bootstrapping node walking the cloud
+// frontier dies on the missing blob with no local state to fall back on.
+//
+// So a local upload carries its own node's unsent history, not just its tip.
+// Each same-author dep we do not know the cloud holds joins the outbox, and
+// expanding again as that dep is sent walks the local closure out to the first
+// effect the cloud already has (or the first one eviction already took from us
+// — a hole nothing local can fill). Foreign refs are Cloud's responsibility:
+// they enter the outbox only through an explicit FetchRequest.
+//
+// Referencing each dep before walking past it is what keeps the walk alive
+// across a stream outage: the frontier it stopped at is pinned in the pool, so
+// the closure resumes on reconnect instead of restarting into evicted ancestry.
+func (cs *CloudSync) expandAncestry(eff *pb.Effect) []effects.Tip {
+	var queued []effects.Tip
+	for _, dep := range eff.GetDeps() {
+		// A node owes Cloud only the history it authored. Peer effects enter this
+		// outbox exclusively through an explicit FetchRequest; merely naming one
+		// as a dependency is not authority to upload it.
+		if dep.GetNodeId() != uint64(cs.engine.NodeID()) {
+			continue
+		}
+		tip := effects.Tip{dep.GetNodeId(), dep.GetOffset()}
+		if cs.cloudHolds(tip) {
+			continue
+		}
+		anc, ok := cs.engine.EffectCache().Get(tip)
+		if !ok {
+			continue
+		}
+		if !cloudUploadable(anc) {
+			continue
+		}
+		if cs.enqueueUpload(tip, anc, false, true) {
+			cloudAncestryUploadedTotal.Inc()
+			queued = append(queued, tip)
+		}
+	}
+	return queued
+}
+
+// deferUploadBehind moves tip behind deps that its ancestry walk just queued,
+// ahead of unrelated work already in the FIFO. Repeating this as each dep is
+// considered turns the incremental one-level walk into root-to-head send order
+// without putting an unbounded traversal on the emit path.
+func (cs *CloudSync) deferUploadBehind(tip effects.Tip, deps []effects.Tip) {
+	depSet := make(map[effects.Tip]struct{}, len(deps))
+	for _, dep := range deps {
+		depSet[dep] = struct{}{}
+	}
+
+	cs.mu.Lock()
+	deferred := make([]effects.Tip, 0, len(cs.sendQ)+1)
+	deferred = append(deferred, deps...)
+	deferred = append(deferred, tip)
+	for _, queued := range cs.sendQ {
+		if queued == tip {
+			continue
+		}
+		if _, moved := depSet[queued]; moved {
+			continue
+		}
+		deferred = append(deferred, queued)
+	}
+	cs.sendQ = deferred
+	cs.mu.Unlock()
+}
+
+// tipGenSet is a bounded exact set of tips: two generations, the older dropped
+// wholesale once the newer fills. Membership must be exact — a false positive
+// would silently skip an ancestor the cloud is missing, which is the hole the
+// walk exists to close — so an approximate filter is not usable here.
+type tipGenSet struct {
+	cur, prev map[effects.Tip]struct{}
+}
+
+func (s *tipGenSet) add(t effects.Tip) {
+	if s.cur == nil {
+		s.cur = make(map[effects.Tip]struct{})
+	}
+	if len(s.cur) >= cloudHasGenSize {
+		s.prev, s.cur = s.cur, make(map[effects.Tip]struct{})
+	}
+	s.cur[t] = struct{}{}
+}
+
+func (s *tipGenSet) has(t effects.Tip) bool {
+	if _, ok := s.cur[t]; ok {
+		return true
+	}
+	_, ok := s.prev[t]
+	return ok
+}
+
+// markCloudHolds records that the cloud holds tip: it acked our upload, or it
+// served the effect to us in the first place.
+func (cs *CloudSync) markCloudHolds(tip effects.Tip) {
+	cs.knownMu.Lock()
+	cs.knownInCloud.add(tip)
+	cs.knownMu.Unlock()
+}
+
+func (cs *CloudSync) cloudHolds(tip effects.Tip) bool {
+	cs.knownMu.Lock()
+	defer cs.knownMu.Unlock()
+	return cs.knownInCloud.has(tip)
 }
 
 func (cs *CloudSync) wakeSender() {
@@ -410,12 +588,13 @@ func (cs *CloudSync) wakeSender() {
 }
 
 // retire removes an outbox entry and releases its pool reference. Returns
-// whether the tip was actually held — false for acks of fetch-relays and
-// duplicate acks, which were never outbox entries.
+// whether the tip was actually held — false for duplicate or stale acks after
+// the outbox entry was already retired.
 func (cs *CloudSync) retire(tip effects.Tip) bool {
 	cs.mu.Lock()
 	eff, held := cs.pending[tip]
 	delete(cs.pending, tip)
+	delete(cs.expandable, tip)
 	if held {
 		k := string(eff.Key)
 		if entry := cs.pendingKeys[k]; entry != nil {
@@ -550,49 +729,84 @@ func (cs *CloudSync) logOutboxProgress(lastSent, lastAcked uint64) (uint64, uint
 	cs.mu.Lock()
 	pending := len(cs.pending)
 	queued := len(cs.sendQ)
-	relays := len(cs.relayQ)
 	cs.mu.Unlock()
-	if pending == 0 && queued == 0 && relays == 0 {
+	if pending == 0 && queued == 0 {
 		return sent, acked
 	}
 	if sent == lastSent && acked == lastAcked {
 		slog.Warn("cloud sync: outbox stalled",
-			"pending", pending, "queued", queued, "relays", relays,
-			"inflight", sent-acked, "interval", cloudProgressInterval)
+			"pending", pending, "queued", queued,
+			"interval", cloudProgressInterval)
 	} else {
 		slog.Info("cloud sync: outbox progress",
-			"pending", pending, "queued", queued, "relays", relays,
-			"inflight", sent-acked,
+			"pending", pending, "queued", queued,
 			"sent_delta", sent-lastSent, "acked_delta", acked-lastAcked,
 			"interval", cloudProgressInterval)
 	}
 	return sent, acked
 }
 
-// nextEnvelope pops the next upload: fetch-relays first (the cloud is blocked
-// on them mid-scan), then outbox mints. Sealing happens here, on the sync
+// nextEnvelope pops the next outbox upload. Sealing happens here, on the sync
 // goroutine, never on the emit path.
 func (cs *CloudSync) nextEnvelope() (*dp.Effect, bool) {
+	cs.mu.Lock()
+	// Bound one pass to the uploads that were queued when it began. A blocked
+	// descendant is put back for a dependency ACK to wake; without the bound, a
+	// queue containing only blocked descendants would spin forever.
+	remaining := len(cs.sendQ)
+	cs.mu.Unlock()
+
 	for {
 		cs.mu.Lock()
-		if len(cs.relayQ) > 0 {
-			env := cs.relayQ[0]
-			cs.relayQ = cs.relayQ[1:]
-			cs.mu.Unlock()
-			return env, true
-		}
-		if len(cs.sendQ) == 0 {
+		if len(cs.sendQ) == 0 || remaining == 0 {
 			cs.mu.Unlock()
 			return nil, false
 		}
 		tip := cs.sendQ[0]
 		cs.sendQ = cs.sendQ[1:]
 		eff := cs.pending[tip]
+		_, expand := cs.expandable[tip]
 		cs.mu.Unlock()
+		remaining--
 
 		if eff == nil {
 			continue // acked while queued
 		}
+		// Continue the unsent-history walk off the emit path. The outbox
+		// reference on this effect keeps its deps resolvable here even if the
+		// key was evicted since the mint.
+		if expand {
+			if deps := cs.expandAncestry(eff); len(deps) > 0 {
+				cs.deferUploadBehind(tip, deps)
+				// These deps were not in the queue when the pass was bounded. Count
+				// each newly pinned vertex once so a final-slot expansion cannot leave
+				// ancestry queued with nobody left to wake the sender.
+				remaining += len(deps)
+				continue
+			}
+		}
+
+		// Stream order is not Cloud commit order: its shared worker pool may
+		// process a child before an earlier parent. Keep descendants queued until
+		// every locally-uploadable dependency has been durably ACKed and retired
+		// from the outbox. Independent effects can still fill the pipeline.
+		cs.mu.Lock()
+		blocked := false
+		for _, dep := range eff.GetDeps() {
+			depTip := effects.Tip{dep.GetNodeId(), dep.GetOffset()}
+			if _, pending := cs.pending[depTip]; pending {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			cs.sendQ = append(cs.sendQ, tip)
+		}
+		cs.mu.Unlock()
+		if blocked {
+			continue
+		}
+
 		env, err := cs.buildEnvelope(tip, eff)
 		if err != nil {
 			// Seal/marshal failures are transient (rand.Read) — the effect
@@ -637,14 +851,19 @@ func (cs *CloudSync) readLoop(stream dp.DataPlane_WriteEffectsClient) error {
 }
 
 // handleAck retires a durably-stored effect, or schedules a nacked one for
-// re-send. Acks for fetch-relays land here too — they were never in the
-// outbox, so they fall through both paths untouched.
+// re-send. Local mints, ancestry backfills, and fetch replies all use the same
+// outbox so Cloud's concurrent workers cannot strand one category on a NACK.
 func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 	tip := effects.Tip{ack.GetId().GetNodeId(), ack.GetId().GetOffset()}
 	if ack.GetOk() {
+		// Marked before the retire: an acked effect is one
+		// the ancestry walk must stop at, whichever path put it on the wire.
+		cs.markCloudHolds(tip)
 		if cs.retire(tip) {
 			cloudEffectsAckedTotal.Inc()
 			cs.ackedCount.Add(1)
+			// A descendant may be waiting for this dependency to become durable.
+			cs.wakeSender()
 		}
 		return
 	}
@@ -669,8 +888,10 @@ func (cs *CloudSync) handleAck(ack *dp.WriteAck) {
 }
 
 // handleFetch answers the cloud's ask for an effect it is missing. Served from
-// the vertex pool regardless of author; a non-resident effect gets silence and
-// the cloud re-asks elsewhere or later.
+// the vertex pool regardless of author and admitted to the normal pinned
+// outbox, so the exact requested effect survives NACK/reconnect retries. Its
+// deps are not inferred as requests; Cloud asks for each deeper hole explicitly.
+// A non-resident effect gets silence and the cloud re-asks elsewhere or later.
 func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 	ref := req.GetRef()
 	tip := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -678,14 +899,14 @@ func (cs *CloudSync) handleFetch(req *dp.FetchRequest) {
 	if !ok {
 		return
 	}
-	env, err := cs.buildEnvelope(tip, eff)
-	if err != nil {
-		slog.Error("cloud sync: fetch-relay envelope build failed", "tip", tip, "error", err)
+	if !cs.enqueueUpload(tip, eff, false, false) {
+		// Already pending means the request is scheduled or in flight. Any
+		// other failure means the vertex could not be pinned long enough for an
+		// asynchronous reply, so silence is the only safe response.
 		return
 	}
-	cs.mu.Lock()
-	cs.relayQ = append(cs.relayQ, env)
-	cs.mu.Unlock()
+	// The ask authorizes this ref only. Cloud accepts it as repair ancestry and
+	// explicitly requests any deeper hole after inspecting the landed envelope.
 	cs.wakeSender()
 }
 
@@ -831,9 +1052,19 @@ func (cs *CloudSync) FetchFromCDN(ctx context.Context, ref *pb.EffectRef) ([]byt
 	return MarshalEffectWire(eff)
 }
 
+// discoverySkipsTip reports whether an initial cloud frontier tip is metadata
+// with no ancestry to walk. Dependency-less subscriptions accumulate as
+// permanent tips and must not keep the LCA queue open. An unsubscribe carries
+// the tips it consumed as deps, however, so it must enter the walk even though
+// ReduceChain later ignores the subscription effect itself.
+func discoverySkipsTip(eff *pb.Effect) bool {
+	return eff.GetSubscription() != nil && len(eff.GetDeps()) == 0
+}
+
 // DiscoverMembers reads the membership roster from the cloud for peer
-// discovery: GetTips names the frontier and delivers the closure effects
-// inline, and ReduceBranch — the real reducer — produces the roster.
+// discovery: GetTips names candidate marker tips and delivers the closure
+// effects inline. The candidates are first reduced to the maximal tips of the
+// actual DAG, then ReduceBranch — the real reducer — produces the roster.
 // Deliberately zero engine interaction: pre-loading membership into the
 // engine makes this node non-divergent at subscription bootstrap, so peers
 // ACK instead of NACK and their key filters never arrive — free-read-misses
@@ -869,6 +1100,54 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	// reducing a truncated sub-DAG resurrects any member whose REMOVE was cut
 	// while its INSERT survived, and the cluster then redials the dead.
 	sidecar := map[effects.Tip]*pb.Effect{}
+	var initialTips []effects.Tip
+	for _, kt := range resp.GetKeys() {
+		for _, ce := range cs.peelSidecar(kt) {
+			sidecar[ce.Tip] = ce.Eff
+		}
+		for _, ref := range kt.GetTips() {
+			initialTips = append(initialTips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+	}
+	// Cloud's tips directory is a marker index, not an authoritative DAG
+	// frontier. A consumed marker can survive beside the newer candidate that
+	// references it, and its blob may later disappear. Walk all readable
+	// candidate ancestry first so such a marker is removed as non-maximal before
+	// a missing fetch is allowed to become a repair verdict.
+	load := func(t effects.Tip) (*pb.Effect, error) {
+		if eff, ok := sidecar[t]; ok {
+			return eff, nil
+		}
+		eff, err := cs.fetchEffect(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		sidecar[t] = eff
+		return eff, nil
+	}
+	candidateCount := len(initialTips)
+	var superseded []effects.Tip
+	// DiscoverMembers is deliberately zero-engine-interaction (see the doc
+	// comment above), so there is no local frontier to seed normalization
+	// with.
+	initialTips, superseded, err = effects.NormalizeCloudTipCandidates(membershipKey, initialTips, nil, load)
+	if err != nil {
+		return nil, fmt.Errorf("cloud discover: normalize candidate frontier: %w", err)
+	}
+	if len(superseded) > 0 {
+		slog.Info("cloud discover: normalized candidate markers to real tips",
+			"candidates", candidateCount, "real_tips", len(initialTips), "superseded", len(superseded))
+	}
+
+	return reduceDiscoveredTips(initialTips, load)
+}
+
+type cloudEffectLoader func(effects.Tip) (*pb.Effect, error)
+
+// reduceDiscoveredTips reconstructs one normalized candidate frontier without
+// mutating the engine. A missing blob remains an error; the caller decides
+// whether independently readable sibling candidates make fork choice possible.
+func reduceDiscoveredTips(initialTips []effects.Tip, load cloudEffectLoader) (*pb.ReducedEffect, error) {
 	visited := map[effects.Tip]bool{}
 	var queue []effects.Tip
 	enqueue := func(t effects.Tip) {
@@ -877,13 +1156,24 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 			queue = append(queue, t)
 		}
 	}
-	for _, kt := range resp.GetKeys() {
-		for _, ce := range cs.peelSidecar(kt) {
-			sidecar[ce.Tip] = ce.Eff
+
+	// Pre-resolve the real tips and filter subscriptions before the BFS.
+	// Dependency-less subscription effects are metadata that accumulate as
+	// permanent frontier entries. Enqueueing them alongside data tips defeats
+	// the LCA rule: a state-carrying snapshot dequeued while subscription tips
+	// are still queued fails the len(queue)==0 gate. Dependency-bearing
+	// unsubscribes are different: their deps are the dropped tips they consumed,
+	// so the walk must traverse them; ReduceChain skips the subscription itself.
+	for _, t := range initialTips {
+		eff, err := load(t)
+		if err != nil {
+			return nil, fmt.Errorf("cloud discover: fetch real tip %v: %w", t, err)
 		}
-		for _, ref := range kt.GetTips() {
-			enqueue(effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		if discoverySkipsTip(eff) {
+			visited[t] = true
+			continue
 		}
+		enqueue(t)
 	}
 	fetched := map[effects.Tip]*pb.Effect{}
 	var lcaTip effects.Tip
@@ -894,25 +1184,12 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	for len(queue) > 0 {
 		tip := queue[0]
 		queue = queue[1:]
-		eff, ok := sidecar[tip]
-		if !ok {
-			var err error
-			eff, err = cs.fetchEffect(ctx, tip)
-			if err != nil {
-				// A skipped fetch drops the tip's whole dep subtree, which is
-				// the same partial-ancestry reduce as a truncated walk. Fail
-				// instead; the caller retries with backoff.
-				return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
-			}
-		}
-		// Subscription effects are commutative metadata, not data. They are
-		// dep-less roots that accumulate as permanent cloud tips; including
-		// them defeats the LCA rule (the snapshot is dequeued with
-		// subscription tips still queued, so len(queue)!=0). Skip them,
-		// matching the non-bootstrap paths (flushTx, subscriptionOnlyTips,
-		// ReduceChain).
-		if eff.GetSubscription() != nil {
-			continue
+		eff, err := load(tip)
+		if err != nil {
+			// A skipped fetch drops the tip's whole dep subtree, which is
+			// the same partial-ancestry reduce as a truncated walk. Fail
+			// instead; the caller retries with backoff.
+			return nil, fmt.Errorf("cloud discover: fetch %v: %w", tip, err)
 		}
 		fetched[tip] = eff
 		if snap := eff.GetSnapshot(); snap != nil && snap.State != nil && len(queue) == 0 {
@@ -983,51 +1260,21 @@ func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
 	}
 }
 
-// RepairFrontier supersedes the cloud's tip frontier for key after a walk over
-// it failed with ErrCDNBlobMissing: the frontier references ancestry whose
-// blobs are gone from cloud storage, no retry can heal it, and no normal write
-// ever consumes it (a node cannot dep-reference a chain it cannot fetch).
-// GetTips names the current frontier and the engine mints the superseding
-// snapshot; when its upload lands, the cloud consumes every frontier tip out
-// of the tips record. Returns the number of tips superseded (0 = frontier
-// already empty, nothing to repair).
-func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
-	defer cancel()
-	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
-		AuthKey: cs.authKey,
-		Keys:    [][]byte{CloudKeyName(cs.keyNameKey, []byte(key))},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("cloud repair: get tips for %q: %w", key, err)
-	}
-	var frontier []effects.Tip
-	for _, kt := range resp.GetKeys() {
-		for _, ref := range kt.GetTips() {
-			frontier = append(frontier, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
-		}
-	}
-	if len(frontier) == 0 {
-		return 0, nil
-	}
-	if err := cs.engine.RepairCloudFrontier(key, nil, frontier); err != nil {
-		return 0, err
-	}
-	return len(frontier), nil
-}
-
 // CloudTips implements effects.CloudReader: it returns the tip frontier Cloud
 // holds for key, mapping key to its Cloud PRF image (CloudKeyName) and calling
 // GetTips — merged with the outbox's un-acked tips on the key, which are the
 // frontier the cloud hasn't seen yet. Without the merge, a key evicted before
 // its upload acked would free-miss even though its bytes sit refcount-pinned
 // in our own pool. A nil slice means neither holds anything. This is the
-// read-miss backstop — the engine installs these tips (walkAndInstall) and
+// read-miss backstop — the engine installs these tips (InstallCloudTips) and
 // the closure effects arrive inline (the sidecar), so the install walk runs
 // locally instead of one fetch per dep, rehydrating an evicted key so the
 // cluster owns it again. Unlike DiscoverMembers this does no reduction: it
 // hands the frontier to the engine, whose own reconstruct path does the rest.
-// Outbox tips need no sidecar — their bytes are already local.
+// Outbox tips need no sidecar — their bytes are already local. missing names
+// refs GetTips' own closure walk found reachable but does not hold the blob
+// for, a hint the engine uses to skip a redundant CDN round-trip for tips
+// already known-missing.
 // MayHold implements effects.CloudReader: the free, no-RPC filter gate the
 // engine consults before deciding a read-miss can skip the subscribe +
 // CloudTips path entirely. Own un-acked uploads are covered: filterOwn is fed
@@ -1036,10 +1283,10 @@ func (cs *CloudSync) MayHold(key string) bool {
 	return cs.cloudMayHold(CloudKeyName(cs.keyNameKey, []byte(key)))
 }
 
-func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, error) {
+func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, []effects.Tip, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	tips := cs.pendingTipsFor(key)
 
@@ -1054,20 +1301,21 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 			// Cloud unreachable, but the outbox holds the key's un-acked
 			// frontier locally — serve our own writes rather than failing
 			// the read. The answer is incomplete (the cloud may hold tips
-			// we've never seen), so the key is marked for reconcile:
-			// reconcileLoop re-consults until the cloud answers and merges
-			// the missed frontier into the DAG.
+			// we've never seen), so the key is marked pending: reconcileLoop
+			// re-consults until the cloud answers and merges the missed
+			// frontier into the DAG.
 			slog.Warn("cloud sync: get tips failed, serving outbox frontier", "key", key, "error", err)
-			cs.markReconcile(key)
-			return tips, nil, nil
+			cs.MarkPending(key)
+			return tips, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("cloud get tips: %w", err)
+		return nil, nil, nil, fmt.Errorf("cloud get tips: %w", err)
 	}
 	seen := make(map[effects.Tip]struct{}, len(tips))
 	for _, t := range tips {
 		seen[t] = struct{}{}
 	}
 	var sidecar []effects.CloudEffect
+	var missing []effects.Tip
 	for _, kt := range resp.GetKeys() {
 		for _, ref := range kt.GetTips() {
 			t := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -1077,14 +1325,18 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 			}
 		}
 		sidecar = append(sidecar, cs.peelSidecar(kt)...)
+		for _, ref := range kt.GetMissing() {
+			missing = append(missing, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
 	}
-	return tips, sidecar, nil
+	return tips, sidecar, missing, nil
 }
 
-// markReconcile records a key whose read was served outbox-only during a
-// cloud outage, pending a re-consult once the cloud answers again. The
-// caller logs the failure; this just tracks it.
-func (cs *CloudSync) markReconcile(key string) {
+// MarkPending implements effects.CloudReader: it records a key whose Cloud
+// frontier has a durable hole (or whose read was served outbox-only during a
+// cloud outage), pending a re-consult by reconcileLoop. The caller logs the
+// reason; this just tracks it.
+func (cs *CloudSync) MarkPending(key string) {
 	cs.mu.Lock()
 	cs.reconcile[key] = struct{}{}
 	cs.mu.Unlock()
@@ -1139,9 +1391,10 @@ func (cs *CloudSync) reconcileLoop() {
 
 // reconcileBatch re-consults GetTips for a batch of keys in one RPC and merges
 // each returned frontier into the DAG. A key is cleared from the pending set
-// only when the cloud gave a complete answer for it and any frontier installed
-// cleanly; anything else leaves it pending for the next tick. The whole RPC
-// failing (cloud still unreachable) clears nothing.
+// only when the cloud gave a complete answer for it and its frontier installed
+// with nothing left pending; anything else (install error, or a durable hole
+// InstallCloudTips reports back as still-pending) leaves it pending for the
+// next tick. The whole RPC failing (cloud still unreachable) clears nothing.
 func (cs *CloudSync) reconcileBatch(keys []string) {
 	names := make([][]byte, len(keys))
 	byName := make(map[string]string, len(keys))
@@ -1163,7 +1416,7 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 		if !ok {
 			continue
 		}
-		var tips []effects.Tip
+		var tips, missing []effects.Tip
 		for _, ref := range kt.GetTips() {
 			tips = append(tips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
@@ -1171,8 +1424,16 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 			cs.clearReconcile(key) // the cloud holds nothing we haven't already served
 			continue
 		}
-		if err := cs.engine.InstallCloudTips(key, tips, cs.peelSidecar(kt)); err != nil {
+		for _, ref := range kt.GetMissing() {
+			missing = append(missing, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+		pending, err := cs.engine.InstallCloudTips(key, tips, cs.peelSidecar(kt), missing)
+		if err != nil {
 			slog.Warn("cloud reconcile: install failed; will retry", "key", key, "error", err)
+			continue
+		}
+		if len(pending) > 0 {
+			slog.Warn("cloud reconcile: frontier partially holed; leaving pending", "key", key, "pending", pending)
 			continue
 		}
 		slog.Info("cloud reconcile: merged cloud frontier", "key", key, "tips", len(tips))
@@ -1275,6 +1536,8 @@ func (cs *CloudSync) fetchEffect(ctx context.Context, tip effects.Tip) (*pb.Effe
 	if err != nil {
 		return nil, err
 	}
+	// The CDN served it, so the cloud holds it: the ancestry walk stops here.
+	cs.markCloudHolds(tip)
 	return fetched, nil
 }
 
@@ -1309,8 +1572,13 @@ func (cs *CloudSync) peelSidecar(kt *dp.KeyTips) []effects.CloudEffect {
 				"tip", effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}, "error", err)
 			continue
 		}
+		tip := effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()}
+		// The cloud handed us this effect, so it holds it: stop the ancestry
+		// walk here rather than re-uploading a whole rehydrated chain on the
+		// next local write to the key.
+		cs.markCloudHolds(tip)
 		sidecar = append(sidecar, effects.CloudEffect{
-			Tip:      effects.Tip{env.GetId().GetNodeId(), env.GetId().GetOffset()},
+			Tip:      tip,
 			Eff:      eff,
 			ProtoLen: protoLen,
 		})
