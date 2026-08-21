@@ -1127,7 +1127,10 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 	}
 	candidateCount := len(initialTips)
 	var superseded []effects.Tip
-	initialTips, superseded, err = effects.NormalizeCloudTipCandidates(membershipKey, initialTips, load)
+	// DiscoverMembers is deliberately zero-engine-interaction (see the doc
+	// comment above), so there is no local frontier to seed normalization
+	// with.
+	initialTips, superseded, err = effects.NormalizeCloudTipCandidates(membershipKey, initialTips, nil, load)
 	if err != nil {
 		return nil, fmt.Errorf("cloud discover: normalize candidate frontier: %w", err)
 	}
@@ -1136,30 +1139,7 @@ func (cs *CloudSync) DiscoverMembers(ctx context.Context, membershipKey string) 
 			"candidates", candidateCount, "real_tips", len(initialTips), "superseded", len(superseded))
 	}
 
-	reduced, err := reduceDiscoveredTips(initialTips, load)
-	if err == nil {
-		return reduced, nil
-	}
-	if !errors.Is(err, effects.ErrCDNBlobMissing) {
-		return nil, err
-	}
-
-	// Concurrent repair snapshots are sibling maximal candidates. Each branch
-	// is independently readable because its state snapshot is the branch LCA,
-	// but walking all siblings together keeps the queue open at every snapshot
-	// and descends into the shared hole. That does not make the logical frontier
-	// unreadable: normal fork choice selects one branch. Consolidating the raw
-	// markers with another snapshot is cleanup and must not block bootstrap.
-	winnerState, winner, ok, winnerErr := reduceCandidateForkWinner(initialTips, load)
-	if winnerErr != nil {
-		return nil, winnerErr
-	}
-	if ok {
-		slog.Warn("cloud discover: candidate branches unreadable together; using fork-choice winner",
-			"winner", winner, "discarded", len(initialTips)-1)
-		return winnerState, nil
-	}
-	return nil, err
+	return reduceDiscoveredTips(initialTips, load)
 }
 
 type cloudEffectLoader func(effects.Tip) (*pb.Effect, error)
@@ -1253,44 +1233,6 @@ func reduceDiscoveredTips(initialTips []effects.Tip, load cloudEffectLoader) (*p
 	return effects.ReduceChain(seed, topoOrder(fetched)), nil
 }
 
-// reduceCandidateForkWinner proves every state-bearing candidate branch is
-// readable alone, then returns the normal fork-choice winner's reduced state.
-// A single independently holed branch means the frontier genuinely needs
-// repair; a transport failure is returned so it cannot be mistaken for a
-// durable hole.
-func reduceCandidateForkWinner(tips []effects.Tip, load cloudEffectLoader) (*pb.ReducedEffect, effects.Tip, bool, error) {
-	var winner effects.Tip
-	var winnerEff *pb.Effect
-	var winnerState *pb.ReducedEffect
-	candidates := 0
-	for _, tip := range tips {
-		eff, err := load(tip)
-		if err != nil {
-			if errors.Is(err, effects.ErrCDNBlobMissing) {
-				return nil, effects.Tip{}, false, nil
-			}
-			return nil, effects.Tip{}, false, err
-		}
-		if discoverySkipsTip(eff) {
-			continue
-		}
-		state, err := reduceDiscoveredTips([]effects.Tip{tip}, load)
-		if err != nil {
-			if errors.Is(err, effects.ErrCDNBlobMissing) {
-				return nil, effects.Tip{}, false, nil
-			}
-			return nil, effects.Tip{}, false, err
-		}
-		candidates++
-		if winnerEff == nil || effects.ForkChoiceLess(eff.GetForkChoiceHash(), winnerEff.GetForkChoiceHash()) {
-			winner = tip
-			winnerEff = eff
-			winnerState = state
-		}
-	}
-	return winnerState, winner, candidates > 1, nil
-}
-
 // trimAncestry deletes from fetched every effect in the transitive
 // dep-ancestry of eff. Only already-fetched entries are removed; nothing new
 // is fetched.
@@ -1318,59 +1260,21 @@ func trimAncestry(fetched map[effects.Tip]*pb.Effect, eff *pb.Effect) {
 	}
 }
 
-// RepairFrontier supersedes the cloud's candidate frontier for key after a
-// walk over its normalized real tips failed with ErrCDNBlobMissing: the DAG
-// references ancestry whose
-// blobs are gone from cloud storage, no retry can heal it, and no normal write
-// ever consumes it (a node cannot dep-reference a chain it cannot fetch).
-// GetTips names the current frontier and supplies its closure sidecar. The
-// engine reconstructs the maximal tips, folds readable siblings into the
-// superseding snapshot, and dep-names all candidate markers so Cloud consumes
-// the stale index entries too. Returns the number of markers superseded (0 =
-// empty or concurrently healed, nothing to repair).
-func (cs *CloudSync) RepairFrontier(ctx context.Context, key string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, cloudBackstopTimeout)
-	defer cancel()
-	resp, err := cs.client.GetTips(ctx, &dp.GetTipsRequest{
-		AuthKey: cs.authKey,
-		Keys:    [][]byte{CloudKeyName(cs.keyNameKey, []byte(key))},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("cloud repair: get tips for %q: %w", key, err)
-	}
-	var frontier []effects.Tip
-	var sidecar []effects.CloudEffect
-	for _, kt := range resp.GetKeys() {
-		sidecar = append(sidecar, cs.peelSidecar(kt)...)
-		for _, ref := range kt.GetTips() {
-			frontier = append(frontier, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
-		}
-	}
-	if len(frontier) == 0 {
-		return 0, nil
-	}
-	repaired, err := cs.engine.RepairCloudTips(key, frontier, sidecar)
-	if err != nil {
-		return 0, err
-	}
-	if !repaired {
-		return 0, nil
-	}
-	return len(frontier), nil
-}
-
 // CloudTips implements effects.CloudReader: it returns the tip frontier Cloud
 // holds for key, mapping key to its Cloud PRF image (CloudKeyName) and calling
 // GetTips — merged with the outbox's un-acked tips on the key, which are the
 // frontier the cloud hasn't seen yet. Without the merge, a key evicted before
 // its upload acked would free-miss even though its bytes sit refcount-pinned
 // in our own pool. A nil slice means neither holds anything. This is the
-// read-miss backstop — the engine installs these tips (walkAndInstall) and
+// read-miss backstop — the engine installs these tips (InstallCloudTips) and
 // the closure effects arrive inline (the sidecar), so the install walk runs
 // locally instead of one fetch per dep, rehydrating an evicted key so the
 // cluster owns it again. Unlike DiscoverMembers this does no reduction: it
 // hands the frontier to the engine, whose own reconstruct path does the rest.
-// Outbox tips need no sidecar — their bytes are already local.
+// Outbox tips need no sidecar — their bytes are already local. missing names
+// refs GetTips' own closure walk found reachable but does not hold the blob
+// for, a hint the engine uses to skip a redundant CDN round-trip for tips
+// already known-missing.
 // MayHold implements effects.CloudReader: the free, no-RPC filter gate the
 // engine consults before deciding a read-miss can skip the subscribe +
 // CloudTips path entirely. Own un-acked uploads are covered: filterOwn is fed
@@ -1379,10 +1283,10 @@ func (cs *CloudSync) MayHold(key string) bool {
 	return cs.cloudMayHold(CloudKeyName(cs.keyNameKey, []byte(key)))
 }
 
-func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, error) {
+func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, []effects.CloudEffect, []effects.Tip, error) {
 	name := CloudKeyName(cs.keyNameKey, []byte(key))
 	if !cs.cloudMayHold(name) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	tips := cs.pendingTipsFor(key)
 
@@ -1397,20 +1301,21 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 			// Cloud unreachable, but the outbox holds the key's un-acked
 			// frontier locally — serve our own writes rather than failing
 			// the read. The answer is incomplete (the cloud may hold tips
-			// we've never seen), so the key is marked for reconcile:
-			// reconcileLoop re-consults until the cloud answers and merges
-			// the missed frontier into the DAG.
+			// we've never seen), so the key is marked pending: reconcileLoop
+			// re-consults until the cloud answers and merges the missed
+			// frontier into the DAG.
 			slog.Warn("cloud sync: get tips failed, serving outbox frontier", "key", key, "error", err)
-			cs.markReconcile(key)
-			return tips, nil, nil
+			cs.MarkPending(key)
+			return tips, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("cloud get tips: %w", err)
+		return nil, nil, nil, fmt.Errorf("cloud get tips: %w", err)
 	}
 	seen := make(map[effects.Tip]struct{}, len(tips))
 	for _, t := range tips {
 		seen[t] = struct{}{}
 	}
 	var sidecar []effects.CloudEffect
+	var missing []effects.Tip
 	for _, kt := range resp.GetKeys() {
 		for _, ref := range kt.GetTips() {
 			t := effects.Tip{ref.GetNodeId(), ref.GetOffset()}
@@ -1420,14 +1325,18 @@ func (cs *CloudSync) CloudTips(ctx context.Context, key string) ([]effects.Tip, 
 			}
 		}
 		sidecar = append(sidecar, cs.peelSidecar(kt)...)
+		for _, ref := range kt.GetMissing() {
+			missing = append(missing, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
 	}
-	return tips, sidecar, nil
+	return tips, sidecar, missing, nil
 }
 
-// markReconcile records a key whose read was served outbox-only during a
-// cloud outage, pending a re-consult once the cloud answers again. The
-// caller logs the failure; this just tracks it.
-func (cs *CloudSync) markReconcile(key string) {
+// MarkPending implements effects.CloudReader: it records a key whose Cloud
+// frontier has a durable hole (or whose read was served outbox-only during a
+// cloud outage), pending a re-consult by reconcileLoop. The caller logs the
+// reason; this just tracks it.
+func (cs *CloudSync) MarkPending(key string) {
 	cs.mu.Lock()
 	cs.reconcile[key] = struct{}{}
 	cs.mu.Unlock()
@@ -1482,9 +1391,10 @@ func (cs *CloudSync) reconcileLoop() {
 
 // reconcileBatch re-consults GetTips for a batch of keys in one RPC and merges
 // each returned frontier into the DAG. A key is cleared from the pending set
-// only when the cloud gave a complete answer for it and any frontier installed
-// cleanly; anything else leaves it pending for the next tick. The whole RPC
-// failing (cloud still unreachable) clears nothing.
+// only when the cloud gave a complete answer for it and its frontier installed
+// with nothing left pending; anything else (install error, or a durable hole
+// InstallCloudTips reports back as still-pending) leaves it pending for the
+// next tick. The whole RPC failing (cloud still unreachable) clears nothing.
 func (cs *CloudSync) reconcileBatch(keys []string) {
 	names := make([][]byte, len(keys))
 	byName := make(map[string]string, len(keys))
@@ -1506,7 +1416,7 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 		if !ok {
 			continue
 		}
-		var tips []effects.Tip
+		var tips, missing []effects.Tip
 		for _, ref := range kt.GetTips() {
 			tips = append(tips, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
 		}
@@ -1514,8 +1424,16 @@ func (cs *CloudSync) reconcileBatch(keys []string) {
 			cs.clearReconcile(key) // the cloud holds nothing we haven't already served
 			continue
 		}
-		if err := cs.engine.InstallCloudTips(key, tips, cs.peelSidecar(kt)); err != nil {
+		for _, ref := range kt.GetMissing() {
+			missing = append(missing, effects.Tip{ref.GetNodeId(), ref.GetOffset()})
+		}
+		pending, err := cs.engine.InstallCloudTips(key, tips, cs.peelSidecar(kt), missing)
+		if err != nil {
 			slog.Warn("cloud reconcile: install failed; will retry", "key", key, "error", err)
+			continue
+		}
+		if len(pending) > 0 {
+			slog.Warn("cloud reconcile: frontier partially holed; leaving pending", "key", key, "pending", pending)
 			continue
 		}
 		slog.Info("cloud reconcile: merged cloud frontier", "key", key, "tips", len(tips))

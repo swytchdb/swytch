@@ -22,7 +22,7 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"slices"
@@ -431,31 +431,6 @@ func TestDiscoverySkipsOnlyDependencyLessSubscriptions(t *testing.T) {
 	}
 }
 
-func TestReduceCandidateForkWinnerRejectsIndependentlyHoledBranch(t *testing.T) {
-	readable := effects.Tip{7, 1}
-	holed := effects.Tip{8, 1}
-	readableEff := &pb.Effect{
-		ForkChoiceHash: make([]byte, 32),
-		Kind: &pb.Effect_Snapshot{Snapshot: &pb.SnapshotEffect{State: &pb.ReducedEffect{
-			Collection: pb.CollectionKind_SCALAR,
-		}}},
-	}
-	load := func(tip effects.Tip) (*pb.Effect, error) {
-		if tip == readable {
-			return readableEff, nil
-		}
-		return nil, fmt.Errorf("fetch %v: %w", tip, effects.ErrCDNBlobMissing)
-	}
-
-	state, _, ok, err := reduceCandidateForkWinner([]effects.Tip{readable, holed}, load)
-	if err != nil {
-		t.Fatalf("candidate fork choice: %v", err)
-	}
-	if ok || state != nil {
-		t.Fatalf("independently holed branch was discarded as a fork loser: ok=%v state=%v", ok, state)
-	}
-}
-
 // TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict pins the
 // Cloud tips contract: returned refs are marker candidates, not authoritative
 // logical tips. A stale marker whose blob is gone must not poison discovery
@@ -517,14 +492,20 @@ func TestDiscoverMembersNormalizesCandidateMarkersBeforeMissingVerdict(t *testin
 	}
 }
 
-func TestDiscoverMembersUsesForkChoiceForReadableSiblingCandidates(t *testing.T) {
+// TestDiscoverMembersUnreadableBranchErrorsInsteadOfForkChoice: two sibling
+// candidates each dep-reference the same hole, so both readable alone but
+// jointly unreadable. Cloud is storage, not a source of truth, so there is no
+// client-side fork choice over its markers — DiscoverMembers must fail loudly
+// on the hole instead of picking a winner, leaving healing to Cloud's own
+// billing sweep.
+func TestDiscoverMembersUnreadableBranchErrorsInsteadOfForkChoice(t *testing.T) {
 	enc, err := effects.NewEncryptorFromIKM([]byte("candidate-fork-test-ikm"))
 	if err != nil {
 		t.Fatalf("encryptor: %v", err)
 	}
 	hole := effects.Tip{99, 1}
-	winner := effects.Tip{100, 2}
-	loser := effects.Tip{101, 2}
+	first := effects.Tip{100, 2}
+	second := effects.Tip{101, 2}
 	snapshot := func(value string, forkHash []byte) *pb.Effect {
 		return &pb.Effect{
 			Key:            []byte("__swytch:members"),
@@ -539,31 +520,29 @@ func TestDiscoverMembersUsesForkChoiceForReadableSiblingCandidates(t *testing.T)
 			}}},
 		}
 	}
-	winnerEff := snapshot("winner", make([]byte, 32))
-	loserEff := snapshot("loser", bytes.Repeat([]byte{0xff}, 32))
+	firstEff := snapshot("first", make([]byte, 32))
+	secondEff := snapshot("second", bytes.Repeat([]byte{0xff}, 32))
 	cs := &CloudSync{
 		enc:        enc,
 		keyNameKey: DeriveKeyNameKey("candidate-fork-test-secret"),
 		folder:     "test-folder",
 	}
-	winnerEnv, err := cs.buildEnvelope(winner, winnerEff)
+	firstEnv, err := cs.buildEnvelope(first, firstEff)
 	if err != nil {
-		t.Fatalf("build winner envelope: %v", err)
+		t.Fatalf("build first envelope: %v", err)
 	}
-	loserEnv, err := cs.buildEnvelope(loser, loserEff)
+	secondEnv, err := cs.buildEnvelope(second, secondEff)
 	if err != nil {
-		t.Fatalf("build loser envelope: %v", err)
+		t.Fatalf("build second envelope: %v", err)
 	}
 	cs.client = &staticTipsClient{response: &dp.GetTipsResponse{Keys: []*dp.KeyTips{{
 		Tips: []*dp.EffectRef{
-			{NodeId: winner[0], Offset: winner[1]},
-			{NodeId: loser[0], Offset: loser[1]},
+			{NodeId: first[0], Offset: first[1]},
+			{NodeId: second[0], Offset: second[1]},
 		},
-		Closure: []*dp.Effect{winnerEnv, loserEnv},
+		Closure: []*dp.Effect{firstEnv, secondEnv},
 	}}}}
-	missingFetches := 0
 	cs.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		missingFetches++
 		return &http.Response{
 			StatusCode: http.StatusNotFound,
 			Body:       io.NopCloser(strings.NewReader("")),
@@ -571,15 +550,9 @@ func TestDiscoverMembersUsesForkChoiceForReadableSiblingCandidates(t *testing.T)
 		}, nil
 	})}
 
-	got, err := cs.DiscoverMembers(context.Background(), "__swytch:members")
-	if err != nil {
-		t.Fatalf("discover members: %v", err)
-	}
-	if got == nil || got.GetScalar() == nil || string(got.GetScalar().GetRaw()) != "winner" {
-		t.Fatalf("discovered state = %v, want fork-choice winner", got)
-	}
-	if missingFetches != 2 {
-		t.Fatalf("shared hole fetched %d times, want normalization plus joint-frontier proof", missingFetches)
+	_, err = cs.DiscoverMembers(context.Background(), "__swytch:members")
+	if !errors.Is(err, effects.ErrCDNBlobMissing) {
+		t.Fatalf("discover members over a jointly unreadable frontier: got err=%v, want an ErrCDNBlobMissing-wrapped error", err)
 	}
 }
 
@@ -591,12 +564,100 @@ func TestCloudTipsGatedSkipsRPC(t *testing.T) {
 	cs := &CloudSync{keyNameKey: keyNameKey}
 	cs.handleFilter(&dp.KeyFilter{Filter: filterFrame(t, CloudKeyName(keyNameKey, []byte("held")))})
 
-	tips, closure, err := cs.CloudTips(context.Background(), "absent")
+	tips, sidecar, missing, err := cs.CloudTips(context.Background(), "absent")
 	if err != nil {
 		t.Fatalf("gated CloudTips errored: %v", err)
 	}
-	if tips != nil || closure != nil {
-		t.Fatalf("gated CloudTips returned tips: %v (closure %v)", tips, closure)
+	if tips != nil || sidecar != nil || missing != nil {
+		t.Fatalf("gated CloudTips returned tips: %v (sidecar %v, missing %v)", tips, sidecar, missing)
+	}
+}
+
+// TestCloudTipsSurfacesMissing: GetTips' own missing report must pass through
+// CloudTips unchanged, so the engine's classify step can skip a redundant CDN
+// round-trip for a tip Cloud has already told us it does not hold.
+func TestCloudTipsSurfacesMissing(t *testing.T) {
+	keyNameKey := DeriveKeyNameKey("missing-report-secret")
+	name := CloudKeyName(keyNameKey, []byte("k"))
+	readable := &dp.EffectRef{NodeId: 7, Offset: 1}
+	holed := &dp.EffectRef{NodeId: 9, Offset: 4}
+
+	cs := &CloudSync{
+		keyNameKey: keyNameKey,
+		client: &staticTipsClient{response: &dp.GetTipsResponse{Keys: []*dp.KeyTips{{
+			Key:     name,
+			Tips:    []*dp.EffectRef{readable, holed},
+			Missing: []*dp.EffectRef{holed},
+		}}}},
+	}
+	cs.handleFilter(&dp.KeyFilter{Filter: filterFrame(t, name)})
+
+	tips, _, missing, err := cs.CloudTips(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("CloudTips: %v", err)
+	}
+	wantTips := []effects.Tip{{readable.NodeId, readable.Offset}, {holed.NodeId, holed.Offset}}
+	if !slices.Equal(tips, wantTips) {
+		t.Fatalf("tips = %v, want %v", tips, wantTips)
+	}
+	wantMissing := []effects.Tip{{holed.NodeId, holed.Offset}}
+	if !slices.Equal(missing, wantMissing) {
+		t.Fatalf("missing = %v, want %v", missing, wantMissing)
+	}
+}
+
+// sequencedTipsClient serves a scripted sequence of GetTips responses, one
+// per call, holding on the last entry once exhausted.
+type sequencedTipsClient struct {
+	dp.DataPlaneClient
+	responses []*dp.GetTipsResponse
+	call      int
+}
+
+func (c *sequencedTipsClient) GetTips(context.Context, *dp.GetTipsRequest, ...grpc.CallOption) (*dp.GetTipsResponse, error) {
+	resp := c.responses[c.call]
+	if c.call < len(c.responses)-1 {
+		c.call++
+	}
+	return resp, nil
+}
+
+// TestReconcileKeepsKeyPendingUntilHoleHeals: a key with a durable hole in its
+// Cloud frontier must stay in the reconcile set across a tick that still
+// reports the hole, and only clear once Cloud's own billing sweep prunes the
+// orphaned marker and a later tick sees nothing left to reconcile — reconcile
+// never repairs the hole itself, it only waits it out.
+func TestReconcileKeepsKeyPendingUntilHoleHeals(t *testing.T) {
+	engine := effects.NewEngine(effects.EngineConfig{NodeID: 1})
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Fatalf("close engine: %v", err)
+		}
+	}()
+	keyNameKey := DeriveKeyNameKey("reconcile-test-secret")
+	name := CloudKeyName(keyNameKey, []byte("k"))
+	holedRef := &dp.EffectRef{NodeId: 9, Offset: 4}
+
+	client := &sequencedTipsClient{responses: []*dp.GetTipsResponse{
+		{Keys: []*dp.KeyTips{{Key: name, Tips: []*dp.EffectRef{holedRef}, Missing: []*dp.EffectRef{holedRef}}}},
+		{Keys: []*dp.KeyTips{{Key: name}}},
+	}}
+	cs := &CloudSync{
+		engine:     engine,
+		keyNameKey: keyNameKey,
+		client:     client,
+		reconcile:  map[string]struct{}{"k": {}},
+		ctx:        context.Background(),
+	}
+
+	cs.reconcileBatch([]string{"k"})
+	if got := cs.reconcileKeys(); !slices.Equal(got, []string{"k"}) {
+		t.Fatalf("reconcile set after a still-holed tick = %v, want [k]", got)
+	}
+
+	cs.reconcileBatch([]string{"k"})
+	if got := cs.reconcileKeys(); got != nil {
+		t.Fatalf("reconcile set after the hole healed = %v, want empty", got)
 	}
 }
 

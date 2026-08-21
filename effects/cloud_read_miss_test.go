@@ -22,6 +22,7 @@ package effects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	pb "github.com/swytchdb/swytch/cluster/proto"
@@ -30,24 +31,30 @@ import (
 // fakeCloudReader is a CloudReader stub: it returns a fixed tip frontier (and
 // inline closure sidecar) per key and counts how many times it was consulted,
 // so a test can assert that once a key is rehydrated the cluster takes over
-// and Cloud is not asked again.
+// and Cloud is not asked again. pending records every MarkPending(key) call.
 type fakeCloudReader struct {
 	tips    map[string][]Tip
 	sidecar map[string][]CloudEffect
+	missing map[string][]Tip
 	err     error
 	calls   int
+	pending []string
 }
 
 // MayHold is always true: these tests exercise the consult path, which the
 // engine's free-miss gate would otherwise skip for a filter-negative key.
 func (f *fakeCloudReader) MayHold(string) bool { return true }
 
-func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []CloudEffect, error) {
+func (f *fakeCloudReader) CloudTips(_ context.Context, key string) ([]Tip, []CloudEffect, []Tip, error) {
 	f.calls++
 	if f.err != nil {
-		return nil, nil, f.err
+		return nil, nil, nil, f.err
 	}
-	return f.tips[key], f.sidecar[key], nil
+	return f.tips[key], f.sidecar[key], f.missing[key], nil
+}
+
+func (f *fakeCloudReader) MarkPending(key string) {
+	f.pending = append(f.pending, key)
 }
 
 // cloudEffect converts wire bytes (as makeReachableEffect returns) into the
@@ -238,17 +245,33 @@ func TestReadMissCloudErrorFailsRead(t *testing.T) {
 	}
 }
 
-// TestReadMissPartialFrontierFailsRead: Cloud names a frontier we can only
-// partially fetch. Serving the reachable subset would be a stale value posing
-// as the whole state, so the read must fail — and nothing may be installed,
-// or the NEXT read would reconstruct the partial state locally and skip the
-// consult entirely.
-func TestReadMissPartialFrontierFailsRead(t *testing.T) {
+// partialHoleBroadcaster serves fetchable tips and answers every other
+// FetchFromAny with the CDN-404 sentinel, modeling a Cloud frontier that is
+// only partially readable.
+type partialHoleBroadcaster struct {
+	mockBroadcaster
+	fetchable map[Tip][]byte
+}
+
+func (b *partialHoleBroadcaster) FetchFromAny(ref *pb.EffectRef, _ FetchHint) ([]byte, error) {
+	if data, ok := b.fetchable[Tip{ref.NodeId, ref.Offset}]; ok {
+		return data, nil
+	}
+	return nil, fmt.Errorf("cdn fetch %v: %w", r(ref), ErrCDNBlobMissing)
+}
+
+// TestReadMissServesReadableSubsetAndMarksPending: Cloud names a frontier we
+// can only partially fetch. The readable sibling is not this engine's hole to
+// repair and must install and serve on its own; the holed sibling is handed
+// to Cloud's reconcile loop via MarkPending instead of blocking the read. A
+// repeat read must not re-consult Cloud: the leaf's cloudPending marker caps
+// the WAN round-trips for the rest of its residency.
+func TestReadMissServesReadableSubsetAndMarksPending(t *testing.T) {
 	const key = "evicted"
 	reachable, wire := makeReachableEffect(t, key, pb.NodeID(7), 1)
-	unreachable := Tip{9, 4} // blob never fetchable
+	holed := Tip{9, 4} // blob provably absent from cloud storage
 
-	bc := &selectiveBroadcaster{
+	bc := &partialHoleBroadcaster{
 		mockBroadcaster: mockBroadcaster{
 			allRegionPeersReachable: true,
 			peerIDs:                 []pb.NodeID{7},
@@ -257,20 +280,60 @@ func TestReadMissPartialFrontierFailsRead(t *testing.T) {
 	}
 	e := newTestEngine(bc)
 	fake := &fakeCloudReader{
-		tips: map[string][]Tip{key: {reachable, unreachable}},
+		tips: map[string][]Tip{key: {reachable, holed}},
+	}
+	e.SetCloudReader(fake)
+
+	ctx := e.NewReadOnlyContext()
+	result, _, err := ctx.GetSnapshot(key)
+	if err != nil {
+		t.Fatalf("read of a partially holed frontier errored: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected the readable sibling's state, not a miss")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected one Cloud consult, got %d", fake.calls)
+	}
+	if len(fake.pending) != 1 || fake.pending[0] != key {
+		t.Fatalf("expected the key marked pending once, got %v", fake.pending)
+	}
+
+	if _, _, err := ctx.GetSnapshot(key); err != nil {
+		t.Fatalf("second read errored: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("Cloud was re-consulted on a repeat read of a pending key (%d calls)", fake.calls)
+	}
+}
+
+// TestReadMissAllTipsPendingFailsRead: when nothing in Cloud's named frontier
+// is walkable, the read must fail with ErrCloudUnavailable rather than
+// fabricate a miss for data Cloud provably holds — but a repeat read must not
+// re-consult Cloud: the leaf's cloudPending marker caps the WAN round-trips
+// and leaves healing to the reconcile loop's own schedule.
+func TestReadMissAllTipsPendingFailsRead(t *testing.T) {
+	const key = "evicted"
+	holed := Tip{9, 4}
+
+	bc := &holedFetchBroadcaster{mockBroadcaster: mockBroadcaster{allRegionPeersReachable: true}}
+	e := newTestEngine(bc)
+	fake := &fakeCloudReader{
+		tips: map[string][]Tip{key: {holed}},
 	}
 	e.SetCloudReader(fake)
 
 	ctx := e.NewReadOnlyContext()
 	for i := range 2 {
-		result, _, err := ctx.GetSnapshot(key)
-		if !errors.Is(err, ErrCloudUnavailable) {
-			t.Fatalf("read %d: want ErrCloudUnavailable for a partial frontier, got result=%v err=%v",
-				i+1, result, err)
+		if _, _, err := ctx.GetSnapshot(key); !errors.Is(err, ErrCloudUnavailable) {
+			t.Fatalf("read %d: want ErrCloudUnavailable for a wholly holed frontier, got %v", i+1, err)
 		}
 	}
-	if fake.calls != 2 {
-		t.Fatalf("expected each failed read to re-consult (nothing installed), got %d calls", fake.calls)
+	if fake.calls != 1 {
+		t.Fatalf("expected one Cloud consult (cloudPending caps the rest), got %d", fake.calls)
+	}
+	if len(fake.pending) != 1 || fake.pending[0] != key {
+		t.Fatalf("expected the key marked pending once, got %v", fake.pending)
 	}
 }
 

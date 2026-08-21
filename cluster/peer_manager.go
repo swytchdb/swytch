@@ -558,6 +558,17 @@ func (pm *PeerManager) FetchFromAny(offset *pb.EffectRef, hint effects.FetchHint
 	if fallbackErr == nil && len(fallbackData) > 0 {
 		return fallbackData, nil
 	}
+	// Under PreferPeers, second is the CDN: a 404 there is a durable answer —
+	// the blob provably does not exist — and must not be masked by the peer
+	// leg's failure, since callers key their pending-vs-install behavior on
+	// errors.Is(_, ErrCDNBlobMissing). Carry the peer error's text too, so
+	// neither signal is lost.
+	if errors.Is(fallbackErr, effects.ErrCDNBlobMissing) {
+		if err != nil {
+			return nil, fmt.Errorf("%w (peer fetch also failed: %v)", fallbackErr, err)
+		}
+		return nil, fallbackErr
+	}
 	if err != nil {
 		return nil, err
 	}

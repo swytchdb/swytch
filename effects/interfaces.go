@@ -100,16 +100,30 @@ type CloudReader interface {
 	// the read through the subscribe + consult path, whose per-leaf
 	// cloudConsulted marker caps the WAN round-trips.
 	MayHold(key string) bool
-	// CloudTips returns the tip frontier Cloud holds for key, or nil (with nil
-	// error) if Cloud holds nothing for it. sidecar is the closure — every
-	// effect reachable from those tips down to the LCA snapshot — delivered
-	// inline by GetTips and installed into the effect cache before the tip
-	// walk, so the walk runs locally instead of one WAN fetch per dep. The
-	// sidecar may be partial (capped, or missing a blob the cloud is still
-	// fetching back) — the walk stays the authority and pulls anything
-	// missing on demand via FetchFromAny. Content-blind on the wire: the
-	// implementation maps key to its Cloud PRF image and calls GetTips.
-	CloudTips(ctx context.Context, key string) (tips []Tip, sidecar []CloudEffect, err error)
+	// CloudTips returns the candidate tip frontier Cloud's index holds for
+	// key, or nil (with nil error) if Cloud holds nothing for it. These are
+	// candidates, never authoritative: Cloud's tips directory is an index
+	// that can lag or hole, and the engine's own DAG walk is what decides
+	// what is actually installable. sidecar is the closure — every effect
+	// reachable from those tips down to the LCA snapshot — delivered inline
+	// by GetTips and installed into the effect cache before the tip walk, so
+	// the walk runs locally instead of one WAN fetch per dep. The sidecar may
+	// be partial (capped, or missing a blob the cloud is still fetching
+	// back) — the walk stays the authority and pulls anything missing on
+	// demand via FetchFromAny. missing names refs GetTips' own closure walk
+	// found reachable but does not hold the blob for — a fact declared by
+	// the storage side, letting the engine skip a redundant CDN round trip to
+	// re-learn the same hole; it is a hint, not a complete inventory, so the
+	// engine's walk still treats anything not listed here as normal. Content-
+	// blind on the wire: the implementation maps key to its Cloud PRF image
+	// and calls GetTips.
+	CloudTips(ctx context.Context, key string) (tips []Tip, sidecar []CloudEffect, missing []Tip, err error)
+	// MarkPending reports that key's Cloud frontier has a durable hole this
+	// node could not walk past — see effects.ErrCDNBlobMissing. Cloud's own
+	// reconcile loop owns retrying and eventually healing or pruning the
+	// affected markers; this is not a request the engine expects synchronous
+	// action on.
+	MarkPending(key string)
 }
 
 // PeerRTTProvider provides RTT measurements to peers for optimal leader selection.

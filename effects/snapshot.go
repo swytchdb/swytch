@@ -67,11 +67,26 @@ type leafState struct {
 	// reclaims the leaf and the marker with it, re-arming the rehydrate.
 	cloudConsulted atomic.Bool
 
+	// cloudPending marks that a Cloud consult for this key found a durable
+	// hole (ErrCDNBlobMissing) it handed to the cluster's reconcile loop via
+	// MarkPending, rather than a complete answer. It is mutually exclusive
+	// with cloudConsulted for a given consult: unlike cloudConsulted it does
+	// NOT make a nil reduction authoritative — Cloud provably holds ancestry
+	// this node could not fetch, so GetSnapshot must keep returning
+	// ErrCloudUnavailable instead of a free miss. What it does share with
+	// cloudConsulted is suppressing repeat WAN GetTips round-trips for the
+	// rest of this leaf's residency: the reconcile loop owns retrying the
+	// hole on Cloud's own schedule, and re-polling here on every read of a
+	// hot pending key would just pay the same round-trip for the same
+	// not-yet-healed answer. Eviction reclaims the leaf and the marker with
+	// it, re-arming the consult.
+	cloudPending atomic.Bool
+
 	// cloudMu single-flights the Cloud consult for this leaf: concurrent
 	// missers of the same key queue here instead of each paying the WAN
-	// GetTips round-trip, then re-check cloudConsulted and serve the winner's
-	// install. A failed consult leaves the marker false, so the next miss
-	// retries.
+	// GetTips round-trip, then re-check cloudConsulted/cloudPending and serve
+	// the winner's install. A failed consult leaves both markers false, so
+	// the next miss retries.
 	cloudMu sync.Mutex
 
 	// subscribers is the set of peer node IDs subscribed to this key, used by
@@ -384,33 +399,42 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 
 	result, tips, chainLen := e.reconstructLocal(key)
 
-	// Tiered storage: a nil result can mean two things and only one warrants a
-	// Cloud consult. "Not-known nil" — no local history, or the key was evicted
-	// — is the rehydrate case: ask Cloud for the frontier and install it (blobs
-	// pulled via FetchFromAny → CDN), so reconstructing again returns the value
-	// and the cluster owns the key thereafter. "Authoritative nil" — we hold
-	// the chain and it reduces to nothing (DEL tombstone, emptied collection)
-	// — must not re-consult: such keys stay filter-positive in Cloud forever,
+	// Tiered storage: a nil result can mean three things and only two warrant
+	// a Cloud consult. "Not-known nil" — no local history, or the key was
+	// evicted — is the rehydrate case: ask Cloud for the frontier and install
+	// whatever portion of it is locally walkable (blobs pulled via
+	// FetchFromAny → CDN), so reconstructing again returns the value and the
+	// cluster owns the key thereafter. "Authoritative nil" — we hold the
+	// chain and it reduces to nothing (DEL tombstone, emptied collection) —
+	// must not re-consult: such keys stay filter-positive in Cloud forever,
 	// and without the distinction every GET of them pays a WAN GetTips
-	// round-trip. A data-bearing tip marks the nil authoritative; subscription
-	// tips don't count (a subscribed reader's own SubscriptionEffect sits in
-	// the index as a tip), and a free-missed key has no tips at all —
-	// vacuously subscription-only. The leaf's cloudConsulted marker
-	// additionally caps consults: nil becomes authoritative once Cloud has
-	// given one complete answer, and eviction reclaims the marker with the
-	// leaf, re-arming the rehydrate. Gated on the majority partition: a
-	// minority node can't trust its cluster view (ensureSubscribed already
-	// errored out above for it). UnsafeMode has no majority to trust — it
-	// rehydrates on whatever view it has.
+	// round-trip. "Holed nil" — Cloud's frontier hit a durable
+	// ErrCDNBlobMissing and nothing readable resolved locally — must not be
+	// reported as a miss either, since Cloud provably holds ancestry this
+	// node could not fetch; it returns ErrCloudUnavailable instead, and only
+	// Cloud's own reconcile loop (via MarkPending) resolves it, on its own
+	// schedule.
+	//
+	// A data-bearing tip marks the nil authoritative; subscription tips don't
+	// count (a subscribed reader's own SubscriptionEffect sits in the index
+	// as a tip), and a free-missed key has no tips at all — vacuously
+	// subscription-only. The leaf's cloudConsulted and cloudPending markers
+	// are mutually exclusive per consult and both cap further WAN round-trips
+	// for the rest of this leaf's residency — one distinguishes "nil is
+	// authoritative" from "nil is a retryable hole" — and eviction reclaims
+	// both with the leaf, re-arming the consult. Gated on the majority
+	// partition: a minority node can't trust its cluster view
+	// (ensureSubscribed already errored out above for it). UnsafeMode has no
+	// majority to trust — it rehydrates on whatever view it has.
 	if result == nil && e.cloudReader != nil && e.subscriptionOnlyTips(tips) &&
 		(e.inMajorityPartition() || e.modeForKey(key) == UnsafeMode) {
 		ls, _ := e.index.LoadOrStoreData(key, &leafState{})
-		if ls == nil || !ls.cloudConsulted.Load() {
+		if ls == nil || (!ls.cloudConsulted.Load() && !ls.cloudPending.Load()) {
 			if ls != nil {
 				ls.cloudMu.Lock()
 				defer ls.cloudMu.Unlock()
 			}
-			if ls == nil || !ls.cloudConsulted.Load() {
+			if ls == nil || (!ls.cloudConsulted.Load() && !ls.cloudPending.Load()) {
 				installed, consulted, hydrateErr := e.hydrateFromCloud(key)
 				if hydrateErr != nil {
 					// Cloud may hold this key and we couldn't get a complete
@@ -428,20 +452,30 @@ func (e *Engine) GetSnapshot(key string) (*pb.ReducedEffect, []Tip, int, error) 
 					}
 					result, tips, chainLen = e.reconstructLocal(key)
 				}
-				if consulted {
-					if ls == nil {
-						// The hydrate may have just created the leaf.
-						ls, _ = e.index.LoadOrStoreData(key, &leafState{})
-					}
-					if ls != nil {
+				if ls == nil {
+					// The hydrate may have just created the leaf.
+					ls, _ = e.index.LoadOrStoreData(key, &leafState{})
+				}
+				if ls != nil {
+					if consulted {
 						ls.cloudConsulted.Store(true)
+					} else {
+						// hydrateFromCloud reports !consulted with a nil error
+						// exactly when it found a durable hole and handed it
+						// to MarkPending — never for a transport failure,
+						// which surfaced as hydrateErr above.
+						ls.cloudPending.Store(true)
 					}
 				}
 			} else {
-				// Lost the single-flight race: a concurrent reader consulted
-				// and installed while we waited on cloudMu. Serve its result.
+				// Lost the single-flight race: a concurrent reader already
+				// resolved (or found pending) this leaf's Cloud consult while
+				// we waited on cloudMu. Serve its result.
 				result, tips, chainLen = e.reconstructLocal(key)
 			}
+		}
+		if result == nil && ls != nil && ls.cloudPending.Load() && !ls.cloudConsulted.Load() {
+			return nil, nil, 0, fmt.Errorf("%w: frontier for %q partially holed, reconcile pending", ErrCloudUnavailable, key)
 		}
 	}
 
