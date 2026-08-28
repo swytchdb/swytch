@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/swytchdb/swytch/keytrie"
+	"github.com/swytchdb/engine/keytrie"
 )
 
 // checkUint64AddOverflow checks if a + b would overflow uint64.

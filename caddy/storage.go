@@ -28,9 +28,9 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
-	"github.com/swytchdb/swytch/beacon"
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/beacon"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 )
 
 // swytchStore is the certmagic.Storage implementation backed by an

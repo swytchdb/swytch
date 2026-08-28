@@ -30,8 +30,8 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 	"github.com/zeebo/xxh3"
 	"zombiezen.com/go/sqlite"
 )
@@ -2051,8 +2051,8 @@ func lockEngineKeys(engine *effects.Engine, keys []string) func() {
 			return
 		}
 		unlocked = true
-		for i := len(sorted) - 1; i >= 0; i-- {
-			engine.GetLock(sorted[i]).Unlock()
+		for _, s := range slices.Backward(sorted) {
+			engine.GetLock(s).Unlock()
 		}
 	}
 }

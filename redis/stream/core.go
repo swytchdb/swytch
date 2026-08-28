@@ -22,11 +22,12 @@ package stream
 import (
 	"encoding/binary"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
@@ -409,8 +410,8 @@ func rangeEntries(entries []*shared.StreamEntry, start, end shared.StreamID, sta
 // rangeEntriesReverse filters entries by ID range in reverse with optional count limit.
 func rangeEntriesReverse(entries []*shared.StreamEntry, start, end shared.StreamID, startExcl, endExcl bool, count int) []*shared.StreamEntry {
 	var result []*shared.StreamEntry
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
+	for _, e := range slices.Backward(entries) {
+
 		cmpEnd := e.ID.Compare(end)
 		if endExcl {
 			if cmpEnd >= 0 {

@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/swytchdb/swytch/crdt"
+	"github.com/swytchdb/engine/crdt"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

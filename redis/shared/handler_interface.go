@@ -21,12 +21,13 @@ package shared
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/swytchdb/swytch/cache"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/cache"
+	"github.com/swytchdb/engine/effects"
 )
 
 // ProtocolVersion represents the RESP protocol version
@@ -155,8 +156,8 @@ func (c *Connection) Block(timeout float64) (context.Context, func()) {
 
 	cleanup := func() {
 		// Cancel contexts in reverse order
-		for i := len(cancels) - 1; i >= 0; i-- {
-			cancels[i]()
+		for _, cancel := range slices.Backward(cancels) {
+			cancel()
 		}
 		// Clear blocking state — set blocked to false BEFORE clearing
 		// unblockCancel, so Unblock() never sees blocked==true with

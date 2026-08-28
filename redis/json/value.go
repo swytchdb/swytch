@@ -140,7 +140,7 @@ func (v *Value) DeepCopy() *Value {
 }
 
 // scalar constructors used by the path/handler layers.
-func newNull() *Value          { return &Value{Kind: KindNull} }
+func newNull() *Value           { return &Value{Kind: KindNull} }
 func newBool(b bool) *Value     { return &Value{Kind: KindBool, Bool: b} }
 func newInt(i int64) *Value     { return &Value{Kind: KindInt, Int: i} }
 func newFloat(f float64) *Value { return &Value{Kind: KindFloat, Float: f} }

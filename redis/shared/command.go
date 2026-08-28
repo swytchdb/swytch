@@ -22,7 +22,7 @@ package shared
 import (
 	"unsafe"
 
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/effects"
 )
 
 // CommandType represents the type of Redis command
@@ -678,15 +678,15 @@ var commandNames = map[string]CommandType{
 	"ACL": CmdAcl,
 
 	// RedisJSON
-	"JSON.SET":    CmdJSONSet,
-	"JSON.GET":    CmdJSONGet,
-	"JSON.MGET":   CmdJSONMGet,
-	"JSON.MSET":   CmdJSONMSet,
-	"JSON.MERGE":  CmdJSONMerge,
-	"JSON.DEL":    CmdJSONDel,
-	"JSON.FORGET": CmdJSONForget,
-	"JSON.CLEAR":  CmdJSONClear,
-	"JSON.TYPE":   CmdJSONType,
+	"JSON.SET":       CmdJSONSet,
+	"JSON.GET":       CmdJSONGet,
+	"JSON.MGET":      CmdJSONMGet,
+	"JSON.MSET":      CmdJSONMSet,
+	"JSON.MERGE":     CmdJSONMerge,
+	"JSON.DEL":       CmdJSONDel,
+	"JSON.FORGET":    CmdJSONForget,
+	"JSON.CLEAR":     CmdJSONClear,
+	"JSON.TYPE":      CmdJSONType,
 	"JSON.NUMINCRBY": CmdJSONNumIncrBy,
 	"JSON.NUMMULTBY": CmdJSONNumMultBy,
 	"JSON.NUMPOWBY":  CmdJSONNumPowBy,

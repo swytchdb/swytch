@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

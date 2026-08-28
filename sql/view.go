@@ -25,7 +25,7 @@ import (
 
 	"zombiezen.com/go/sqlite"
 
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/effects"
 )
 
 // viewSchema is the on-disk representation of a CREATE VIEW.

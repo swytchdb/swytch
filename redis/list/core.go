@@ -22,9 +22,10 @@ package list
 import (
 	"bytes"
 	"math"
+	"slices"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
@@ -676,9 +677,9 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				}
 			}
 		} else if count < 0 {
-			for i := len(elements) - 1; i >= 0; i-- {
-				if bytes.Equal(elements[i].Data.Decompress(), element) {
-					toRemove = append(toRemove, elements[i])
+			for _, element0 := range slices.Backward(elements) {
+				if bytes.Equal(element0.Data.Decompress(), element) {
+					toRemove = append(toRemove, element0)
 					if int64(len(toRemove)) >= -count {
 						break
 					}

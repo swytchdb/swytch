@@ -23,7 +23,7 @@ import (
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/swytchdb/swytch/cache"
+	"github.com/swytchdb/engine/cache"
 )
 
 // StatsProvider defines the interface for retrieving server statistics.

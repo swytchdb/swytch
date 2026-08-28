@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/swytchdb/swytch/beacon"
-	"github.com/swytchdb/swytch/cluster"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/beacon"
+	"github.com/swytchdb/engine/cluster"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

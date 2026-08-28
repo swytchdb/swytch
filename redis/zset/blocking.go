@@ -22,7 +22,7 @@ package zset
 import (
 	"strconv"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
+	pb "github.com/swytchdb/engine/cluster/proto"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

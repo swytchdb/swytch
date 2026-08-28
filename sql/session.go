@@ -24,9 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/effects"
 	"zombiezen.com/go/sqlite"
 )
 
@@ -203,8 +204,8 @@ func (s *session) rollbackToSavepoint(name string) bool {
 // findSavepoint returns the stack index of the most recent
 // savepoint with the given name, or -1 if none.
 func (s *session) findSavepoint(name string) int {
-	for i := len(s.savepoints) - 1; i >= 0; i-- {
-		if s.savepoints[i].name == name {
+	for i, v := range slices.Backward(s.savepoints) {
+		if v.name == name {
 			return i
 		}
 	}

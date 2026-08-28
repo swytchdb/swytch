@@ -20,7 +20,7 @@
 package redis
 
 import (
-	"github.com/swytchdb/swytch/cache"
+	"github.com/swytchdb/engine/cache"
 	"github.com/swytchdb/swytch/metrics"
 	"github.com/swytchdb/swytch/redis/shared"
 )
