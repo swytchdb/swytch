@@ -22,7 +22,7 @@ package sql
 import (
 	"testing"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
+	pb "github.com/swytchdb/engine/cluster/proto"
 	"google.golang.org/protobuf/proto"
 )
 

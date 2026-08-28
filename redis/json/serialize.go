@@ -131,7 +131,7 @@ func appendPretty(b []byte, v *Value, opts PrintOpts, depth int) []byte {
 }
 
 func appendIndent(b []byte, indent string, depth int) []byte {
-	for i := 0; i < depth; i++ {
+	for range depth {
 		b = append(b, indent...)
 	}
 	return b

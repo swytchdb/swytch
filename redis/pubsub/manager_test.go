@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/swytchdb/swytch/keytrie"
+	"github.com/swytchdb/engine/keytrie"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

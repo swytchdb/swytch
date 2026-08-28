@@ -33,8 +33,8 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/certmagic"
 
-	"github.com/swytchdb/swytch/beacon"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/beacon"
+	"github.com/swytchdb/engine/effects"
 )
 
 // newTestStore stands up a single-node engine and a swytchStore wired to

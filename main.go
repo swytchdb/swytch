@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/swytchdb/swytch/cluster"
+	"github.com/swytchdb/engine/cluster"
 	"github.com/swytchdb/swytch/redis"
 	"github.com/swytchdb/swytch/sql"
 )

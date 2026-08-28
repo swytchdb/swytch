@@ -32,8 +32,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/swytchdb/swytch/beacon"
-	"github.com/swytchdb/swytch/cache"
+	"github.com/swytchdb/engine/beacon"
+	"github.com/swytchdb/engine/cache"
 	"github.com/swytchdb/swytch/metrics"
 	"github.com/swytchdb/swytch/redis/shared"
 	"github.com/swytchdb/swytch/telemetry"

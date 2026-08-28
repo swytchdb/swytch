@@ -44,8 +44,8 @@ const (
 // sliceSpec is a parsed [start:end:step]; the has* flags distinguish an omitted
 // bound (use the default) from an explicit 0.
 type sliceSpec struct {
-	start, end, step           int
-	hasStart, hasEnd, hasStep  bool
+	start, end, step          int
+	hasStart, hasEnd, hasStep bool
 }
 
 // unionSel is one selector of a union: a key or an index.
@@ -58,10 +58,10 @@ type unionSel struct {
 type segment struct {
 	kind   segKind
 	key    string      // segKey
-	idx    int          // segIndex (may be negative = from end)
-	slice  sliceSpec    // segSlice
-	union  []unionSel   // segUnion
-	filter *filterExpr  // segFilter
+	idx    int         // segIndex (may be negative = from end)
+	slice  sliceSpec   // segSlice
+	union  []unionSel  // segUnion
+	filter *filterExpr // segFilter
 }
 
 // concrete reports whether the segment is a single fixed location (segKey or

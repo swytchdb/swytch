@@ -1,5 +1,3 @@
-//go:build bypass
-
 /*
  * Copyright 2026 Swytch Labs BV
  *
@@ -19,11 +17,26 @@
  * along with Swytch. If not, see <https://www.gnu.org/licenses/>.
  */
 
-package cache
+package str
 
-// bypass returns whether cache lookups should be skipped entirely.
-// Controlled by the "bypass" build tag for testing and special modes
-// where the cache should act as a pass-through (always miss).
-func bypass() bool {
-	return true
+import (
+	"testing"
+
+	"github.com/swytchdb/swytch/redis/shared"
+)
+
+var (
+	benchmarkGetValid  bool
+	benchmarkGetKeys   []string
+	benchmarkGetRunner shared.CommandRunner
+)
+
+func BenchmarkHandleGetPrepare(b *testing.B) {
+	cmd := &shared.Command{Args: [][]byte{[]byte("key")}}
+	w := &shared.Writer{}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkGetValid, benchmarkGetKeys, benchmarkGetRunner = handleGet(cmd, w, nil)
+	}
 }

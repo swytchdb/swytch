@@ -22,8 +22,8 @@ package json
 import (
 	"strings"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
 

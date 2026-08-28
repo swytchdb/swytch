@@ -35,8 +35,8 @@ import (
 	wire "github.com/jeroenrinzema/psql-wire"
 	"zombiezen.com/go/sqlite"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 )
 
 // ServerConfig holds configuration for the SQL server.

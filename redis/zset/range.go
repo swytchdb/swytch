@@ -20,6 +20,7 @@
 package zset
 
 import (
+	"slices"
 	"strconv"
 
 	"github.com/swytchdb/swytch/redis/shared"
@@ -162,9 +163,9 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			// Filter by score range
 			filtered := make([]shared.ZSetEntry, 0)
 			if rev {
-				for i := len(sorted) - 1; i >= 0; i-- {
-					if scoreInRange(sorted[i].Score, mn, mx, mnEx, mxEx) {
-						filtered = append(filtered, sorted[i])
+				for _, s := range slices.Backward(sorted) {
+					if scoreInRange(s.Score, mn, mx, mnEx, mxEx) {
+						filtered = append(filtered, s)
 					}
 				}
 			} else {
@@ -493,9 +494,9 @@ func zsetRangeByIndex(sorted []shared.ZSetEntry, start, stop int, rev bool) []sh
 func zsetFilterByScore(sorted []shared.ZSetEntry, min, max float64, minEx, maxEx bool, rev bool, offset, count int) []shared.ZSetEntry {
 	filtered := make([]shared.ZSetEntry, 0)
 	if rev {
-		for i := len(sorted) - 1; i >= 0; i-- {
-			if scoreInRange(sorted[i].Score, min, max, minEx, maxEx) {
-				filtered = append(filtered, sorted[i])
+		for _, s := range slices.Backward(sorted) {
+			if scoreInRange(s.Score, min, max, minEx, maxEx) {
+				filtered = append(filtered, s)
 			}
 		}
 	} else {

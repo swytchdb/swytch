@@ -27,7 +27,7 @@ import (
 
 	wire "github.com/jeroenrinzema/psql-wire"
 
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/effects"
 )
 
 // Transaction-control statements routed through this file: BEGIN,

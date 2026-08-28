@@ -22,8 +22,8 @@ package caddy
 import (
 	"testing"
 
-	"github.com/swytchdb/swytch/beacon"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/beacon"
+	"github.com/swytchdb/engine/effects"
 )
 
 // resetRuntimeForTest tears the singleton down so a test can reinitialise

@@ -32,7 +32,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/swytchdb/swytch/beacon"
+	"github.com/swytchdb/engine/beacon"
 	"github.com/swytchdb/swytch/telemetry"
 	"github.com/zeebo/xxh3"
 )

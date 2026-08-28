@@ -25,7 +25,7 @@ import (
 	"math"
 	"strings"
 
-	pb "github.com/swytchdb/swytch/cluster/proto"
+	pb "github.com/swytchdb/engine/cluster/proto"
 	"zombiezen.com/go/sqlite"
 )
 

@@ -28,9 +28,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/swytchdb/swytch/cache"
-	pb "github.com/swytchdb/swytch/cluster/proto"
-	"github.com/swytchdb/swytch/effects"
+	"github.com/swytchdb/engine/cache"
+	pb "github.com/swytchdb/engine/cluster/proto"
+	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/pubsub"
 	"github.com/swytchdb/swytch/redis/scripting"
 	"github.com/swytchdb/swytch/redis/shared"
