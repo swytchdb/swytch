@@ -7,7 +7,7 @@ require (
 	github.com/jeroenrinzema/psql-wire v0.19.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
-	github.com/swytchdb/engine v1.0.0
+	github.com/swytchdb/engine v1.0.1
 	github.com/yuin/gopher-lua v1.1.2
 	github.com/zeebo/xxh3 v1.1.0
 	go.opentelemetry.io/otel v1.46.0

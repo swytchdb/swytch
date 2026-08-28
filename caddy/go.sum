@@ -61,8 +61,8 @@ github.com/quic-go/quic-go v0.61.0 h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNv
 github.com/quic-go/quic-go v0.61.0/go.mod h1:9So2anK4Tp22URSQq00k+Vo2PNkle96ycDPDHL4s9vs=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/swytchdb/engine v1.0.0 h1:9KmrEwFlC3A7q4yAJdIFbCUBcF4OBNWxTfiNXJSAjkY=
-github.com/swytchdb/engine v1.0.0/go.mod h1:ZKdYn7mVCPdT+T4nXg82Qe3I2+9LWIZhDwf6/q0j5d8=
+github.com/swytchdb/engine v1.0.1 h1:vsAMJ80LHjZ5+cNFMmr+hKfVSB7tZe7+QNrmljEiKuo=
+github.com/swytchdb/engine v1.0.1/go.mod h1:b8o8I/U67IbFRTJx9+mFG6M/8Dfdgben9qmqoHzoJug=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
 github.com/zeebo/assert v1.3.0/go.mod h1:Pq9JiuJQpG8JLJdtkwrJESF0Foym2/D9XMU5ciN/wJ0=
 github.com/zeebo/blake3 v0.2.4 h1:KYQPkhpRtcqh0ssGYcKLG1JYvddkEA8QwCM/yBqhaZI=
