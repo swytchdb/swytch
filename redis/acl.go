@@ -521,37 +521,41 @@ func (m *ACLManager) applyACLRules(user *shared.ACLUser, rules []string) error {
 	return nil
 }
 
-// applyACLRule applies a single ACL rule to a user
+// applyACLRule applies a single ACL rule to a user. Rule keywords
+// (on/off/nopass/allkeys/+@cat/+cmd/... and the ~ % & prefixes) are
+// case-insensitive, matched against a lowercased copy, but everything
+// after a >, #, <, ! prefix is case-sensitive payload (password, hash)
+// and must come from the original rule string, not the lowercased copy.
 func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
-	rule = strings.ToLower(rule)
+	lower := strings.ToLower(rule)
 
 	switch {
-	case rule == "on":
+	case lower == "on":
 		user.Enabled = true
-	case rule == "off":
+	case lower == "off":
 		user.Enabled = false
-	case rule == "nopass":
+	case lower == "nopass":
 		user.NoPass = true
-	case rule == "resetpass":
+	case lower == "resetpass":
 		user.PasswordHashes = nil
 		user.NoPass = false
-	case rule == "allkeys" || rule == "~*":
+	case lower == "allkeys" || lower == "~*":
 		user.AllKeys = true
-	case rule == "resetkeys":
+	case lower == "resetkeys":
 		user.AllKeys = false
 		user.KeyPatterns = nil
-	case rule == "allchannels" || rule == "&*":
+	case lower == "allchannels" || lower == "&*":
 		user.AllChannels = true
-	case rule == "resetchannels":
+	case lower == "resetchannels":
 		user.AllChannels = false
 		user.ChannelPatterns = nil
-	case rule == "allcommands" || rule == "+@all":
+	case lower == "allcommands" || lower == "+@all":
 		user.AllCommands = true
-	case rule == "nocommands" || rule == "-@all":
+	case lower == "nocommands" || lower == "-@all":
 		user.AllCommands = false
 		user.Categories = make(map[shared.CommandCategory]bool)
 		user.Commands = make(map[shared.CommandType]bool)
-	case rule == "reset":
+	case lower == "reset":
 		// Reset to minimal state
 		user.Enabled = false
 		user.NoPass = false
@@ -565,8 +569,8 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 		user.ChannelPatterns = nil
 		user.Selectors = nil
 
-	case strings.HasPrefix(rule, ">"):
-		// Plaintext password - hash it
+	case strings.HasPrefix(lower, ">"):
+		// Plaintext password - hash it (case-sensitive payload)
 		password := rule[1:]
 		hash, err := HashPassword(password)
 		if err != nil {
@@ -575,14 +579,14 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 		user.PasswordHashes = append(user.PasswordHashes, hash)
 		user.NoPass = false
 
-	case strings.HasPrefix(rule, "#"):
-		// Pre-hashed password (bcrypt format)
+	case strings.HasPrefix(lower, "#"):
+		// Pre-hashed password (bcrypt format, case-sensitive payload)
 		hashStr := rule[1:]
 		user.PasswordHashes = append(user.PasswordHashes, []byte(hashStr))
 		user.NoPass = false
 
-	case strings.HasPrefix(rule, "<"):
-		// Remove password
+	case strings.HasPrefix(lower, "<"):
+		// Remove password (case-sensitive payload)
 		password := rule[1:]
 		newHashes := user.PasswordHashes[:0]
 		for _, hash := range user.PasswordHashes {
@@ -592,8 +596,8 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 		}
 		user.PasswordHashes = newHashes
 
-	case strings.HasPrefix(rule, "!"):
-		// Remove hashed password
+	case strings.HasPrefix(lower, "!"):
+		// Remove hashed password (case-sensitive payload)
 		hashStr := rule[1:]
 		newHashes := user.PasswordHashes[:0]
 		for _, hash := range user.PasswordHashes {
@@ -603,7 +607,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 		}
 		user.PasswordHashes = newHashes
 
-	case strings.HasPrefix(rule, "+@"):
+	case strings.HasPrefix(lower, "+@"):
 		// Add category
 		catName := rule[2:]
 		cat, ok := shared.GetCategoryByName(catName)
@@ -616,7 +620,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			user.Categories[cat] = true
 		}
 
-	case strings.HasPrefix(rule, "-@"):
+	case strings.HasPrefix(lower, "-@"):
 		// Remove category
 		catName := rule[2:]
 		cat, ok := shared.GetCategoryByName(catName)
@@ -629,7 +633,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			user.Categories[cat] = false
 		}
 
-	case strings.HasPrefix(rule, "+"):
+	case strings.HasPrefix(lower, "+"):
 		// Add command (may include |subcommand)
 		cmdStr := rule[1:]
 		if idx := strings.Index(cmdStr, "|"); idx > 0 {
@@ -643,7 +647,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			if user.Subcommands[cmd] == nil {
 				user.Subcommands[cmd] = make(map[string]bool)
 			}
-			user.Subcommands[cmd][subName] = true
+			user.Subcommands[cmd][strings.ToLower(subName)] = true
 		} else {
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdStr))
 			if !ok {
@@ -652,7 +656,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			user.Commands[cmd] = true
 		}
 
-	case strings.HasPrefix(rule, "-"):
+	case strings.HasPrefix(lower, "-"):
 		// Remove command
 		cmdStr := rule[1:]
 		if idx := strings.Index(cmdStr, "|"); idx > 0 {
@@ -665,7 +669,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			if user.Subcommands[cmd] == nil {
 				user.Subcommands[cmd] = make(map[string]bool)
 			}
-			user.Subcommands[cmd][subName] = false
+			user.Subcommands[cmd][strings.ToLower(subName)] = false
 		} else {
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdStr))
 			if !ok {
@@ -674,32 +678,32 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			user.Commands[cmd] = false
 		}
 
-	case strings.HasPrefix(rule, "~"):
-		// Key pattern (read/write)
+	case strings.HasPrefix(lower, "~"):
+		// Key pattern (read/write, case-sensitive)
 		pattern := rule[1:]
 		user.KeyPatterns = append(user.KeyPatterns, shared.KeyPattern{
 			Pattern: pattern,
 			Type:    shared.KeyPatternReadWrite,
 		})
 
-	case strings.HasPrefix(rule, "%r~"):
-		// Key pattern (read only)
+	case strings.HasPrefix(lower, "%r~"):
+		// Key pattern (read only, case-sensitive)
 		pattern := rule[3:]
 		user.KeyPatterns = append(user.KeyPatterns, shared.KeyPattern{
 			Pattern: pattern,
 			Type:    shared.KeyPatternReadOnly,
 		})
 
-	case strings.HasPrefix(rule, "%w~"):
-		// Key pattern (write only)
+	case strings.HasPrefix(lower, "%w~"):
+		// Key pattern (write only, case-sensitive)
 		pattern := rule[3:]
 		user.KeyPatterns = append(user.KeyPatterns, shared.KeyPattern{
 			Pattern: pattern,
 			Type:    shared.KeyPatternWriteOnly,
 		})
 
-	case strings.HasPrefix(rule, "&"):
-		// Channel pattern
+	case strings.HasPrefix(lower, "&"):
+		// Channel pattern (case-sensitive)
 		pattern := rule[1:]
 		if pattern == "*" {
 			user.AllChannels = true
