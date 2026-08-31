@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/swytchdb/swytch/redis/shared"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestACLManager_DefaultUser(t *testing.T) {
@@ -609,5 +610,143 @@ func TestHandler_CommandACL(t *testing.T) {
 	h.ExecuteInto(cmd, w, conn)
 	if !bytes.Contains(buf.Bytes(), []byte("NOPERM")) {
 		t.Errorf("FLUSHDB should be denied, got %s", buf.String())
+	}
+}
+
+func TestACLManager_RuleCaseSensitivity_AclFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	aclFile := filepath.Join(tmpDir, "acl.conf")
+
+	content := "user demo on >MixedCasePw ~KeyPattern:* &*\n"
+	if err := os.WriteFile(aclFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write ACL file: %v", err)
+	}
+
+	m := NewACLManager()
+	if err := m.LoadFromFile(aclFile); err != nil {
+		t.Fatalf("failed to load ACL file: %v", err)
+	}
+
+	// Original-case password should authenticate.
+	if _, err := m.Authenticate("demo", "MixedCasePw"); err != nil {
+		t.Errorf("should authenticate with original-case password: %v", err)
+	}
+
+	// Lowercased password must NOT authenticate - the bug lowercased
+	// the plaintext before hashing it.
+	if _, err := m.Authenticate("demo", "mixedcasepw"); err == nil {
+		t.Error("lowercased password should not authenticate")
+	}
+
+	// Key pattern must retain its original case.
+	demo := m.GetUser("demo")
+	if len(demo.KeyPatterns) != 1 || demo.KeyPatterns[0].Pattern != "KeyPattern:*" {
+		t.Errorf("key pattern should retain original case, got %+v", demo.KeyPatterns)
+	}
+}
+
+func TestACLManager_RuleCaseSensitivity_SetUser(t *testing.T) {
+	h := NewHandler(HandlerConfig{})
+	defer h.Close()
+
+	conn := &shared.Connection{
+		User: testUser,
+		Ctx:  context.Background(),
+	}
+
+	buf := &bytes.Buffer{}
+	w := shared.NewWriter(buf)
+
+	cmd := &shared.Command{Type: shared.CmdAcl, Args: [][]byte{
+		[]byte("SETUSER"), []byte("mixeduser"), []byte("on"), []byte(">MixedCasePw"), []byte("~KeyPattern:*"),
+	}}
+	h.ExecuteInto(cmd, w, conn)
+	if !bytes.Contains(buf.Bytes(), []byte("+OK")) {
+		t.Fatalf("ACL SETUSER should return OK, got %s", buf.String())
+	}
+
+	if _, err := h.aclManager.Authenticate("mixeduser", "MixedCasePw"); err != nil {
+		t.Errorf("should authenticate with original-case password: %v", err)
+	}
+	if _, err := h.aclManager.Authenticate("mixeduser", "mixedcasepw"); err == nil {
+		t.Error("lowercased password should not authenticate")
+	}
+
+	user := h.aclManager.GetUser("mixeduser")
+	if len(user.KeyPatterns) != 1 || user.KeyPatterns[0].Pattern != "KeyPattern:*" {
+		t.Errorf("key pattern should retain original case, got %+v", user.KeyPatterns)
+	}
+}
+
+func TestACLManager_RuleCaseSensitivity_KeyPatternMatching(t *testing.T) {
+	m := NewACLManager()
+	user := &shared.ACLUser{
+		Name:        "app",
+		Enabled:     true,
+		Categories:  make(map[shared.CommandCategory]bool),
+		Commands:    make(map[shared.CommandType]bool),
+		Subcommands: make(map[shared.CommandType]map[string]bool),
+	}
+	m.SetUser(user)
+
+	if err := m.applyACLRules(user, []string{"~KeyPattern:*"}); err != nil {
+		t.Fatalf("failed to apply rules: %v", err)
+	}
+
+	if err := m.CheckKey(user, "KeyPattern:1", false); err != nil {
+		t.Errorf("should allow access to KeyPattern:1: %v", err)
+	}
+	if err := m.CheckKey(user, "keypattern:1", false); err == nil {
+		t.Error("should deny access to keypattern:1 (pattern is case-sensitive)")
+	}
+}
+
+func TestACLManager_RuleCaseSensitivity_HashedPassword(t *testing.T) {
+	rawHash, err := bcrypt.GenerateFromPassword([]byte("secretPW"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("failed to generate bcrypt hash: %v", err)
+	}
+
+	m := NewACLManager()
+	user := &shared.ACLUser{
+		Name:        "hashed",
+		Categories:  make(map[shared.CommandCategory]bool),
+		Commands:    make(map[shared.CommandType]bool),
+		Subcommands: make(map[shared.CommandType]map[string]bool),
+	}
+	m.SetUser(user)
+
+	rule := "on #" + string(rawHash)
+	if err := m.applyACLRules(user, strings.Fields(rule)); err != nil {
+		t.Fatalf("failed to apply rules: %v", err)
+	}
+
+	if len(user.PasswordHashes) != 1 || string(user.PasswordHashes[0]) != string(rawHash) {
+		t.Errorf("hash should be stored verbatim, got %q want %q", user.PasswordHashes[0], rawHash)
+	}
+
+	if _, err := m.Authenticate("hashed", "secretPW"); err != nil {
+		t.Errorf("should authenticate with original password against verbatim hash: %v", err)
+	}
+}
+
+func TestACLManager_RuleCaseSensitivity_KeywordsStillCaseInsensitive(t *testing.T) {
+	m := NewACLManager()
+	if err := m.parseACLLine("user x ON NOPASS ALLKEYS"); err != nil {
+		t.Fatalf("failed to parse uppercase keywords: %v", err)
+	}
+
+	user := m.GetUser("x")
+	if user == nil {
+		t.Fatal("user x should have been created")
+	}
+	if !user.Enabled {
+		t.Error("ON keyword should enable the user regardless of case")
+	}
+	if !user.NoPass {
+		t.Error("NOPASS keyword should be honored regardless of case")
+	}
+	if !user.AllKeys {
+		t.Error("ALLKEYS keyword should be honored regardless of case")
 	}
 }
