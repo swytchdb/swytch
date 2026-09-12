@@ -70,8 +70,8 @@ github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UV
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/swytchdb/engine v1.0.3 h1:lpunxOCwysgVZNtGuTsXaUeAqYsOh6HMGEUAcpdgaBk=
-github.com/swytchdb/engine v1.0.3/go.mod h1:YQXX+uwrspBHOZkOTw8A0+o8i/POmRrKRwd7vq+rlaM=
+github.com/swytchdb/engine v1.0.4 h1:MCjsWWHru83dBk2FdMhFOZsVwVfjhVGXdzDj5dSOMa0=
+github.com/swytchdb/engine v1.0.4/go.mod h1:YQXX+uwrspBHOZkOTw8A0+o8i/POmRrKRwd7vq+rlaM=
 github.com/yuin/gopher-lua v1.1.2 h1:yF/FjE3hD65tBbt0VXLE13HWS9h34fdzJmrWRXwobGA=
 github.com/yuin/gopher-lua v1.1.2/go.mod h1:7aRmXIWl37SqRf0koeyylBEzJ+aPt8A+mmkQ4f1ntR8=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=

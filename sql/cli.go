@@ -125,7 +125,7 @@ func Run(args []string) error {
 		}
 	}
 
-	rt, err := beacon.NewRuntime(beacon.RuntimeConfig{
+	rt, err := beacon.NewRuntime(context.Background(), beacon.RuntimeConfig{
 		MemoryLimit:        maxMemoryBytes,
 		MemoryLimitPercent: maxMemoryPct,
 		ClusterPassphrase:  *clusterPassphrase,
