@@ -20,6 +20,7 @@
 package redis
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -81,7 +82,7 @@ func InitializeEffects(cfg *EffectsConfig) error {
 		return fmt.Errorf("--join requires --cluster-passphrase")
 	}
 
-	rt, err := beacon.NewRuntime(beacon.RuntimeConfig{
+	rt, err := beacon.NewRuntime(context.Background(), beacon.RuntimeConfig{
 		MemoryLimit:        cfg.MemoryLimit,
 		MemoryLimitPercent: cfg.MemoryLimitPercent,
 		ClusterPassphrase:  cfg.ClusterPassphrase,
