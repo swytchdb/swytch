@@ -28,7 +28,9 @@ jobs:
       - name: API integration tests
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
-          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.33.x -p path)"
+          KUBEBUILDER_ASSETS="$(setup-envtest use 1.33.x -p path)" || exit 1
+          test -n "$KUBEBUILDER_ASSETS" || exit 1
+          export KUBEBUILDER_ASSETS
           go test -v ./test/integration
       - name: Install kind
         run: go install sigs.k8s.io/kind@v0.29.0
