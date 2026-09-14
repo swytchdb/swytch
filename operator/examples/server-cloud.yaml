@@ -1,0 +1,14 @@
+apiVersion: swytch.getswytch.com/v1alpha1
+kind: Swytch
+metadata:
+  name: cloud-cache
+spec:
+  deployment: server
+  memory: 1Gi
+  server:
+    replicas: 2
+  discovery:
+    cloud:
+      secretKeyRef:
+        name: swytch-cloud
+        key: connection-secret

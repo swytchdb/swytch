@@ -1,0 +1,36 @@
+name: Operator
+on:
+  pull_request:
+    paths: ['operator/**', '.github/workflows/operator.yml']
+  push:
+    paths: ['operator/**', '.github/workflows/operator.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.17.3
+      - run: go build ./cmd/operator
+      - run: go test -race ./...
+      - run: helm lint charts/swytch-operator --kube-version 1.33.0
+      - name: API integration tests
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.33.x -p path)"
+          go test -v ./test/integration
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.29.0
+      - name: End-to-end tests
+        run: bash test/e2e/run.sh

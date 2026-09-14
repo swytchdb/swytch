@@ -1,0 +1,7 @@
+apiVersion: v2
+name: swytch-operator
+description: Swytch Redis sidecar injection and server deployments
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.33.0-0"
