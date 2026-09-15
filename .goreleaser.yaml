@@ -31,9 +31,25 @@ builds:
     goarch:
       - amd64
       - arm64
+  - id: swytch-operator
+    dir: operator
+    main: ./cmd/operator
+    binary: swytch-operator
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: default
+    ids: [swytch]
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
@@ -83,6 +99,7 @@ sboms:
 
 dockers_v2:
   - id: swytch
+    ids: [swytch]
     images:
       - 'ghcr.io/swytchdb/swytch'
     tags:
@@ -95,6 +112,25 @@ dockers_v2:
     labels:
       org.opencontainers.image.title: '{{ .ProjectName }}'
       org.opencontainers.image.description: 'Swytch distributed cache and database'
+      org.opencontainers.image.url: 'https://github.com/swytchdb/swytch'
+      org.opencontainers.image.source: 'https://github.com/swytchdb/swytch'
+      org.opencontainers.image.version: '{{ .Version }}'
+      org.opencontainers.image.revision: '{{ .FullCommit }}'
+      org.opencontainers.image.licenses: 'AGPL-3.0-or-later'
+  - id: swytch-operator
+    ids: [swytch-operator]
+    images:
+      - 'ghcr.io/swytchdb/swytch-operator'
+    tags:
+      - '{{ .Version }}'
+      - '{{ if not .Prerelease }}latest{{ end }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: operator/Dockerfile.goreleaser
+    labels:
+      org.opencontainers.image.title: 'swytch-operator'
+      org.opencontainers.image.description: 'Swytch Kubernetes operator'
       org.opencontainers.image.url: 'https://github.com/swytchdb/swytch'
       org.opencontainers.image.source: 'https://github.com/swytchdb/swytch'
       org.opencontainers.image.version: '{{ .Version }}'

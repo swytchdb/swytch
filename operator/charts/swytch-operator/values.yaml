@@ -1,0 +1,20 @@
+replicaCount: 1
+image:
+  repository: ghcr.io/swytchdb/swytch-operator
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+swytch:
+  image: ghcr.io/swytchdb/swytch:1.4.1
+  # These Secrets must exist in each workload namespace.
+  imagePullSecrets: []
+resources:
+  limits:
+    memory: 128Mi
+nodeSelector: {}
+tolerations: []
+affinity: {}
+webhook:
+  # Increment to renew the leaf certificate with the existing CA.
+  certificateRevision: "1"
+  certificateDurationDays: 365

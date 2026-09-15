@@ -1,0 +1,33 @@
+apiVersion: swytch.getswytch.com/v1alpha1
+kind: Swytch
+metadata:
+  name: socket-cache
+spec:
+  deployment: sidecar
+  memory: 512Mi
+  requests:
+    memory: 128Mi
+    cpu: 100m
+  sidecar:
+    transport: unix
+  discovery:
+    cloud:
+      secretKeyRef:
+        name: swytch-cloud
+        key: connection-secret
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: socket-example
+spec:
+  template:
+    metadata:
+      annotations:
+        swytch.getswytch.com/profile: socket-cache
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: app
+          image: redis:7.4-alpine
+          command: [sh, -ec, 'until redis-cli -s /var/run/swytch/swytch.sock PING; do sleep 1; done']

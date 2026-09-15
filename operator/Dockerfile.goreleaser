@@ -1,0 +1,9 @@
+FROM scratch
+
+ARG TARGETPLATFORM
+
+COPY --from=alpine:3 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY $TARGETPLATFORM/swytch-operator /operator
+
+USER 65532:65532
+ENTRYPOINT ["/operator"]

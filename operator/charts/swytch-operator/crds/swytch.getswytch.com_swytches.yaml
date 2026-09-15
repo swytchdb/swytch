@@ -1,0 +1,181 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: swytches.swytch.getswytch.com
+spec:
+  group: swytch.getswytch.com
+  scope: Namespaced
+  names:
+    plural: swytches
+    singular: swytch
+    kind: Swytch
+    shortNames: [sw]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Deployment
+          type: string
+          jsonPath: .spec.deployment
+        - name: Memory
+          type: string
+          jsonPath: .spec.memory
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 48
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+            spec:
+              type: object
+              required: [deployment, memory, discovery]
+              x-kubernetes-validations:
+                - rule: "self.deployment == 'sidecar' ? !has(self.server) : !has(self.sidecar)"
+                  message: Settings must match the deployment mode
+                - rule: "!has(self.requests) || !has(self.requests.memory) || quantity(self.requests.memory).compareTo(quantity(self.memory)) <= 0"
+                  message: Memory request must not exceed the memory limit
+                - rule: "!has(self.requests) || !has(self.requests.cpu) || !has(self.limits) || !has(self.limits.cpu) || quantity(self.requests.cpu).compareTo(quantity(self.limits.cpu)) <= 0"
+                  message: CPU request must not exceed the CPU limit
+              properties:
+                deployment:
+                  type: string
+                  enum: [sidecar, server]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: Deployment mode is immutable
+                memory:
+                  type: string
+                  maxLength: 32
+                  x-kubernetes-validations:
+                    - rule: "isQuantity(self) && quantity(self).compareTo(quantity('0')) > 0"
+                      message: Memory must be a positive Kubernetes quantity
+                requests:
+                  type: object
+                  properties:
+                    memory:
+                      type: string
+                      maxLength: 32
+                      x-kubernetes-validations:
+                        - rule: "isQuantity(self) && quantity(self).compareTo(quantity('0')) >= 0"
+                          message: Memory request must be a nonnegative quantity
+                    cpu:
+                      type: string
+                      maxLength: 32
+                      x-kubernetes-validations:
+                        - rule: "isQuantity(self) && quantity(self).compareTo(quantity('0')) >= 0"
+                          message: CPU request must be a nonnegative quantity
+                limits:
+                  type: object
+                  properties:
+                    cpu:
+                      type: string
+                      maxLength: 32
+                      x-kubernetes-validations:
+                        - rule: "isQuantity(self) && quantity(self).compareTo(quantity('0')) > 0"
+                          message: CPU limit must be a positive quantity
+                image:
+                  type: string
+                  minLength: 1
+                  maxLength: 512
+                sidecar:
+                  type: object
+                  properties:
+                    transport:
+                      type: string
+                      enum: [tcp, unix]
+                      default: tcp
+                server:
+                  type: object
+                  properties:
+                    replicas:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                      default: 1
+                discovery:
+                  type: object
+                  x-kubernetes-validations:
+                    - rule: has(self.dns) != has(self.cloud)
+                      message: Exactly one of DNS or Cloud is required
+                  properties:
+                    dns:
+                      type: object
+                      required: [secretKeyRef]
+                      properties:
+                        secretKeyRef:
+                          type: object
+                          required: [name, key]
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                              maxLength: 253
+                              pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                            key:
+                              type: string
+                              minLength: 1
+                              maxLength: 253
+                              pattern: '^[-._a-zA-Z0-9]+$'
+                    cloud:
+                      type: object
+                      required: [secretKeyRef]
+                      properties:
+                        secretKeyRef:
+                          type: object
+                          required: [name, key]
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                              maxLength: 253
+                              pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                            key:
+                              type: string
+                              minLength: 1
+                              maxLength: 253
+                              pattern: '^[-._a-zA-Z0-9]+$'
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status, reason, message, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ['True', 'False', Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

@@ -1,0 +1,161 @@
+{{- $name := include "swytch-operator.name" . -}}
+{{- $secretName := printf "%s-tls" $name -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $revision := toString .Values.webhook.certificateRevision -}}
+{{- $ca := dict -}}
+{{- $cert := dict -}}
+{{- if $existing -}}
+  {{- $ca = buildCustomCert (index $existing.data "ca.crt") (index $existing.data "ca.key") -}}
+  {{- $oldRevision := index ($existing.metadata.annotations | default dict) "swytch.getswytch.com/certificate-revision" -}}
+  {{- if eq $oldRevision $revision -}}
+    {{- $cert = dict "Cert" (index $existing.data "tls.crt" | b64dec) "Key" (index $existing.data "tls.key" | b64dec) -}}
+  {{- end -}}
+{{- else -}}
+  {{- $ca = genCA (printf "%s-ca" $name) 3650 -}}
+{{- end -}}
+{{- if not $cert -}}
+  {{- $cert = genSignedCert $name nil (list (printf "%s.%s.svc" $name .Release.Namespace) (printf "%s.%s.svc.cluster.local" $name .Release.Namespace)) (int .Values.webhook.certificateDurationDays) $ca -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  annotations:
+    swytch.getswytch.com/certificate-revision: {{ $revision | quote }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca.Cert | b64enc }}
+  ca.key: {{ $ca.Key | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "swytch-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "swytch-operator.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "swytch-operator.labels" . | nindent 8 }}
+      annotations:
+        checksum/certificate: {{ $cert.Cert | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --leader-elect=true
+            - --swytch-image={{ .Values.swytch.image }}
+            {{- if .Values.swytch.imagePullSecrets }}
+            - --swytch-image-pull-secrets={{ join "," .Values.swytch.imagePullSecrets }}
+            {{- end }}
+          ports:
+            - name: webhook
+              containerPort: 9443
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: certificates
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: certificates
+          secret:
+            secretName: {{ $secretName }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+spec:
+  selector:
+    {{- include "swytch-operator.labels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ $name }}
+webhooks:
+  - name: pods.swytch.getswytch.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    reinvocationPolicy: IfNeeded
+    timeoutSeconds: 5
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ $name }}
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-pods
+        port: 443
+    matchConditions:
+      - name: annotated
+        expression: "has(object.metadata.annotations) && 'swytch.getswytch.com/profile' in object.metadata.annotations"
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
