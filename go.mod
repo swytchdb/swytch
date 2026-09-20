@@ -1,6 +1,6 @@
 module github.com/swytchdb/swytch
 
-go 1.27.1
+go 1.27.0
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
