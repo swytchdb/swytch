@@ -7,7 +7,7 @@ require (
 	github.com/jeroenrinzema/psql-wire v0.19.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
-	github.com/swytchdb/engine v1.0.4
+	github.com/swytchdb/engine v1.0.5
 	github.com/yuin/gopher-lua v1.1.2
 	github.com/zeebo/xxh3 v1.1.0
 	go.opentelemetry.io/otel v1.46.0
@@ -51,7 +51,7 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
-	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/grpc v1.84.0 // indirect
 	modernc.org/libc v1.73.5 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
