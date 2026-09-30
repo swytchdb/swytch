@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/jeroenrinzema/psql-wire v0.19.0
+	github.com/jeroenrinzema/psql-wire v0.20.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/swytchdb/engine v1.0.5
