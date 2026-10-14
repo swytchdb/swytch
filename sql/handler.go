@@ -42,7 +42,8 @@ const (
 //
 // In phase 1 we only support the simple query protocol: each query
 // parses + executes once, and prepared statements are single-use.
-func (s *Server) handle(ctx context.Context, query string) (wire.PreparedStatements, error) {
+func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.PreparedStatements, error) {
+	query := incoming.Query
 	sess, err := sessionFromCtx(ctx)
 	if err != nil {
 		return nil, err
