@@ -7,6 +7,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  SWYTCH_HELM_CHART: ${{ github.workspace }}/.swytch-helm/charts/swytch-operator
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,6 +17,12 @@ jobs:
         working-directory: operator
     steps:
       - uses: actions/checkout@v7
+      - name: Check out the released Helm chart
+        uses: actions/checkout@v7
+        with:
+          repository: swytchdb/swytch-helm
+          ref: v1.5.2
+          path: .swytch-helm
       - uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
@@ -24,7 +32,7 @@ jobs:
           version: v3.17.3
       - run: go build ./cmd/operator
       - run: go test -race ./...
-      - run: helm lint charts/swytch-operator --kube-version 1.33.0
+      - run: helm lint "$SWYTCH_HELM_CHART" --kube-version 1.33.0
       - name: API integration tests
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21

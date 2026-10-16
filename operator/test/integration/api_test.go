@@ -36,13 +36,17 @@ func TestKubernetesAPI(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS to run disposable API integration tests")
 	}
+	chart := os.Getenv("SWYTCH_HELM_CHART")
+	if !filepath.IsAbs(chart) {
+		t.Fatal("set SWYTCH_HELM_CHART to the absolute chart path in a swytch-helm checkout")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	path := "/mutate-pods"
 	none := admissionv1.SideEffectClassNone
 	fail := admissionv1.Fail
 	hooks := &admissionv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "swytch-test"}, Webhooks: []admissionv1.MutatingWebhook{{Name: "pods.swytch.getswytch.com", AdmissionReviewVersions: []string{"v1"}, SideEffects: &none, FailurePolicy: &fail, ClientConfig: admissionv1.WebhookClientConfig{Service: &admissionv1.ServiceReference{Name: "unused", Namespace: "default", Path: &path}}, MatchConditions: []admissionv1.MatchCondition{{Name: "annotated", Expression: "has(object.metadata.annotations) && 'swytch.getswytch.com/profile' in object.metadata.annotations"}}, Rules: []admissionv1.RuleWithOperations{{Operations: []admissionv1.OperationType{admissionv1.Create}, Rule: admissionv1.Rule{APIGroups: []string{""}, APIVersions: []string{"v1"}, Resources: []string{"pods"}}}}}}}
-	env := &envtest.Environment{CRDDirectoryPaths: []string{"../../charts/swytch-operator/crds"}, ErrorIfCRDPathMissing: true, WebhookInstallOptions: envtest.WebhookInstallOptions{MutatingWebhooks: []*admissionv1.MutatingWebhookConfiguration{hooks}}}
+	env := &envtest.Environment{CRDDirectoryPaths: []string{filepath.Join(chart, "crds")}, ErrorIfCRDPathMissing: true, WebhookInstallOptions: envtest.WebhookInstallOptions{MutatingWebhooks: []*admissionv1.MutatingWebhookConfiguration{hooks}}}
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +175,7 @@ func TestKubernetesAPI(t *testing.T) {
 		}
 		upgrade := func(revision string) {
 			t.Helper()
-			cmd := exec.Command("helm", "upgrade", "--install", "test", "../../charts/swytch-operator", "--namespace", "operator-system", "--create-namespace", "--kubeconfig", kubeconfig, "--set-string", "webhook.certificateRevision="+revision)
+			cmd := exec.Command("helm", "upgrade", "--install", "test", chart, "--namespace", "operator-system", "--create-namespace", "--kubeconfig", kubeconfig, "--set-string", "webhook.certificateRevision="+revision)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("helm: %v\n%s", err, out)
 			}

@@ -18,10 +18,12 @@ and arm64, using the release version without the leading `v`. Stable releases al
 update `latest`; prereleases only publish their version tag. The images use the
 same signing process as the main Swytch image.
 
-From a released checkout, install the chart with its matching operator image:
+The Helm chart and CRD are maintained in
+[swytchdb/swytch-helm](https://github.com/swytchdb/swytch-helm). Install a pinned
+chart from its public OCI registry; no source checkout or `helm repo add` is needed:
 
 ```sh
-helm install swytch ./operator/charts/swytch-operator \
+helm install swytch oci://ghcr.io/swytchdb/charts/swytch-operator --version 1.5.2 \
   --namespace swytch-system --create-namespace --wait
 ```
 
@@ -32,7 +34,7 @@ operator module to a registry your cluster can access:
 cd operator
 docker build -t YOUR_REGISTRY/swytch-operator:0.1.0 .
 docker push YOUR_REGISTRY/swytch-operator:0.1.0
-helm install swytch ./charts/swytch-operator \
+helm install swytch oci://ghcr.io/swytchdb/charts/swytch-operator --version 1.5.2 \
   --namespace swytch-system --create-namespace \
   --set image.repository=YOUR_REGISTRY/swytch-operator \
   --set image.tag=0.1.0 --wait
@@ -188,29 +190,43 @@ operator provisions no PVCs.
 
 ## Upgrades and webhook certificates
 
-Before creating a release tag, manually update the chart's `version` and
-`appVersion` in `Chart.yaml`, and `image.tag` and `swytch.image` in `values.yaml`
-to match the intended release. Commit those changes before tagging. The release
-pipeline builds both images from that tag; it does not edit or commit versions.
+This repository releases the operator and Swytch images. After those images are
+published, update and release the chart in
+[swytch-helm](https://github.com/swytchdb/swytch-helm#releases). Its chart version
+can advance independently for chart-only changes; `appVersion` identifies the
+default operator and Swytch image version. Swytch's release pipeline does not
+publish or edit the chart.
 
 Helm installs CRDs from `crds/` only on initial installation. Before an operator
 upgrade, apply the new CRD explicitly, then upgrade the chart:
 
 ```sh
-kubectl apply -f charts/swytch-operator/crds/
-helm upgrade swytch ./charts/swytch-operator -n swytch-system --reuse-values
+chart_dir="$(mktemp -d)"
+helm pull oci://ghcr.io/swytchdb/charts/swytch-operator \
+  --version 1.5.2 --untar --untardir "$chart_dir"
+kubectl apply -f "$chart_dir/swytch-operator/crds/"
+helm upgrade swytch "$chart_dir/swytch-operator" -n swytch-system --reuse-values \
+  --set-string image.tag=1.5.2 \
+  --set-string swytch.image=ghcr.io/swytchdb/swytch:1.5.2 --wait
 ```
+
+Review existing overrides before upgrading. `--reuse-values` retains old image
+pins, so select the intended images explicitly. Preserve any private registry
+overrides and account for profiles with `spec.image` set. Existing installations
+of the old in-tree chart can upgrade in place with the same release name and namespace.
 
 The chart generates a ten-year CA and a one-year serving certificate. Normal Helm
 upgrades reuse them using `lookup`. Before the serving certificate expires,
 increment `webhook.certificateRevision`:
 
 ```sh
-helm upgrade swytch ./charts/swytch-operator -n swytch-system --reuse-values \
+helm upgrade swytch oci://ghcr.io/swytchdb/charts/swytch-operator \
+  --version 1.5.2 -n swytch-system --reuse-values \
   --set-string webhook.certificateRevision=2 --wait
 ```
 
-This renews the serving certificate with the same CA and rolls the operator.
+Use the currently installed chart version for certificate-only renewal. This
+renews the serving certificate with the same CA and rolls the operator.
 The Secret stores the CA key for subsequent Helm renewal; only serving certificate
 files are mounted into the operator. The operator has no Secret-read RBAC.
 Certificate renewal is manual; schedule it before expiry. CA replacement requires
@@ -223,18 +239,28 @@ Secret while the operator is installed.
 
 ## Development and validation
 
+Clone `swytchdb/swytch-helm` alongside this repository and select the chart to test.
+From the `operator/` directory:
+
 ```sh
+export SWYTCH_HELM_CHART="$(cd ../../swytch-helm/charts/swytch-operator && pwd)"
 go build -o /tmp/swytch-operator ./cmd/operator
 go test -race ./...
-helm lint charts/swytch-operator --kube-version 1.33.0
+helm lint "$SWYTCH_HELM_CHART" --kube-version 1.33.0
 
 go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.21
-export KUBEBUILDER_ASSETS="$(setup-envtest use 1.33.x -p path)"
+KUBEBUILDER_ASSETS="$(setup-envtest use 1.33.x -p path)" || exit 1
+test -n "$KUBEBUILDER_ASSETS" || exit 1
+export KUBEBUILDER_ASSETS
 go test -v ./test/integration
 
 go install sigs.k8s.io/kind@v0.29.0
 bash test/e2e/run.sh
 ```
+
+CI checks out a pinned chart tag. Publish that tag before updating the workflow's
+ref. Coordinate API/schema changes with a PR to the chart's CRD in `swytch-helm`;
+set `SWYTCH_HELM_CHART` to that checkout when validating coordinated changes.
 
 API integration tests use a disposable API server and validate the CRD, admission,
 reconciliation defaults, and Helm certificate reuse/rotation. The end-to-end script

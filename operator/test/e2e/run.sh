@@ -2,6 +2,8 @@
 # Creates and destroys only its own kind cluster. Never uses the current context.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+chart="${SWYTCH_HELM_CHART:?Set SWYTCH_HELM_CHART to the absolute chart path in a swytch-helm checkout}"
+test -f "$chart/Chart.yaml"
 cluster="swytch-operator-test-${RANDOM}"
 test_dir="$(mktemp -d)"
 export KUBECONFIG="$test_dir/kubeconfig"
@@ -21,7 +23,7 @@ trap cleanup EXIT
 kind create cluster --name "$cluster" --image kindest/node:v1.33.1 --kubeconfig "$KUBECONFIG" --wait 120s
 docker build -t swytch-operator:e2e .
 kind load docker-image swytch-operator:e2e --name "$cluster"
-helm install test charts/swytch-operator --namespace swytch-system --create-namespace \
+helm install test "$chart" --namespace swytch-system --create-namespace \
   --set image.repository=swytch-operator --set image.tag=e2e --wait --timeout 120s
 kubectl create secret generic swytch-secret --from-literal=cluster-passphrase=operator-test-only-shared-passphrase
 kubectl apply -f examples/sidecar-dns.yaml -f examples/server-dns.yaml
@@ -74,7 +76,7 @@ spec:
           command: [sh, -ec, 'until redis-cli -s /var/run/swytch/swytch.sock PING; do sleep 1; done']
 YAML
 kubectl wait --for=condition=complete job/unix-client --timeout=180s
-helm upgrade test charts/swytch-operator --namespace swytch-system --reuse-values \
+helm upgrade test "$chart" --namespace swytch-system --reuse-values \
   --set-string webhook.certificateRevision=2 --wait --timeout 120s
 # New Pod creation must still work after renewal.
 kubectl rollout restart deployment/example-app

@@ -1,6 +1,7 @@
 package test
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -12,7 +13,11 @@ func TestHelmRender(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm unavailable")
 	}
-	cmd := exec.Command("helm", "template", "test", "../charts/swytch-operator", "--namespace", "operators", "--kube-version", "1.33.0", "--include-crds", "--set", "swytch.imagePullSecrets[0]=registry", "--set", "nodeSelector.pool=infra")
+	chart := os.Getenv("SWYTCH_HELM_CHART")
+	if chart == "" {
+		t.Fatal("set SWYTCH_HELM_CHART to the absolute chart path in a swytch-helm checkout")
+	}
+	cmd := exec.Command("helm", "template", "test", chart, "--namespace", "operators", "--kube-version", "1.33.0", "--include-crds", "--set", "swytch.imagePullSecrets[0]=registry", "--set", "nodeSelector.pool=infra")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
