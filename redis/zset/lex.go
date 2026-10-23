@@ -70,23 +70,23 @@ func CompareLex(member string, bound LexBound) int {
 	return 0
 }
 
-// InLexRange checks if a member is within the lex range [min, max]
-func InLexRange(member string, min, max LexBound) bool {
+// InLexRange checks if a member is within the lex range from minBound to maxBound.
+func InLexRange(member string, minBound, maxBound LexBound) bool {
 	// Check min bound
-	cmp := CompareLex(member, min)
+	cmp := CompareLex(member, minBound)
 	if cmp < 0 {
 		return false
 	}
-	if cmp == 0 && !min.Inclusive {
+	if cmp == 0 && !minBound.Inclusive {
 		return false
 	}
 
 	// Check max bound
-	cmp = CompareLex(member, max)
+	cmp = CompareLex(member, maxBound)
 	if cmp > 0 {
 		return false
 	}
-	if cmp == 0 && !max.Inclusive {
+	if cmp == 0 && !maxBound.Inclusive {
 		return false
 	}
 

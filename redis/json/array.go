@@ -485,7 +485,7 @@ func handleJSONArrPop(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			has     bool
 		}
 		pops := make([]popped, len(targets))
-		any := false
+		hasPoppedElements := false
 		for i, t := range targets {
 			if !t.isArray {
 				continue
@@ -493,10 +493,10 @@ func handleJSONArrPop(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			v, id, ok := popAt(t.node)
 			pops[i] = popped{isArray: true, val: v, vid: t.vid, id: id, has: ok}
 			if ok {
-				any = true
+				hasPoppedElements = true
 			}
 		}
-		if any {
+		if hasPoppedElements {
 			cmd.Context.BeginTx()
 			// Record the read for this key (Noop carries its tips).
 			if e := cmd.Context.Emit(&pb.Effect{

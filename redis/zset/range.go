@@ -306,8 +306,8 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, minEx, ok1 := ParseScore(cmd.Args[1])
-	max, maxEx, ok2 := ParseScore(cmd.Args[2])
+	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
 		return
@@ -361,7 +361,7 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 		}
 
 		sorted := zsetSortedMembers(snap)
-		entries := zsetFilterByScore(sorted, min, max, minEx, maxEx, false, offset, count)
+		entries := zsetFilterByScore(sorted, minScore, maxScore, minEx, maxEx, false, offset, count)
 		if entries == nil {
 			w.WriteArray(0)
 			return
@@ -382,8 +382,8 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 	keys = []string{key}
 
 	// Note: for ZREVRANGEBYSCORE, max comes before min
-	max, maxEx, ok1 := ParseScore(cmd.Args[1])
-	min, minEx, ok2 := ParseScore(cmd.Args[2])
+	maxScore, maxEx, ok1 := ParseScore(cmd.Args[1])
+	minScore, minEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
 		return
@@ -437,7 +437,7 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 		}
 
 		sorted := zsetSortedMembers(snap)
-		entries := zsetFilterByScore(sorted, min, max, minEx, maxEx, true, offset, count)
+		entries := zsetFilterByScore(sorted, minScore, maxScore, minEx, maxEx, true, offset, count)
 		if entries == nil {
 			w.WriteArray(0)
 			return
@@ -491,17 +491,17 @@ func zsetRangeByIndex(sorted []shared.ZSetEntry, start, stop int, rev bool) []sh
 }
 
 // zsetFilterByScore filters sorted members by score range, with optional reverse and LIMIT.
-func zsetFilterByScore(sorted []shared.ZSetEntry, min, max float64, minEx, maxEx bool, rev bool, offset, count int) []shared.ZSetEntry {
+func zsetFilterByScore(sorted []shared.ZSetEntry, minScore, maxScore float64, minEx, maxEx bool, rev bool, offset, count int) []shared.ZSetEntry {
 	filtered := make([]shared.ZSetEntry, 0)
 	if rev {
 		for _, s := range slices.Backward(sorted) {
-			if scoreInRange(s.Score, min, max, minEx, maxEx) {
+			if scoreInRange(s.Score, minScore, maxScore, minEx, maxEx) {
 				filtered = append(filtered, s)
 			}
 		}
 	} else {
 		for _, e := range sorted {
-			if scoreInRange(e.Score, min, max, minEx, maxEx) {
+			if scoreInRange(e.Score, minScore, maxScore, minEx, maxEx) {
 				filtered = append(filtered, e)
 			}
 		}

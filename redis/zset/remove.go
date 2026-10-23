@@ -78,8 +78,8 @@ func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, minEx, ok1 := ParseScore(cmd.Args[1])
-	max, maxEx, ok2 := ParseScore(cmd.Args[2])
+	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
 		return
@@ -105,7 +105,7 @@ func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 		if snap.NetAdds != nil {
 			for member, elem := range snap.NetAdds {
 				score := elem.Data.GetFloatVal()
-				if scoreInRange(score, min, max, minEx, maxEx) {
+				if scoreInRange(score, minScore, maxScore, minEx, maxEx) {
 					if err := emitZSetRemove(cmd, key, member); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -204,8 +204,8 @@ func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, ok1 := ParseLexBound(cmd.Args[1])
-	max, ok2 := ParseLexBound(cmd.Args[2])
+	minBound, ok1 := ParseLexBound(cmd.Args[1])
+	maxBound, ok2 := ParseLexBound(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max not valid string range item")
 		return
@@ -230,7 +230,7 @@ func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 		removed := 0
 		if snap.NetAdds != nil {
 			for member := range snap.NetAdds {
-				if InLexRange(member, min, max) {
+				if InLexRange(member, minBound, maxBound) {
 					if err := emitZSetRemove(cmd, key, member); err != nil {
 						w.WriteError(err.Error())
 						return

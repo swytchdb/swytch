@@ -34,8 +34,8 @@ func handleZLexCount(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, ok1 := ParseLexBound(cmd.Args[1])
-	max, ok2 := ParseLexBound(cmd.Args[2])
+	minBound, ok1 := ParseLexBound(cmd.Args[1])
+	maxBound, ok2 := ParseLexBound(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max not valid string range item")
 		return
@@ -60,7 +60,7 @@ func handleZLexCount(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		count := 0
 		if snap.NetAdds != nil {
 			for member := range snap.NetAdds {
-				if InLexRange(member, min, max) {
+				if InLexRange(member, minBound, maxBound) {
 					count++
 				}
 			}
@@ -80,8 +80,8 @@ func handleZRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, ok1 := ParseLexBound(cmd.Args[1])
-	max, ok2 := ParseLexBound(cmd.Args[2])
+	minBound, ok1 := ParseLexBound(cmd.Args[1])
+	maxBound, ok2 := ParseLexBound(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max not valid string range item")
 		return
@@ -136,7 +136,7 @@ func handleZRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		// Filter by lex range
 		result := make([]string, 0)
 		for _, entry := range sorted {
-			if InLexRange(entry.Member, min, max) {
+			if InLexRange(entry.Member, minBound, maxBound) {
 				result = append(result, entry.Member)
 			}
 		}
@@ -175,8 +175,8 @@ func handleZRevRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	keys = []string{key}
 
 	// Note: for ZREVRANGEBYLEX, max comes before min
-	max, ok1 := ParseLexBound(cmd.Args[1])
-	min, ok2 := ParseLexBound(cmd.Args[2])
+	maxBound, ok1 := ParseLexBound(cmd.Args[1])
+	minBound, ok2 := ParseLexBound(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max not valid string range item")
 		return
@@ -236,7 +236,7 @@ func handleZRevRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 		// Filter by lex range
 		result := make([]string, 0)
 		for _, entry := range reversed {
-			if InLexRange(entry.Member, min, max) {
+			if InLexRange(entry.Member, minBound, maxBound) {
 				result = append(result, entry.Member)
 			}
 		}

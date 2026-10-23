@@ -291,8 +291,8 @@ func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	key := string(cmd.Args[0])
 	keys = []string{key}
 
-	min, minEx, ok1 := ParseScore(cmd.Args[1])
-	max, maxEx, ok2 := ParseScore(cmd.Args[2])
+	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
 		return
@@ -316,7 +316,7 @@ func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		count := 0
 		for _, entry := range zsetSortedMembers(snap) {
-			if scoreInRange(entry.Score, min, max, minEx, maxEx) {
+			if scoreInRange(entry.Score, minScore, maxScore, minEx, maxEx) {
 				count++
 			}
 		}
@@ -470,22 +470,22 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 }
 
 // scoreInRange checks if a score is within the given range, respecting exclusive bounds.
-func scoreInRange(score, min, max float64, minEx, maxEx bool) bool {
+func scoreInRange(score, minScore, maxScore float64, minEx, maxEx bool) bool {
 	if minEx {
-		if score <= min {
+		if score <= minScore {
 			return false
 		}
 	} else {
-		if score < min {
+		if score < minScore {
 			return false
 		}
 	}
 	if maxEx {
-		if score >= max {
+		if score >= maxScore {
 			return false
 		}
 	} else {
-		if score > max {
+		if score > maxScore {
 			return false
 		}
 	}

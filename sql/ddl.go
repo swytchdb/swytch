@@ -1557,13 +1557,13 @@ func parseCreateIndex(ddl string) (name, table string, columns []string, unique 
 	i++
 	tail := strings.Join(tokens[i:], " ")
 	tail = strings.TrimRight(tail, ";")
-	open := strings.Index(tail, "(")
-	close := strings.LastIndex(tail, ")")
-	if open < 0 || close < 0 || close < open {
+	openParen := strings.Index(tail, "(")
+	closeParen := strings.LastIndex(tail, ")")
+	if openParen < 0 || closeParen < 0 || closeParen < openParen {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX missing (col): %q", ddl)
 	}
-	table = trimIdent(strings.TrimSpace(tail[:open]))
-	inside := strings.TrimSpace(tail[open+1 : close])
+	table = trimIdent(strings.TrimSpace(tail[:openParen]))
+	inside := strings.TrimSpace(tail[openParen+1 : closeParen])
 	if inside == "" {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty column list: %q", ddl)
 	}

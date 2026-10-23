@@ -166,25 +166,25 @@ func (z *ZSetValue) ZRevRank(member string) int {
 	return -1
 }
 
-// ZCount counts members with scores between min and max (inclusive)
-func (z *ZSetValue) ZCount(min, max float64, minExclusive, maxExclusive bool) int {
+// ZCount counts members with scores between minScore and maxScore, respecting exclusive bounds.
+func (z *ZSetValue) ZCount(minScore, maxScore float64, minExclusive, maxExclusive bool) int {
 	count := 0
 	for _, score := range z.Members {
 		if minExclusive {
-			if score <= min {
+			if score <= minScore {
 				continue
 			}
 		} else {
-			if score < min {
+			if score < minScore {
 				continue
 			}
 		}
 		if maxExclusive {
-			if score >= max {
+			if score >= maxScore {
 				continue
 			}
 		} else {
-			if score > max {
+			if score > maxScore {
 				continue
 			}
 		}
@@ -231,7 +231,7 @@ func (z *ZSetValue) ZRange(start, stop int, reverse bool) []ZSetEntry {
 }
 
 // ZRangeByScore returns members with scores in the given range
-func (z *ZSetValue) ZRangeByScore(min, max float64, minExclusive, maxExclusive, reverse bool, offset, count int) []ZSetEntry {
+func (z *ZSetValue) ZRangeByScore(minScore, maxScore float64, minExclusive, maxExclusive, reverse bool, offset, count int) []ZSetEntry {
 	var sorted []ZSetEntry
 	if reverse {
 		sorted = z.SortedReverse()
@@ -245,22 +245,22 @@ func (z *ZSetValue) ZRangeByScore(min, max float64, minExclusive, maxExclusive, 
 
 		// Check min bound
 		if minExclusive {
-			if entry.Score <= min {
+			if entry.Score <= minScore {
 				inRange = false
 			}
 		} else {
-			if entry.Score < min {
+			if entry.Score < minScore {
 				inRange = false
 			}
 		}
 
 		// Check max bound
 		if maxExclusive {
-			if entry.Score >= max {
+			if entry.Score >= maxScore {
 				inRange = false
 			}
 		} else {
-			if entry.Score > max {
+			if entry.Score > maxScore {
 				inRange = false
 			}
 		}
