@@ -674,7 +674,7 @@ func (h *Handler) handleAuth(cmd *shared.Command, w *shared.Writer, conn *shared
 	w.WriteOK()
 }
 
-func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("select")
 		return
@@ -873,7 +873,7 @@ func (h *Handler) handleDiscard(cmd *shared.Command, w *shared.Writer, conn *sha
 }
 
 // handleWatch watches keys for modifications
-func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *shared.Connection, db *shared.Database) {
+func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) == 0 {
 		w.WriteWrongNumArguments("watch")
 		return
@@ -899,7 +899,7 @@ func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *share
 }
 
 // handleUnwatch clears all watched keys
-func (h *Handler) handleUnwatch(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleUnwatch(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("unwatch")
 		return
@@ -910,7 +910,7 @@ func (h *Handler) handleUnwatch(cmd *shared.Command, w *shared.Writer, conn *sha
 }
 
 // handleExec executes a transaction
-func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared.Connection, db *shared.Database) {
+func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("exec")
 		return
@@ -1035,10 +1035,10 @@ func (h *Handler) registerConnectionCommands() {
 	})
 	h.cmds.Register(shared.CmdSelect, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, _ *shared.Database, conn *shared.Connection) {
-			h.handleSelect(cmd, w, conn)
+			h.handleSelect(cmd, w)
 		},
 		TxnPrepare: func(cmd *shared.Command, w *shared.Writer, _ *shared.Database, conn *shared.Connection) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleSelect(cmd, w, conn) }
+			return true, nil, func() { h.handleSelect(cmd, w) }
 		},
 	})
 	h.cmds.Register(shared.CmdQuit, &shared.CommandEntry{
@@ -1066,7 +1066,7 @@ func (h *Handler) registerTransactionCommands() {
 	})
 	h.cmds.Register(shared.CmdExec, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
-			h.handleExec(cmd, w, conn, db)
+			h.handleExec(cmd, w, conn)
 		},
 		Flags: shared.FlagNoQueue,
 	})
@@ -1078,13 +1078,13 @@ func (h *Handler) registerTransactionCommands() {
 	})
 	h.cmds.Register(shared.CmdWatch, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
-			h.handleWatch(cmd, w, conn, db)
+			h.handleWatch(cmd, w, conn)
 		},
 		Flags: shared.FlagNoQueue,
 	})
 	h.cmds.Register(shared.CmdUnwatch, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, _ *shared.Database, conn *shared.Connection) {
-			h.handleUnwatch(cmd, w, conn)
+			h.handleUnwatch(cmd, w)
 		},
 		Flags: shared.FlagNoQueue,
 	})
@@ -1176,7 +1176,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 			execCmd.Runtime = h.engine
 			execCmd.Context = conn.EffectsCtx
 		}
-		h.handleExec(execCmd, w, conn, db)
+		h.handleExec(execCmd, w, conn)
 
 		// Flush effects
 		if conn.EffectsCtx != nil {

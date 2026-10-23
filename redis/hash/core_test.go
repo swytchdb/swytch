@@ -60,7 +60,9 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 }
 
 // seedHash creates a hash via HSET effects
-func seedHash(eng *effects.Engine, ctx *effects.Context, key string, fields map[string]string) {
+func seedHash(ctx *effects.Context, fields map[string]string) {
+	const key = "myhash"
+
 	for field, value := range fields {
 		_ = ctx.Emit(&pb.Effect{
 			Key: []byte(key),
@@ -85,7 +87,7 @@ func seedHash(eng *effects.Engine, ctx *effects.Context, key string, fields map[
 func TestHandleHGet(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"field1": "value1"})
+	seedHash(ctx, map[string]string{"field1": "value1"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("field1")}}
 	resp := runHandlerWith(eng, ctx, handleHGet, cmd)
@@ -104,7 +106,7 @@ func TestHandleHGet_NonExistent(t *testing.T) {
 func TestHandleHGet_MissingField(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"field1": "value1"})
+	seedHash(ctx, map[string]string{"field1": "value1"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("nofield")}}
 	resp := runHandlerWith(eng, ctx, handleHGet, cmd)
@@ -218,7 +220,7 @@ func TestHandleHSetNX(t *testing.T) {
 func TestHandleHDel(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2", "f3": "v3"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2", "f3": "v3"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1"), []byte("f2"), []byte("nonexistent")}}
 	resp := runHandlerWith(eng, ctx, handleHDel, cmd)
@@ -246,7 +248,7 @@ func TestHandleHDel_NonExistent(t *testing.T) {
 func TestHandleHExists(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1")}}
 	resp := runHandlerWith(eng, ctx, handleHExists, cmd)
@@ -266,7 +268,7 @@ func TestHandleHExists(t *testing.T) {
 func TestHandleHGetAll(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash")}}
 	resp := runHandlerWith(eng, ctx, handleHGetAll, cmd)
@@ -288,7 +290,7 @@ func TestHandleHGetAll_NonExistent(t *testing.T) {
 func TestHandleHKeys(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash")}}
 	resp := runHandlerWith(eng, ctx, handleHKeys, cmd)
@@ -302,7 +304,7 @@ func TestHandleHKeys(t *testing.T) {
 func TestHandleHVals(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash")}}
 	resp := runHandlerWith(eng, ctx, handleHVals, cmd)
@@ -316,7 +318,7 @@ func TestHandleHVals(t *testing.T) {
 func TestHandleHLen(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash")}}
 	resp := runHandlerWith(eng, ctx, handleHLen, cmd)
@@ -337,7 +339,7 @@ func TestHandleHLen_NonExistent(t *testing.T) {
 func TestHandleHMGet(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1"), []byte("nofield"), []byte("f2")}}
 	resp := runHandlerWith(eng, ctx, handleHMGet, cmd)
@@ -386,7 +388,7 @@ func TestHandleHIncrBy(t *testing.T) {
 func TestHandleHIncrBy_NotInteger(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "notanumber"})
+	seedHash(ctx, map[string]string{"f1": "notanumber"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1"), []byte("1")}}
 	resp := runHandlerWith(eng, ctx, handleHIncrBy, cmd)
@@ -419,7 +421,7 @@ func TestHandleHIncrByFloat(t *testing.T) {
 func TestHandleHStrLen(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "hello"})
+	seedHash(ctx, map[string]string{"f1": "hello"})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1")}}
 	resp := runHandlerWith(eng, ctx, handleHStrLen, cmd)

@@ -632,7 +632,7 @@ func groupExists(cmd *shared.Command, streamKey, groupName string) bool {
 }
 
 // getGroupMeta retrieves a group's metadata from the group key snapshot.
-func getGroupMeta(snap *pb.ReducedEffect) (lastDeliveredID shared.StreamID, entriesRead int64, createdAt int64, found bool) {
+func getGroupMeta(snap *pb.ReducedEffect) (lastDeliveredID shared.StreamID, entriesRead int64, createdAt int64) {
 	if snap == nil || snap.NetAdds == nil {
 		return
 	}
@@ -641,7 +641,6 @@ func getGroupMeta(snap *pb.ReducedEffect) (lastDeliveredID shared.StreamID, entr
 		return
 	}
 	lastDeliveredID, entriesRead, createdAt = decodeGroupMeta(elem.Data.Decompress())
-	found = true
 	return
 }
 

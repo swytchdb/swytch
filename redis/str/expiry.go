@@ -49,7 +49,7 @@ func handleExpire(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	}
 
 	// Parse options
-	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args, 2)
+	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args[2:])
 	if optErr != "" {
 		w.WriteError(optErr)
 		return
@@ -125,7 +125,7 @@ func handleExpireAt(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 	}
 
 	// Parse options
-	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args, 2)
+	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args[2:])
 	if optErr != "" {
 		w.WriteError(optErr)
 		return
@@ -180,7 +180,7 @@ func handlePExpire(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	}
 
 	// Parse options
-	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args, 2)
+	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args[2:])
 	if optErr != "" {
 		w.WriteError(optErr)
 		return
@@ -229,7 +229,7 @@ func handlePExpireAt(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	}
 
 	// Parse options
-	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args, 2)
+	nx, xx, gt, lt, optErr := parseExpireOptions(cmd.Args[2:])
 	if optErr != "" {
 		w.WriteError(optErr)
 		return

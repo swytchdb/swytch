@@ -131,18 +131,18 @@ func substitutePattern(pattern string, element []byte) (key string, field string
 }
 
 // handleSortRO handles the SORT_RO command, rejecting STORE.
-func (h *Handler) handleSortRO(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleSortRO(cmd *shared.Command, w *shared.Writer) {
 	for i := 1; i < len(cmd.Args); i++ {
 		if strings.EqualFold(string(cmd.Args[i]), "STORE") {
 			w.WriteError("ERR syntax error")
 			return
 		}
 	}
-	h.handleSort(cmd, w, db)
+	h.handleSort(cmd, w)
 }
 
 // handleSort handles the SORT command for lists, sets, and sorted sets
-func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("sort")
 		return
@@ -197,7 +197,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build sort items with weights
-	items, err := h.buildSortItems(cmd.Context, db, elements, opts)
+	items, err := h.buildSortItems(cmd.Context, elements, opts)
 	if err != nil {
 		w.WriteError(err.Error())
 		return
@@ -214,7 +214,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 
 	// Build results (applies GET patterns if any)
-	results, err := h.buildResults(cmd.Context, db, items, opts)
+	results, err := h.buildResults(cmd.Context, items, opts)
 	if err != nil {
 		w.WriteError(err.Error())
 		return
@@ -244,7 +244,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer, db *shared.D
 // entries and empty-collection tombstones — direct Engine.GetSnapshot would
 // return stale data here, since BY/GET patterns commonly hit ephemeral hash
 // fields whose parent key may already be past its TTL.
-func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, pattern string, element []byte) ([]byte, bool, error) {
+func (h *Handler) getExternalValue(ectx *effects.Context, pattern string, element []byte) ([]byte, bool, error) {
 	key, field, isHash := substitutePattern(pattern, element)
 
 	if h.engine == nil || ectx == nil {
@@ -276,7 +276,7 @@ func (h *Handler) getExternalValue(ectx *effects.Context, db *shared.Database, p
 }
 
 // buildSortItems creates sortItems from elements with computed weights
-func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, elements [][]byte, opts *sortOptions) ([]sortItem, error) {
+func (h *Handler) buildSortItems(ectx *effects.Context, elements [][]byte, opts *sortOptions) ([]sortItem, error) {
 	items := make([]sortItem, 0, len(elements))
 
 	for _, elem := range elements {
@@ -284,7 +284,7 @@ func (h *Handler) buildSortItems(ectx *effects.Context, db *shared.Database, ele
 
 		if opts.byPattern != "" && !opts.noSort {
 			// Get weight from external key
-			weightData, ok, err := h.getExternalValue(ectx, db, opts.byPattern, elem)
+			weightData, ok, err := h.getExternalValue(ectx, opts.byPattern, elem)
 			if err != nil {
 				return nil, err
 			}
@@ -346,7 +346,7 @@ func applyLimit(items []sortItem, offset, count int) []sortItem {
 }
 
 // buildResults builds the result slice, applying GET patterns if specified
-func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items []sortItem, opts *sortOptions) ([][]byte, error) {
+func (h *Handler) buildResults(ectx *effects.Context, items []sortItem, opts *sortOptions) ([][]byte, error) {
 	if len(opts.getPatterns) == 0 {
 		// No GET patterns - return elements
 		results := make([][]byte, len(items))
@@ -364,7 +364,7 @@ func (h *Handler) buildResults(ectx *effects.Context, db *shared.Database, items
 				// Special pattern # returns the element itself
 				results = append(results, item.element)
 			} else {
-				val, _, err := h.getExternalValue(ectx, db, pattern, item.element)
+				val, _, err := h.getExternalValue(ectx, pattern, item.element)
 				if err != nil {
 					return nil, err
 				}
@@ -454,20 +454,20 @@ func (h *Handler) registerSortCommands() {
 	r := &h.cmds
 	r.Register(shared.CmdSort, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) {
-			h.handleSort(cmd, w, db)
+			h.handleSort(cmd, w)
 		},
 		TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleSort(cmd, w, db) }
+			return true, nil, func() { h.handleSort(cmd, w) }
 		},
 		Keys:  shared.KeysSortCmd,
 		Flags: shared.FlagWrite,
 	})
 	r.Register(shared.CmdSortRO, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) {
-			h.handleSortRO(cmd, w, db)
+			h.handleSortRO(cmd, w)
 		},
 		TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleSortRO(cmd, w, db) }
+			return true, nil, func() { h.handleSortRO(cmd, w) }
 		},
 		Keys: shared.KeysFirst,
 	})

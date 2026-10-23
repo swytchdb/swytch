@@ -39,38 +39,38 @@ func (h *Handler) handleAcl(cmd *shared.Command, w *shared.Writer, conn *shared.
 	subCmd := strings.ToUpper(string(cmd.Args[0]))
 	switch subCmd {
 	case "SETUSER":
-		h.handleAclSetUser(cmd, w, conn)
+		h.handleAclSetUser(cmd, w)
 	case "GETUSER":
 		h.handleAclGetUser(cmd, w, conn)
 	case "DELUSER":
-		h.handleAclDelUser(cmd, w, conn)
+		h.handleAclDelUser(cmd, w)
 	case "LIST":
-		h.handleAclList(cmd, w, conn)
+		h.handleAclList(w)
 	case "USERS":
-		h.handleAclUsers(cmd, w, conn)
+		h.handleAclUsers(w)
 	case "CAT":
 		h.handleAclCat(cmd, w)
 	case "WHOAMI":
-		h.handleAclWhoami(cmd, w, conn)
+		h.handleAclWhoami(w, conn)
 	case "GENPASS":
 		h.handleAclGenpass(cmd, w)
 	case "LOAD":
-		h.handleAclLoad(cmd, w)
+		h.handleAclLoad(w)
 	case "SAVE":
-		h.handleAclSave(cmd, w)
+		h.handleAclSave(w)
 	case "LOG":
 		h.handleAclLog(cmd, w)
 	case "DRYRUN":
-		h.handleAclDryrun(cmd, w, conn)
+		h.handleAclDryrun(cmd, w)
 	case "HELP":
-		h.handleAclHelp(cmd, w)
+		h.handleAclHelp(w)
 	default:
 		w.WriteError(fmt.Sprintf("ERR unknown subcommand '%s'. Try ACL HELP.", subCmd))
 	}
 }
 
 // handleAclSetUser handles ACL SETUSER username [rule ...]
-func (h *Handler) handleAclSetUser(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclSetUser(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'acl|setuser' command")
 		return
@@ -196,7 +196,7 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 }
 
 // handleAclDelUser handles ACL DELUSER username [username ...]
-func (h *Handler) handleAclDelUser(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclDelUser(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'acl|deluser' command")
 		return
@@ -218,7 +218,7 @@ func (h *Handler) handleAclDelUser(cmd *shared.Command, w *shared.Writer, conn *
 }
 
 // handleAclList handles ACL LIST
-func (h *Handler) handleAclList(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclList(w *shared.Writer) {
 	users := h.aclManager.GetUsers()
 	sort.Strings(users)
 
@@ -233,7 +233,7 @@ func (h *Handler) handleAclList(cmd *shared.Command, w *shared.Writer, conn *sha
 }
 
 // handleAclUsers handles ACL USERS
-func (h *Handler) handleAclUsers(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclUsers(w *shared.Writer) {
 	users := h.aclManager.GetUsers()
 	sort.Strings(users)
 
@@ -277,7 +277,7 @@ func (h *Handler) handleAclCat(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleAclWhoami handles ACL WHOAMI
-func (h *Handler) handleAclWhoami(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclWhoami(w *shared.Writer, conn *shared.Connection) {
 	if conn.User == nil {
 		w.WriteBulkStringStr("default")
 	} else {
@@ -307,7 +307,7 @@ func (h *Handler) handleAclGenpass(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleAclLoad handles ACL LOAD
-func (h *Handler) handleAclLoad(cmd *shared.Command, w *shared.Writer) {
+func (h *Handler) handleAclLoad(w *shared.Writer) {
 	if h.aclManager.aclFile == "" {
 		w.WriteError("ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (if you have a Redis.conf) to store users in the Redis config file.")
 		return
@@ -322,7 +322,7 @@ func (h *Handler) handleAclLoad(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleAclSave handles ACL SAVE
-func (h *Handler) handleAclSave(cmd *shared.Command, w *shared.Writer) {
+func (h *Handler) handleAclSave(w *shared.Writer) {
 	if h.aclManager.aclFile == "" {
 		w.WriteError("ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (if you have a Redis.conf) to store users in the Redis config file.")
 		return
@@ -394,7 +394,7 @@ func (h *Handler) writeACLLogEntries(w *shared.Writer, entries []ACLLogEntry) {
 }
 
 // handleAclDryrun handles ACL DRYRUN username command [arg ...]
-func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
+func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 3 {
 		w.WriteError("ERR wrong number of arguments for 'acl|dryrun' command")
 		return
@@ -428,7 +428,7 @@ func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer, conn *s
 	}
 
 	// Extract keys using the handler's validation phase
-	keys := h.extractKeysForAcl(testCmd, conn)
+	keys := h.extractKeysForAcl(testCmd)
 
 	// Check key permissions
 	isWrite := false
@@ -447,7 +447,7 @@ func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer, conn *s
 
 // extractKeysForAcl extracts keys from a command using the handler's validation phase.
 // This is used by ACL DRYRUN to properly identify which arguments are keys.
-func (h *Handler) extractKeysForAcl(cmd *shared.Command, conn *shared.Connection) []string {
+func (h *Handler) extractKeysForAcl(cmd *shared.Command) []string {
 	// Create a discard buffer for the null writer
 	var discardBuf bytes.Buffer
 	nullWriter := shared.NewWriter(&discardBuf)
@@ -455,7 +455,7 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command, conn *shared.Connection
 
 	var keys []string
 
-	// Handle scripting commands specially (they need Connection)
+	// Scripting commands encode the key count in their arguments.
 	switch cmd.Type {
 	case shared.CmdEval, shared.CmdEvalSha, shared.CmdEvalRO, shared.CmdEvalShaRO, shared.CmdFcall, shared.CmdFcallRO:
 		return shared.KeysNumkeysAtOffset(cmd, 1)
@@ -463,7 +463,7 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command, conn *shared.Connection
 
 	// Call the handler's validation phase to extract keys
 	// The handlers return (valid, keys, runner) - we only care about keys
-	_, extractedKeys, _ := h.dispatchForKeyExtraction(cmd, nullWriter, db, conn)
+	_, extractedKeys, _ := h.dispatchForKeyExtraction(cmd, nullWriter, db)
 
 	keys = extractedKeys
 	return keys
@@ -471,7 +471,7 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command, conn *shared.Connection
 
 // dispatchForKeyExtraction calls the appropriate handler to extract keys.
 // This mirrors the dispatch in ExecuteInto but only for key extraction.
-func (h *Handler) dispatchForKeyExtraction(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) (valid bool, keys []string, runner shared.CommandRunner) {
+func (h *Handler) dispatchForKeyExtraction(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	entry := h.cmds.Lookup(cmd.Type)
 	if entry == nil {
 		return false, nil, nil
@@ -491,7 +491,7 @@ func (h *Handler) dispatchForKeyExtraction(cmd *shared.Command, w *shared.Writer
 }
 
 // handleAclHelp handles ACL HELP
-func (h *Handler) handleAclHelp(cmd *shared.Command, w *shared.Writer) {
+func (h *Handler) handleAclHelp(w *shared.Writer) {
 	help := []string{
 		"ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
 		"CAT [<category>]",

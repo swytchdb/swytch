@@ -31,21 +31,21 @@ import (
 
 // --- Helper functions (mirror zset/core.go pattern) ---
 
-func getGeoSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, tips []effects.Tip, exists bool, wrongType bool, err error) {
-	snap, tips, err = cmd.Context.GetSnapshot(key)
+func getGeoSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, exists bool, wrongType bool, err error) {
+	snap, _, err = cmd.Context.GetSnapshot(key)
 	if err != nil {
-		return nil, nil, false, false, err
+		return nil, false, false, err
 	}
 	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
-		return nil, tips, false, false, nil
+		return nil, false, false, nil
 	}
 	if snap.Collection == pb.CollectionKind_KEYED {
-		return snap, tips, true, false, nil
+		return snap, true, false, nil
 	}
 	if snap.Collection == pb.CollectionKind_SCALAR && (snap.TypeTag == pb.ValueType_TYPE_GEO || snap.TypeTag == pb.ValueType_TYPE_ZSET) {
-		return snap, tips, true, false, nil
+		return snap, true, false, nil
 	}
-	return nil, tips, true, true, nil
+	return nil, true, true, nil
 }
 
 func geoMemberScore(snap *pb.ReducedEffect, member string) (float64, bool) {
@@ -191,7 +191,7 @@ parseMembers:
 
 	valid = true
 	runner = func() {
-		snap, _, exists, wrongType, err := getGeoSnapshot(cmd, key)
+		snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
 			return
@@ -262,7 +262,7 @@ func handleGeoPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	valid = true
 	runner = func() {
-		snap, _, exists, wrongType, err := getGeoSnapshot(cmd, key)
+		snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
 			return
@@ -322,7 +322,7 @@ func handleGeoDist(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 	valid = true
 	runner = func() {
-		snap, _, exists, wrongType, err := getGeoSnapshot(cmd, key)
+		snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
 			return
@@ -368,7 +368,7 @@ func handleGeoHash(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 	valid = true
 	runner = func() {
-		snap, _, exists, wrongType, err := getGeoSnapshot(cmd, key)
+		snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
 			return

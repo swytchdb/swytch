@@ -92,14 +92,14 @@ func emitZSetTypeTag(cmd *shared.Command, key string) error {
 	})
 }
 
-func emitZSetDeleteKey(cmd *shared.Command, key string, tips ...[]effects.Tip) error {
+func emitZSetDeleteKey(cmd *shared.Command, key string) error {
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 			Op:         pb.EffectOp_REMOVE_OP,
 			Collection: pb.CollectionKind_SCALAR,
 		}},
-	}, tips...)
+	})
 }
 
 func zsetMemberScore(snap *pb.ReducedEffect, member string) (float64, bool) {

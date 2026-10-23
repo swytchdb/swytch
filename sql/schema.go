@@ -218,28 +218,6 @@ func (t *tableSchema) pkValues(cols []sqlite.Value) []sqlite.Value {
 	return out
 }
 
-// primaryPKOrd returns the ordinal of the first PK column. For the
-// common single-column case that's the whole story; the legacy
-// IntegerRowid optimization (where the PK column's int64 doubles as
-// the SQLite rowid) only applies when len(PKColumns) == 1 and that
-// column's affinity is INTEGER.
-func (t *tableSchema) primaryPKOrd() int {
-	if len(t.PKColumns) == 0 {
-		return -1
-	}
-	return t.PKColumns[0]
-}
-
-// pkColumn returns the first PK column (for the common single-column
-// case). Composite callers should use PKColumns directly.
-func (t *tableSchema) pkColumn() *columnSchema {
-	ord := t.primaryPKOrd()
-	if ord < 0 || ord >= len(t.Columns) {
-		return nil
-	}
-	return &t.Columns[ord]
-}
-
 // isPKColumn reports whether the given column ordinal is part of
 // the primary key.
 func (t *tableSchema) isPKColumn(ord int) bool {

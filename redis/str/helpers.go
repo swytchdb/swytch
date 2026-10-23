@@ -157,8 +157,8 @@ func digestEquals(hash uint64, digest []byte) bool {
 
 // parseExpireOptions parses NX/XX/GT/LT options for EXPIRE commands
 // Returns nx, xx, gt, lt flags and an error string (empty if successful)
-func parseExpireOptions(args [][]byte, startIdx int) (nx, xx, gt, lt bool, errMsg string) {
-	for i := startIdx; i < len(args); i++ {
+func parseExpireOptions(args [][]byte) (nx, xx, gt, lt bool, errMsg string) {
+	for i := range args {
 		opt := shared.ToUpper(args[i])
 		switch string(opt) {
 		case "NX":

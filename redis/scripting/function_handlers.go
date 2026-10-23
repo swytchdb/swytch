@@ -45,13 +45,13 @@ func (e *Engine) HandleFunction(cmd *shared.Command, w *shared.Writer) {
 	case "LIST":
 		e.handleFunctionList(cmd, w)
 	case "FLUSH":
-		e.handleFunctionFlush(cmd, w)
+		e.handleFunctionFlush(w)
 	case "STATS":
-		e.handleFunctionStats(cmd, w)
+		e.handleFunctionStats(w)
 	case "KILL":
-		e.handleFunctionKill(cmd, w)
+		e.handleFunctionKill(w)
 	case "DUMP":
-		e.handleFunctionDump(cmd, w)
+		e.handleFunctionDump(w)
 	case "RESTORE":
 		e.handleFunctionRestore(cmd, w)
 	default:
@@ -261,7 +261,7 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 
 // handleFunctionFlush handles FUNCTION FLUSH command.
 // Syntax: FUNCTION FLUSH [ASYNC|SYNC]
-func (e *Engine) handleFunctionFlush(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleFunctionFlush(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
 		return
@@ -273,7 +273,7 @@ func (e *Engine) handleFunctionFlush(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleFunctionStats handles FUNCTION STATS command.
-func (e *Engine) handleFunctionStats(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleFunctionStats(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
 		return
@@ -309,7 +309,7 @@ func (e *Engine) handleFunctionStats(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleFunctionKill handles FUNCTION KILL command.
-func (e *Engine) handleFunctionKill(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleFunctionKill(w *shared.Writer) {
 	// Reuse the script kill logic
 	sc := e.runningScript.Load()
 	if sc == nil {
@@ -323,7 +323,7 @@ func (e *Engine) handleFunctionKill(cmd *shared.Command, w *shared.Writer) {
 
 // handleFunctionDump handles FUNCTION DUMP command.
 // Returns a serialized representation of all libraries.
-func (e *Engine) handleFunctionDump(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleFunctionDump(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
 		return
@@ -630,7 +630,7 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 	L.Pop(1)
 
 	// Convert Lua value to RESP
-	luaToRESP(L, ret, w)
+	luaToRESP(ret, w)
 }
 
 // translateLuaError translates gopher-lua error messages to Redis-compatible ones.

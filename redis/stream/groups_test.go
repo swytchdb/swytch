@@ -36,11 +36,10 @@ func xgroupCreate(t *testing.T, env *testEnv, args ...string) {
 }
 
 // xreadgroup is a convenience to deliver entries via XREADGROUP non-blocking and reset buf.
-func xreadgroup(t *testing.T, env *testEnv, args ...string) string {
+func xreadgroup(t *testing.T, env *testEnv, args ...string) {
 	t.Helper()
-	result := execHandler(t, handleXReadGroupNonBlocking, env, args...)
+	execHandler(t, handleXReadGroupNonBlocking, env, args...)
 	env.buf.Reset()
-	return result
 }
 
 // --- XGROUP ---

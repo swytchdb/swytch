@@ -72,7 +72,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
-		handleLPopNonBlocking(cmd, w, db, left)
+		handleLPopNonBlocking(cmd, w, left)
 		return
 	}
 
@@ -165,7 +165,7 @@ func tryPop(cmd *shared.Command, key string, left bool, reg *shared.Registration
 
 // handleBRPopLPushNonBlocking handles BRPOPLPUSH inside transactions (non-blocking mode)
 // BRPOPLPUSH source destination timeout -> behaves like RPOPLPUSH
-func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("brpoplpush")
 		return
@@ -199,7 +199,7 @@ func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer, db *shar
 
 // handleBLMoveNonBlocking handles BLMOVE inside transactions (non-blocking mode)
 // BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout -> behaves like LMOVE
-func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 5 {
 		w.WriteWrongNumArguments("blmove")
 		return
@@ -255,7 +255,7 @@ func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.D
 
 // handleLPopNonBlocking handles BLPOP/BRPOP inside transactions (non-blocking mode)
 // In a transaction, blocking commands try once and return nil if no data
-func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database, left bool) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, left bool) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		if left {
 			w.WriteWrongNumArguments("blpop")
@@ -322,7 +322,7 @@ func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 // handleBLMPopNonBlocking handles BLMPOP inside transactions (non-blocking mode)
 // In a transaction, blocking commands try once and return nil if no data
 // BLMPOP timeout numkeys key [key ...] <LEFT | RIGHT> [COUNT count]
-func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("blmpop")
 		return
@@ -457,7 +457,7 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.D
 func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
-		handleBLMPopNonBlocking(cmd, w, db)
+		handleBLMPopNonBlocking(cmd, w)
 		return
 	}
 
@@ -649,7 +649,7 @@ func tryMultiPop(cmd *shared.Command, key string, left bool, count int, reg *sha
 func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
-		handleBLMoveNonBlocking(cmd, w, db)
+		handleBLMoveNonBlocking(cmd, w)
 		return
 	}
 
@@ -740,7 +740,7 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
-		handleBRPopLPushNonBlocking(cmd, w, db)
+		handleBRPopLPushNonBlocking(cmd, w)
 		return
 	}
 

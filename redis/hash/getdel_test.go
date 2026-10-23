@@ -30,7 +30,7 @@ import (
 func TestHandleHGetDel(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2", "f3": "v3"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2", "f3": "v3"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("2"),

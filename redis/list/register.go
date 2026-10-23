@@ -48,7 +48,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBLPop, Entry: &shared.CommandEntry{
 			ConnHandler: handleBLPop,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleLPopNonBlocking(cmd, w, db, true)
+				return handleLPopNonBlocking(cmd, w, true)
 			},
 			Keys:  shared.KeysAllButLast,
 			Flags: shared.FlagWrite,
@@ -56,7 +56,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBRPop, Entry: &shared.CommandEntry{
 			ConnHandler: handleBRPop,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleLPopNonBlocking(cmd, w, db, false)
+				return handleLPopNonBlocking(cmd, w, false)
 			},
 			Keys:  shared.KeysAllButLast,
 			Flags: shared.FlagWrite,
@@ -64,7 +64,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBLMPop, Entry: &shared.CommandEntry{
 			ConnHandler: handleBLMPop,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBLMPopNonBlocking(cmd, w, db)
+				return handleBLMPopNonBlocking(cmd, w)
 			},
 			Keys:  func(cmd *shared.Command) []string { return shared.KeysNumkeysAtOffset(cmd, 1) },
 			Flags: shared.FlagWrite,
@@ -72,7 +72,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBLMove, Entry: &shared.CommandEntry{
 			ConnHandler: handleBLMove,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBLMoveNonBlocking(cmd, w, db)
+				return handleBLMoveNonBlocking(cmd, w)
 			},
 			Keys:  shared.KeysFirstTwo,
 			Flags: shared.FlagWrite,
@@ -80,7 +80,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBRPopLPush, Entry: &shared.CommandEntry{
 			ConnHandler: handleBRPopLPush,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBRPopLPushNonBlocking(cmd, w, db)
+				return handleBRPopLPushNonBlocking(cmd, w)
 			},
 			Keys:  shared.KeysFirstTwo,
 			Flags: shared.FlagWrite,

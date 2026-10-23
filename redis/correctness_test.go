@@ -1484,6 +1484,7 @@ func TestCorrectness_LPopRPop(t *testing.T) {
 		defer c.close()
 
 		c.rpush("poplist", "a", "b", "c", "d")
+		c.rpush("otherlist", "untouched")
 
 		// LPOP
 		if val := c.lpop("poplist"); val != "a" {
@@ -1505,6 +1506,10 @@ func TestCorrectness_LPopRPop(t *testing.T) {
 		c.lpop("poplist")
 		if val := c.lpop("poplist"); val != "(nil)" {
 			t.Errorf("expected (nil) from empty list, got %q", val)
+		}
+
+		if val := c.lpop("otherlist"); val != "untouched" {
+			t.Errorf("expected other list to remain untouched, got %q", val)
 		}
 	}
 }

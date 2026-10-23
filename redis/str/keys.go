@@ -53,7 +53,7 @@ func getAnySnapshotWithTips(cmd *shared.Command, key string) (snap *pb.ReducedEf
 
 // emitSnapshotAtKey re-emits a full snapshot (any type) at a new key.
 // Used by RENAME, RENAMENX, COPY, MOVE to recreate a key's value at a different key.
-func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffect, tips ...[]effects.Tip) error {
+func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffect) error {
 	switch snap.Collection {
 	case pb.CollectionKind_SCALAR:
 		if snap.Scalar != nil {
@@ -65,40 +65,23 @@ func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffe
 					Collection: pb.CollectionKind_SCALAR,
 					Value:      snap.Scalar.Value,
 				}},
-			}, tips...); err != nil {
+			}); err != nil {
 				return err
 			}
 		}
 	case pb.CollectionKind_KEYED:
-		first := true
 		for id, elem := range snap.NetAdds {
-			if first {
-				if err := cmd.Context.Emit(&pb.Effect{
-					Key: []byte(destKey),
-					Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-						Op:         pb.EffectOp_INSERT_OP,
-						Merge:      snap.Merge,
-						Collection: pb.CollectionKind_KEYED,
-						Id:         []byte(id),
-						Value:      elem.Data.Value,
-					}},
-				}, tips...); err != nil {
-					return err
-				}
-				first = false
-			} else {
-				if err := cmd.Context.Emit(&pb.Effect{
-					Key: []byte(destKey),
-					Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-						Op:         pb.EffectOp_INSERT_OP,
-						Merge:      snap.Merge,
-						Collection: pb.CollectionKind_KEYED,
-						Id:         []byte(id),
-						Value:      elem.Data.Value,
-					}},
-				}); err != nil {
-					return err
-				}
+			if err := cmd.Context.Emit(&pb.Effect{
+				Key: []byte(destKey),
+				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+					Op:         pb.EffectOp_INSERT_OP,
+					Merge:      snap.Merge,
+					Collection: pb.CollectionKind_KEYED,
+					Id:         []byte(id),
+					Value:      elem.Data.Value,
+				}},
+			}); err != nil {
+				return err
 			}
 			if elem.ExpiresAt != nil {
 				if err := cmd.Context.Emit(&pb.Effect{
@@ -113,35 +96,18 @@ func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffe
 			}
 		}
 	case pb.CollectionKind_ORDERED:
-		first := true
 		for _, elem := range snap.OrderedElements {
-			if first {
-				if err := cmd.Context.Emit(&pb.Effect{
-					Key: []byte(destKey),
-					Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-						Op:         pb.EffectOp_INSERT_OP,
-						Merge:      snap.Merge,
-						Collection: pb.CollectionKind_ORDERED,
-						Id:         elem.Data.Id,
-						Value:      elem.Data.Value,
-					}},
-				}, tips...); err != nil {
-					return err
-				}
-				first = false
-			} else {
-				if err := cmd.Context.Emit(&pb.Effect{
-					Key: []byte(destKey),
-					Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-						Op:         pb.EffectOp_INSERT_OP,
-						Merge:      snap.Merge,
-						Collection: pb.CollectionKind_ORDERED,
-						Id:         elem.Data.Id,
-						Value:      elem.Data.Value,
-					}},
-				}); err != nil {
-					return err
-				}
+			if err := cmd.Context.Emit(&pb.Effect{
+				Key: []byte(destKey),
+				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
+					Op:         pb.EffectOp_INSERT_OP,
+					Merge:      snap.Merge,
+					Collection: pb.CollectionKind_ORDERED,
+					Id:         elem.Data.Id,
+					Value:      elem.Data.Value,
+				}},
+			}); err != nil {
+				return err
 			}
 		}
 	}

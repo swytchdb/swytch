@@ -398,7 +398,7 @@ parseID:
 			// Add our new entry to the list for trim calculations
 			entries = append(entries, &shared.StreamEntry{ID: id, Fields: fields})
 
-			trimEntries(cmd, key, entries, trimOpts, snap)
+			trimEntries(cmd, key, entries, trimOpts)
 		}
 
 		w.WriteBulkStringStr(id.String())
@@ -407,7 +407,7 @@ parseID:
 }
 
 // trimEntries performs stream trimming by emitting REMOVE effects.
-func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry, opts shared.TrimOptions, snap *pb.ReducedEffect) {
+func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry, opts shared.TrimOptions) {
 	if len(entries) == 0 {
 		return
 	}
@@ -431,7 +431,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 		groupNames := listGroupNames(cmd, key)
 		for _, gName := range groupNames {
 			gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
-			lastDelivered, _, _, _ := getGroupMeta(gSnap)
+			lastDelivered, _, _ := getGroupMeta(gSnap)
 			if id.Compare(lastDelivered) > 0 {
 				return false
 			}
@@ -1237,11 +1237,11 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	runner = func() {
 		switch subCmd {
 		case "STREAM":
-			handleXInfoStream(cmd, w, db)
+			handleXInfoStream(cmd, w)
 		case "GROUPS":
-			handleXInfoGroups(cmd, w, db)
+			handleXInfoGroups(cmd, w)
 		case "CONSUMERS":
-			handleXInfoConsumers(cmd, w, db)
+			handleXInfoConsumers(cmd, w)
 		case "HELP":
 			if len(cmd.Args) > 1 {
 				w.WriteError("ERR wrong number of arguments for 'xinfo|help' command")
@@ -1256,7 +1256,7 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 }
 
 // handleXInfoStream handles XINFO STREAM key [FULL [COUNT count]]
-func handleXInfoStream(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|stream' command")
 		return
@@ -1356,7 +1356,7 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	iidsDuplicates := getIidsDuplicates(cmd, key)
 
 	if full {
-		writeXInfoStreamFull(w, entries, lastID, entriesAdded, maxDeletedID, firstID, groupCount, producerCount, iidsTracked, iidsAdded, iidsDuplicates, idmpDuration, idmpMaxsize, count, cmd, key, groupNames)
+		writeXInfoStreamFull(w, entries, lastID, entriesAdded, maxDeletedID, firstID, producerCount, iidsTracked, iidsAdded, iidsDuplicates, idmpDuration, idmpMaxsize, count, cmd, key, groupNames)
 	} else {
 		writeXInfoStreamBasic(w, entries, lastID, entriesAdded, maxDeletedID, firstID, groupCount, producerCount, iidsTracked, iidsAdded, iidsDuplicates, idmpDuration, idmpMaxsize)
 	}
@@ -1422,7 +1422,7 @@ func writeXInfoStreamBasic(w *shared.Writer, entries []*shared.StreamEntry, last
 	}
 }
 
-func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastID shared.StreamID, entriesAdded int64, maxDeletedID, firstID shared.StreamID, groupCount int, producerCount int, iidsTracked int, iidsAdded int64, iidsDuplicates int64, idmpDuration int64, idmpMaxsize int64, count int64, cmd *shared.Command, key string, groupNames []string) {
+func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastID shared.StreamID, entriesAdded int64, maxDeletedID, firstID shared.StreamID, producerCount int, iidsTracked int, iidsAdded int64, iidsDuplicates int64, idmpDuration int64, idmpMaxsize int64, count int64, cmd *shared.Command, key string, groupNames []string) {
 	w.WriteArray(30)
 
 	w.WriteBulkStringStr("length")
@@ -1483,7 +1483,7 @@ func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastI
 
 func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName string, entriesAdded int64, streamLength int64, count int64) {
 	gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
-	lastDelivered, entriesRead, _, _ := getGroupMeta(gSnap)
+	lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 
 	pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
 	consumers := getConsumersFromGroup(gSnap)
@@ -1600,7 +1600,7 @@ func writeStreamEntry(w *shared.Writer, entry *shared.StreamEntry) {
 }
 
 // handleXInfoGroups handles XINFO GROUPS key
-func handleXInfoGroups(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|groups' command")
 		return
@@ -1637,7 +1637,7 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	w.WriteArray(len(groupNames))
 	for _, name := range groupNames {
 		gSnap, _, _ := getGroupSnapshot(cmd, key, name)
-		lastDelivered, entriesRead, _, _ := getGroupMeta(gSnap)
+		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 		pelSnap, _, _ := getPELSnapshot(cmd, key, name)
 		consumers := getConsumersFromGroup(gSnap)
 
@@ -1679,7 +1679,7 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 }
 
 // handleXInfoConsumers handles XINFO CONSUMERS key group
-func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 3 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|consumers' command")
 		return
@@ -1975,7 +1975,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 	groupNames := listGroupNames(cmd, key)
 	for _, gName := range groupNames {
 		gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
-		lastDelivered, entriesRead, _, _ := getGroupMeta(gSnap)
+		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 
 		group := &shared.ConsumerGroup{
 			Name:            gName,
@@ -2142,7 +2142,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				groupNames := listGroupNames(cmd, key)
 				for _, gName := range groupNames {
 					gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
-					lastDelivered, _, _, _ := getGroupMeta(gSnap)
+					lastDelivered, _, _ := getGroupMeta(gSnap)
 					if id.Compare(lastDelivered) > 0 {
 						canDelete = false
 						break

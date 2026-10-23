@@ -64,7 +64,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBZPopMin, Entry: &shared.CommandEntry{
 			ConnHandler: handleBZPopMin,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBZPopMinNonBlocking(cmd, w, db)
+				return handleBZPopMinNonBlocking(cmd, w)
 			},
 			Keys:  shared.KeysAllButLast,
 			Flags: shared.FlagWrite,
@@ -72,7 +72,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBZPopMax, Entry: &shared.CommandEntry{
 			ConnHandler: handleBZPopMax,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBZPopMaxNonBlocking(cmd, w, db)
+				return handleBZPopMaxNonBlocking(cmd, w)
 			},
 			Keys:  shared.KeysAllButLast,
 			Flags: shared.FlagWrite,
@@ -80,7 +80,7 @@ func init() {
 		shared.ModuleEntry{Cmd: shared.CmdBZMPop, Entry: &shared.CommandEntry{
 			ConnHandler: handleBZMPop,
 			TxnPrepare: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) (bool, []string, shared.CommandRunner) {
-				return handleBZMPopNonBlocking(cmd, w, db)
+				return handleBZMPopNonBlocking(cmd, w)
 			},
 			Keys:  func(cmd *shared.Command) []string { return shared.KeysNumkeysAtOffset(cmd, 1) },
 			Flags: shared.FlagWrite,

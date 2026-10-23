@@ -62,7 +62,9 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 }
 
 // seedGeoData adds geo members directly via effects for test setup.
-func seedGeoData(eng *effects.Engine, ctx *effects.Context, key string, members map[string][2]float64) {
+func seedGeoData(ctx *effects.Context, members map[string][2]float64) {
+	const key = "mygeo"
+
 	for member, coords := range members {
 		hash := geoHashEncode(coords[0], coords[1])
 		_ = ctx.Emit(&pb.Effect{
@@ -461,7 +463,7 @@ func TestGeoSearchByRadius(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo":  {13.361389, 38.115556},
 		"Catania":  {15.087269, 37.502669},
 		"Rome":     {12.496366, 41.902782},
@@ -496,7 +498,7 @@ func TestGeoSearchByBox(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 		"Rome":    {12.496366, 41.902782},
@@ -523,7 +525,7 @@ func TestGeoSearchCount(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 		"Rome":    {12.496366, 41.902782},
@@ -551,7 +553,7 @@ func TestGeoSearchDesc(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 		"Rome":    {12.496366, 41.902782},
@@ -579,7 +581,7 @@ func TestGeoSearchFromMember(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 	})
@@ -603,7 +605,7 @@ func TestGeoSearchStore(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 		"Rome":    {12.496366, 41.902782},
@@ -637,7 +639,7 @@ func TestGeoSearchStoreStoreDist(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 	})
@@ -702,7 +704,7 @@ func TestGeoRadiusCompat(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 	})
@@ -726,7 +728,7 @@ func TestGeoRadiusByMemberCompat(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 	})
@@ -791,7 +793,7 @@ func TestGeoSearchWithOptions(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 
-	seedGeoData(eng, ctx, "mygeo", map[string][2]float64{
+	seedGeoData(ctx, map[string][2]float64{
 		"Palermo": {13.361389, 38.115556},
 		"Catania": {15.087269, 37.502669},
 	})

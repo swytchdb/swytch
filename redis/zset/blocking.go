@@ -74,9 +74,9 @@ func handleBlockingZPop(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		var valid bool
 		var runner shared.CommandRunner
 		if popMin {
-			valid, _, runner = handleBZPopMinNonBlocking(cmd, w, db)
+			valid, _, runner = handleBZPopMinNonBlocking(cmd, w)
 		} else {
-			valid, _, runner = handleBZPopMaxNonBlocking(cmd, w, db)
+			valid, _, runner = handleBZPopMaxNonBlocking(cmd, w)
 		}
 		if valid && runner != nil {
 			runner()
@@ -101,7 +101,7 @@ func handleBlockingZPop(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		// Try to pop from each key in order
 		for _, key := range keys {
 			keyStr := string(key)
-			entry, found, err := tryZPop(cmd, keyStr, db, popMin, reg)
+			entry, found, err := tryZPop(cmd, keyStr, popMin, reg)
 			if err != nil {
 				w.WriteError(err.Error())
 				return
@@ -133,7 +133,7 @@ func handleBlockingZPop(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 // tryZPop attempts to pop an element from a zset key.
 // Only pops if the registration is the oldest waiter for this key (fairness).
 // Returns the entry and true if successful, empty and false otherwise.
-func tryZPop(cmd *shared.Command, key string, db *shared.Database, popMin bool, reg *shared.Registration[struct{}]) (shared.ZSetEntry, bool, error) {
+func tryZPop(cmd *shared.Command, key string, popMin bool, reg *shared.Registration[struct{}]) (shared.ZSetEntry, bool, error) {
 	if reg == nil {
 		panic("tryZPop called without registration")
 	}
@@ -183,7 +183,7 @@ func tryZPop(cmd *shared.Command, key string, db *shared.Database, popMin bool, 
 func handleBZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, conn *shared.Connection) {
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
-		valid, _, runner := handleBZMPopNonBlocking(cmd, w, db)
+		valid, _, runner := handleBZMPopNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
 		}
@@ -380,17 +380,17 @@ func tryZMPop(cmd *shared.Command, key string, popMin bool, count int, reg *shar
 }
 
 // handleBZPopMinNonBlocking handles BZPOPMIN inside transactions (non-blocking mode)
-func handleBZPopMinNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
-	return handleZPopNonBlocking(cmd, w, db, true, "bzpopmin")
+func handleBZPopMinNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
+	return handleZPopNonBlocking(cmd, w, true, "bzpopmin")
 }
 
 // handleBZPopMaxNonBlocking handles BZPOPMAX inside transactions (non-blocking mode)
-func handleBZPopMaxNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
-	return handleZPopNonBlocking(cmd, w, db, false, "bzpopmax")
+func handleBZPopMaxNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
+	return handleZPopNonBlocking(cmd, w, false, "bzpopmax")
 }
 
 // handleZPopNonBlocking is the shared implementation for non-blocking BZPOPMIN/BZPOPMAX
-func handleZPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database, popMin bool, cmdName string) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleZPopNonBlocking(cmd *shared.Command, w *shared.Writer, popMin bool, cmdName string) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments(cmdName)
 		return
@@ -460,7 +460,7 @@ func handleZPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 }
 
 // handleBZMPopNonBlocking handles BZMPOP inside transactions (non-blocking mode)
-func handleBZMPopNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleBZMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("bzmpop")
 		return

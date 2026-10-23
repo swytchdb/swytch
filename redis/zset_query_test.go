@@ -49,13 +49,13 @@ func seedQueryZSet(t *testing.T, h *Handler, conn *shared.Connection) {
 }
 
 // seedQueryStringKey creates a string key for WRONGTYPE testing
-func seedQueryStringKey(t *testing.T, h *Handler, conn *shared.Connection, key string) {
+func seedQueryStringKey(t *testing.T, h *Handler, conn *shared.Connection) {
 	t.Helper()
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
 	h.ExecuteInto(&shared.Command{
 		Type: shared.CmdSet,
-		Args: [][]byte{[]byte(key), []byte("value")},
+		Args: [][]byte{[]byte("strkey"), []byte("value")},
 	}, w, conn)
 }
 
@@ -65,7 +65,7 @@ func TestZScore(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -140,7 +140,7 @@ func TestZMScore(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -207,7 +207,7 @@ func TestZCard(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -258,7 +258,7 @@ func TestZRank(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -333,7 +333,7 @@ func TestZRevRank(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -408,7 +408,7 @@ func TestZCount(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	tests := []struct {
 		name   string
@@ -499,7 +499,7 @@ func TestZRandMember(t *testing.T) {
 	conn := newEffectsConn(h)
 
 	seedQueryZSet(t, h, conn)
-	seedQueryStringKey(t, h, conn, "strkey")
+	seedQueryStringKey(t, h, conn)
 
 	t.Run("positive count returns array of distinct members", func(t *testing.T) {
 		buf := &bytes.Buffer{}

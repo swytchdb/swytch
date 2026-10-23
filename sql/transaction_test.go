@@ -253,9 +253,9 @@ func TestTxSurvivesCrossSession(t *testing.T) {
 
 // mustExecCtx is a *sql.Conn-scoped variant of mustExec for tests
 // that need to pin operations to a single session.
-func mustExecCtx(t *testing.T, conn *sql.Conn, ctx context.Context, query string, args ...any) {
+func mustExecCtx(t *testing.T, conn *sql.Conn, ctx context.Context, query string) {
 	t.Helper()
-	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+	if _, err := conn.ExecContext(ctx, query); err != nil {
 		t.Fatalf("%s: %v", query, err)
 	}
 }

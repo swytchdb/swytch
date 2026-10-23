@@ -37,15 +37,15 @@ import (
 // - table with "ok" key -> Simple String
 // - nil/false -> Null
 // - true -> Integer 1
-func luaToRESP(L *lua.LState, val lua.LValue, w *shared.Writer) {
-	luaToRESPWithDepth(L, val, w, 0)
+func luaToRESP(val lua.LValue, w *shared.Writer) {
+	luaToRESPWithDepth(val, w, 0)
 }
 
 // maxLuaToRESPDepth is the maximum recursion depth for converting Lua values to RESP.
 // This prevents stack overflow from circular references.
 const maxLuaToRESPDepth = 1000
 
-func luaToRESPWithDepth(L *lua.LState, val lua.LValue, w *shared.Writer, depth int) {
+func luaToRESPWithDepth(val lua.LValue, w *shared.Writer, depth int) {
 	if depth > maxLuaToRESPDepth {
 		w.WriteError("ERR reached lua stack limit")
 		return
@@ -97,7 +97,7 @@ func luaToRESPWithDepth(L *lua.LState, val lua.LValue, w *shared.Writer, depth i
 		length := v.Len()
 		w.WriteArray(length)
 		for i := 1; i <= length; i++ {
-			luaToRESPWithDepth(L, v.RawGetInt(i), w, depth+1)
+			luaToRESPWithDepth(v.RawGetInt(i), w, depth+1)
 		}
 
 	default:

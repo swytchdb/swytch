@@ -221,7 +221,7 @@ func formatBytes(b uint64) string {
 	return fmt.Sprintf("%.2f%cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-func (h *Handler) handleDBSize(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleDBSize(w *shared.Writer) {
 	if h.engine != nil {
 		w.WriteInteger(h.engine.KeyCount())
 	} else {
@@ -242,7 +242,7 @@ func (h *Handler) emitFlushEffect(cmd *shared.Command) error {
 	return cmd.Context.Flush()
 }
 
-func (h *Handler) handleFlushDB(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleFlushDB(cmd *shared.Command, w *shared.Writer) {
 	if err := h.emitFlushEffect(cmd); err != nil {
 		w.WriteError("ERR flush failed: " + err.Error())
 		return
@@ -262,7 +262,7 @@ func (h *Handler) handleSwapDB(cmd *shared.Command, w *shared.Writer) {
 	w.WriteError("ERR SWAPDB is not supported: there is only one database")
 }
 
-func (h *Handler) handleTime(cmd *shared.Command, w *shared.Writer) {
+func (h *Handler) handleTime(w *shared.Writer) {
 	now := time.Now()
 	secs := now.Unix()
 	micros := now.Nanosecond() / 1000
@@ -272,7 +272,7 @@ func (h *Handler) handleTime(cmd *shared.Command, w *shared.Writer) {
 	w.WriteBulkStringStr(strconv.Itoa(micros))
 }
 
-func (h *Handler) handleKeys(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleKeys(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("keys")
 		return
@@ -291,7 +291,7 @@ func (h *Handler) handleKeys(cmd *shared.Command, w *shared.Writer, db *shared.D
 	}
 }
 
-func (h *Handler) handleRandomKey(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleRandomKey(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("randomkey")
 		return
@@ -318,7 +318,7 @@ func (h *Handler) handleRandomKey(cmd *shared.Command, w *shared.Writer, db *sha
 	})
 }
 
-func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("scan")
 		return
@@ -698,7 +698,7 @@ func (h *Handler) handleDebug(cmd *shared.Command, w *shared.Writer) {
 	}
 }
 
-func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer, db *shared.Database) {
+func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("memory")
 		return
@@ -815,12 +815,12 @@ func (h *Handler) registerServerCommands() {
 	})
 	r.Register(shared.CmdDBSize, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleDBSize(cmd, w, db) }
+			return true, nil, func() { h.handleDBSize(w) }
 		},
 	})
 	r.Register(shared.CmdFlushDB, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleFlushDB(cmd, w, db) }
+			return true, nil, func() { h.handleFlushDB(cmd, w) }
 		},
 		Flags: shared.FlagWrite,
 	})
@@ -838,22 +838,22 @@ func (h *Handler) registerServerCommands() {
 	})
 	r.Register(shared.CmdTime, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, _ *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleTime(cmd, w) }
+			return true, nil, func() { h.handleTime(w) }
 		},
 	})
 	r.Register(shared.CmdKeys, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleKeys(cmd, w, db) }
+			return true, nil, func() { h.handleKeys(cmd, w) }
 		},
 	})
 	r.Register(shared.CmdRandomKey, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleRandomKey(cmd, w, db) }
+			return true, nil, func() { h.handleRandomKey(cmd, w) }
 		},
 	})
 	r.Register(shared.CmdScan, &shared.CommandEntry{
 		Handler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database) (bool, []string, shared.CommandRunner) {
-			return true, nil, func() { h.handleScan(cmd, w, db) }
+			return true, nil, func() { h.handleScan(cmd, w) }
 		},
 	})
 
@@ -880,7 +880,7 @@ func (h *Handler) registerServerCommands() {
 	})
 	r.Register(shared.CmdMemory, &shared.CommandEntry{
 		ConnHandler: func(cmd *shared.Command, w *shared.Writer, db *shared.Database, _ *shared.Connection) {
-			h.handleMemory(cmd, w, db)
+			h.handleMemory(cmd, w)
 		},
 	})
 

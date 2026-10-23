@@ -43,7 +43,7 @@ func handleGeoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 
 	valid = true
 	runner = func() {
-		geoSearch(cmd, w, db, "", false)
+		geoSearch(cmd, w, "", false)
 	}
 	return
 }
@@ -73,7 +73,7 @@ func handleGeoSearchStore(cmd *shared.Command, w *shared.Writer, db *shared.Data
 			Context: cmd.Context,
 		}
 
-		geoSearch(modCmd, w, db, destKey, true)
+		geoSearch(modCmd, w, destKey, true)
 	}
 	return
 }
@@ -154,7 +154,7 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			Runtime: cmd.Runtime,
 			Context: cmd.Context,
 		}
-		geoSearch(modCmd, w, db, destKey, destKey != "")
+		geoSearch(modCmd, w, destKey, destKey != "")
 	}
 	return
 }
@@ -235,13 +235,13 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 			Runtime: cmd.Runtime,
 			Context: cmd.Context,
 		}
-		geoSearch(modCmd, w, db, destKey, destKey != "")
+		geoSearch(modCmd, w, destKey, destKey != "")
 	}
 	return
 }
 
 // geoSearch is the core implementation for GEOSEARCH and GEOSEARCHSTORE
-func geoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database, destKey string, isStore bool) {
+func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bool) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("geosearch")
 		return
@@ -422,7 +422,7 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database, destK
 		return
 	}
 
-	snap, _, exists, wrongType, err := getGeoSnapshot(cmd, key)
+	snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
 		return

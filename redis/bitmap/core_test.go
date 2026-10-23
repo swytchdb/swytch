@@ -65,7 +65,7 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 }
 
 // seedBitmapData seeds a key with raw bitmap data as KEYED elements.
-func seedBitmapData(eng *effects.Engine, ctx *effects.Context, key string, data []byte) {
+func seedBitmapData(ctx *effects.Context, key string, data []byte) {
 	for byteIdx, b := range data {
 		for bitIdx := 7; bitIdx >= 0; bitIdx-- {
 			if (b>>uint(bitIdx))&1 == 1 {
@@ -251,7 +251,7 @@ func TestBitCount(t *testing.T) {
 	// Set up test data: "foobar" = 0x66 0x6f 0x6f 0x62 0x61 0x72
 	// Binary: 01100110 01101111 01101111 01100010 01100001 01110010
 	// Total bits set: 4+6+6+3+3+4 = 26
-	seedBitmapData(eng, ctx, "mykey", []byte("foobar"))
+	seedBitmapData(ctx, "mykey", []byte("foobar"))
 
 	tests := []struct {
 		name   string
@@ -305,7 +305,7 @@ func TestBitPos(t *testing.T) {
 	ctx := eng.NewContext()
 
 	// Set up test data: \xff\xf0\x00 = 11111111 11110000 00000000
-	seedBitmapData(eng, ctx, "mykey", []byte{0xff, 0xf0, 0x00})
+	seedBitmapData(ctx, "mykey", []byte{0xff, 0xf0, 0x00})
 
 	tests := []struct {
 		name   string
@@ -359,8 +359,8 @@ func TestBitOp(t *testing.T) {
 	ctx := eng.NewContext()
 
 	// Set up test data
-	seedBitmapData(eng, ctx, "key1", []byte{0xff, 0x0f})
-	seedBitmapData(eng, ctx, "key2", []byte{0x0f, 0xff})
+	seedBitmapData(ctx, "key1", []byte{0xff, 0x0f})
+	seedBitmapData(ctx, "key2", []byte{0x0f, 0xff})
 
 	tests := []struct {
 		name      string

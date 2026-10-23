@@ -172,7 +172,7 @@ func (e *Engine) executeScript(script []byte, keys, args []string, w *shared.Wri
 	L.Pop(1)
 
 	// Convert Lua value to RESP
-	luaToRESP(L, ret, w)
+	luaToRESP(ret, w)
 }
 
 // HandleScript handles SCRIPT subcommands.
@@ -190,9 +190,9 @@ func (e *Engine) HandleScript(cmd *shared.Command, w *shared.Writer) {
 	case "EXISTS":
 		e.handleScriptExists(cmd, w)
 	case "FLUSH":
-		e.handleScriptFlush(cmd, w)
+		e.handleScriptFlush(w)
 	case "KILL":
-		e.handleScriptKill(cmd, w)
+		e.handleScriptKill(w)
 	case "DEBUG":
 		// DEBUG mode not supported, just acknowledge
 		w.WriteOK()
@@ -263,7 +263,7 @@ func (e *Engine) handleScriptExists(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleScriptFlush handles SCRIPT FLUSH command.
-func (e *Engine) handleScriptFlush(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleScriptFlush(w *shared.Writer) {
 	if e.scriptRegistry == nil {
 		w.WriteError("ERR scripting not initialized")
 		return
@@ -277,7 +277,7 @@ func (e *Engine) handleScriptFlush(cmd *shared.Command, w *shared.Writer) {
 }
 
 // handleScriptKill handles SCRIPT KILL command.
-func (e *Engine) handleScriptKill(cmd *shared.Command, w *shared.Writer) {
+func (e *Engine) handleScriptKill(w *shared.Writer) {
 	sc := e.runningScript.Load()
 	if sc == nil {
 		w.WriteError("NOTBUSY No scripts in execution right now.")

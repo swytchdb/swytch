@@ -41,15 +41,15 @@ func handleXGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	switch subCmd {
 	case "CREATE":
-		return handleXGroupCreate(cmd, w, db)
+		return handleXGroupCreate(cmd, w)
 	case "DESTROY":
-		return handleXGroupDestroy(cmd, w, db)
+		return handleXGroupDestroy(cmd, w)
 	case "CREATECONSUMER":
-		return handleXGroupCreateConsumer(cmd, w, db)
+		return handleXGroupCreateConsumer(cmd, w)
 	case "DELCONSUMER":
-		return handleXGroupDelConsumer(cmd, w, db)
+		return handleXGroupDelConsumer(cmd, w)
 	case "SETID":
-		return handleXGroupSetID(cmd, w, db)
+		return handleXGroupSetID(cmd, w)
 	case "HELP":
 		if len(cmd.Args) > 1 {
 			w.WriteError("ERR wrong number of arguments for 'xgroup|help' command")
@@ -67,7 +67,7 @@ func handleXGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 }
 
 // handleXGroupCreate handles XGROUP CREATE key group <id|$> [MKSTREAM] [ENTRIESREAD entries-read]
-func handleXGroupCreate(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xgroup|create")
 		return
@@ -212,7 +212,7 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 }
 
 // handleXGroupDestroy handles XGROUP DESTROY key group
-func handleXGroupDestroy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleXGroupDestroy(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xgroup|destroy")
 		return
@@ -266,7 +266,7 @@ func handleXGroupDestroy(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 }
 
 // handleXGroupCreateConsumer handles XGROUP CREATECONSUMER key group consumer
-func handleXGroupCreateConsumer(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleXGroupCreateConsumer(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xgroup|createconsumer")
 		return
@@ -319,7 +319,7 @@ func handleXGroupCreateConsumer(cmd *shared.Command, w *shared.Writer, db *share
 }
 
 // handleXGroupDelConsumer handles XGROUP DELCONSUMER key group consumer
-func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xgroup|delconsumer")
 		return
@@ -377,7 +377,7 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer, db *shared.D
 }
 
 // handleXGroupSetID handles XGROUP SETID key group <id|$> [ENTRIESREAD entries-read]
-func handleXGroupSetID(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
+func handleXGroupSetID(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xgroup|setid")
 		return
@@ -461,7 +461,7 @@ func handleXGroupSetID(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 		// Get existing group metadata for createdAt
 		gSnap, _, _ := getGroupSnapshot(cmd, key, groupName)
-		_, existingEntriesRead, existingCreatedAt, _ := getGroupMeta(gSnap)
+		_, existingEntriesRead, existingCreatedAt := getGroupMeta(gSnap)
 
 		finalEntriesRead := existingEntriesRead
 		if entriesRead >= 0 {
@@ -1198,7 +1198,7 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 		if useNewOnly[j] {
 			// New entries mode (>)
 			gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
-			lastDelivered, entriesRead, createdAt, _ := getGroupMeta(gSnap)
+			lastDelivered, entriesRead, createdAt := getGroupMeta(gSnap)
 
 			entries := snapshotToEntries(snap)
 			filtered := rangeEntries(entries, lastDelivered, shared.MaxStreamID, true, false, count)
@@ -1356,7 +1356,7 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 			// Step 2: Read new entries from ">"
 			if remaining > 0 {
 				gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
-				lastDelivered, entriesRead, createdAt, _ := getGroupMeta(gSnap)
+				lastDelivered, entriesRead, createdAt := getGroupMeta(gSnap)
 
 				filtered := rangeEntries(entries, lastDelivered, shared.MaxStreamID, true, false, remaining)
 

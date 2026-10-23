@@ -20,6 +20,7 @@
 package hash
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -30,12 +31,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// seedHashWithTTL creates a hash and sets per-element TTL via effects
-func seedHashWithTTL(eng *effects.Engine, ctx *effects.Context, key string, fields map[string]string, ttlField string, expiresAtMs uint64) {
-	seedHash(eng, ctx, key, fields)
+// seedHashWithTTL creates myhash and sets the TTL of field f1 via effects.
+func seedHashWithTTL(ctx *effects.Context, fields map[string]string, expiresAtMs uint64) {
+	const key = "myhash"
+
+	seedHash(ctx, fields)
 	_ = ctx.Emit(&pb.Effect{
 		Key:  []byte(key),
-		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{ElementId: []byte(ttlField), ExpiresAt: timestamppb.New(time.UnixMilli(int64(expiresAtMs)))}},
+		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{ElementId: []byte("f1"), ExpiresAt: timestamppb.New(time.UnixMilli(int64(expiresAtMs)))}},
 	})
 	_ = ctx.Flush()
 }
@@ -45,7 +48,7 @@ func seedHashWithTTL(eng *effects.Engine, ctx *effects.Context, key string, fiel
 func TestHandleHExpire(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("100"),
@@ -70,7 +73,7 @@ func TestHandleHExpire_NonExistentKey(t *testing.T) {
 func TestHandleHExpire_ZeroSeconds(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("0"),
@@ -95,7 +98,7 @@ func TestHandleHExpire_WrongNumArgs(t *testing.T) {
 func TestHandleHPExpire(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("100000"),
@@ -112,7 +115,7 @@ func TestHandleHPExpire(t *testing.T) {
 func TestHandleHExpireAt(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("9999999999"),
@@ -127,7 +130,7 @@ func TestHandleHExpireAt(t *testing.T) {
 func TestHandleHExpireAt_PastTime(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("1"), // Unix timestamp 1 = in the past
@@ -145,7 +148,7 @@ func TestHandleHExpireAt_PastTime(t *testing.T) {
 func TestHandleHPExpireAt(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("9999999999999"),
@@ -164,7 +167,7 @@ func TestHandleHTTL(t *testing.T) {
 	ctx := eng.NewContext()
 	// Set a TTL of 60 seconds from now
 	expiresAtMs := uint64(9999999999000) // far future
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -179,7 +182,7 @@ func TestHandleHTTL(t *testing.T) {
 func TestHandleHTTL_NoTTL(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -205,7 +208,7 @@ func TestHandleHPTTL(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 	expiresAtMs := uint64(9999999999000)
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -222,7 +225,7 @@ func TestHandleHExpireTime(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 	expiresAtMs := uint64(9999999999000)
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -236,17 +239,21 @@ func TestHandleHExpireTime(t *testing.T) {
 // --- HPExpireTime ---
 
 func TestHandleHPExpireTime(t *testing.T) {
-	eng := effects.NewTestEngine()
-	ctx := eng.NewContext()
-	expiresAtMs := uint64(9999999999000)
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	for _, expiresAtMs := range []uint64{9999999999000, 9999999999123} {
+		t.Run(fmt.Sprint(expiresAtMs), func(t *testing.T) {
+			eng := effects.NewTestEngine()
+			ctx := eng.NewContext()
+			seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
-	cmd := &shared.Command{Args: [][]byte{
-		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
-	}}
-	resp := runHandlerWith(eng, ctx, handleHPExpireTime, cmd)
-	if strings.Contains(resp, ":-1") || strings.Contains(resp, ":-2") {
-		t.Fatalf("expected positive expire time in ms, got %q", resp)
+			cmd := &shared.Command{Args: [][]byte{
+				[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
+			}}
+			resp := runHandlerWith(eng, ctx, handleHPExpireTime, cmd)
+			want := fmt.Sprintf("*1\r\n:%d\r\n", expiresAtMs)
+			if resp != want {
+				t.Fatalf("expected exact expiry in ms %q, got %q", want, resp)
+			}
+		})
 	}
 }
 
@@ -256,7 +263,7 @@ func TestHandleHPersist(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 	expiresAtMs := uint64(9999999999000)
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -279,7 +286,7 @@ func TestHandleHPersist(t *testing.T) {
 func TestHandleHPersist_NoTTL(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1"})
+	seedHash(ctx, map[string]string{"f1": "v1"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
@@ -319,7 +326,7 @@ func TestHandleHSetEx(t *testing.T) {
 func TestHandleHSetEx_FNX(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "existing"})
+	seedHash(ctx, map[string]string{"f1": "existing"})
 
 	// FNX should fail because f1 already exists
 	cmd := &shared.Command{Args: [][]byte{
@@ -361,7 +368,7 @@ func TestHandleHSetEx_WrongNumArgs(t *testing.T) {
 func TestHandleHGetEx(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
-	seedHash(eng, ctx, "myhash", map[string]string{"f1": "v1", "f2": "v2"})
+	seedHash(ctx, map[string]string{"f1": "v1", "f2": "v2"})
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("EX"), []byte("100"),
@@ -378,7 +385,7 @@ func TestHandleHGetEx_Persist(t *testing.T) {
 	eng := effects.NewTestEngine()
 	ctx := eng.NewContext()
 	expiresAtMs := uint64(9999999999000)
-	seedHashWithTTL(eng, ctx, "myhash", map[string]string{"f1": "v1"}, "f1", expiresAtMs)
+	seedHashWithTTL(ctx, map[string]string{"f1": "v1"}, expiresAtMs)
 
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("PERSIST"),

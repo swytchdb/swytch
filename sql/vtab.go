@@ -812,12 +812,9 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 
 	// For synthetic-PK tables the rowid is the only identity and is
 	// immutable from SQL: newPK == oldPK by construction. Skip the
-	// PK-change branch entirely. pkCol is only used by the PK-change
-	// path, so leaving it nil here is safe.
-	var pkCol *columnSchema
+	// PK-change branch entirely.
 	newPK := oldPK
 	if !v.schema.SyntheticPK {
-		pkCol = v.schema.pkColumn()
 		newPKVals := v.schema.pkValues(params.Columns)
 		pkAffs := v.schema.pkAffinities()
 		var err error
@@ -836,7 +833,7 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 		var pkChangeNewVals []sqlite.Value
 		var pkChangeOldVals []sqlite.Value
 		if err := v.runWrite("pk-change update", func(ectx *effects.Context) error {
-			newVals, oldVals, err := v.emitPKChange(ectx, oldPK, newPK, pkCol, params.Columns)
+			newVals, oldVals, err := v.emitPKChange(ectx, oldPK, newPK, params.Columns)
 			if err != nil {
 				return err
 			}
@@ -1117,7 +1114,6 @@ func (v *swytchVTable) emitSamePKUpdate(ectx *effects.Context, pk string, cols [
 func (v *swytchVTable) emitPKChange(
 	ectx *effects.Context,
 	oldPK, newPK string,
-	pkCol *columnSchema,
 	cols []sqlite.Value,
 ) ([]sqlite.Value, []sqlite.Value, error) {
 	tbl, schemaTips, err := v.loadLiveSchema(ectx)
