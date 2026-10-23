@@ -261,6 +261,14 @@ parseID:
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -293,7 +301,13 @@ parseID:
 		// Only check if the stream exists — if it was DELeted, stale mappings must be ignored.
 		if hasIDMP && idmpIID != "" && exists {
 			if existingID, found := lookupProducerSeqWithConfig(cmd, key, idmpProducer, idmpIID, idmpGen, idmpDuration); found {
-				incrementIidsDuplicates(cmd, key)
+				if err := incrementIidsDuplicates(cmd, key); err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
+
+				succeeded = true
 				w.WriteBulkStringStr(existingID.String())
 				return
 			}
@@ -398,18 +412,23 @@ parseID:
 			// Add our new entry to the list for trim calculations
 			entries = append(entries, &shared.StreamEntry{ID: id, Fields: fields})
 
-			trimEntries(cmd, key, entries, trimOpts)
+			if err := trimEntries(cmd, key, entries, trimOpts); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 		}
 
+		succeeded = true
 		w.WriteBulkStringStr(id.String())
 	}
 	return
 }
 
 // trimEntries performs stream trimming by emitting REMOVE effects.
-func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry, opts shared.TrimOptions) {
+func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry, opts shared.TrimOptions) error {
 	if len(entries) == 0 {
-		return
+		return nil
 	}
 
 	// Determine effective limit
@@ -423,44 +442,56 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 	}
 
 	// For ACKED mode, we need consumer group info
-	canTrim := func(id shared.StreamID) bool {
+	canTrim := func(id shared.StreamID) (bool, error) {
 		if opts.RefMode != shared.RefModeAcked {
-			return true
+			return true, nil
 		}
 		// Check all groups
 		groupNames := listGroupNames(cmd, key)
 		for _, gName := range groupNames {
-			gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
+			gSnap, _, err := getGroupSnapshot(cmd, key, gName)
+			if err != nil {
+				return false, err
+			}
 			lastDelivered, _, _ := getGroupMeta(gSnap)
 			if id.Compare(lastDelivered) > 0 {
-				return false
+				return false, nil
 			}
-			pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+			pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+			if err != nil {
+				return false, err
+			}
 			if pelSnap != nil && pelSnap.NetAdds != nil {
 				elemID := encodeStreamElementID(id)
 				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
-					return false
+					return false, nil
 				}
 			}
 		}
-		return true
+		return true, nil
 	}
 
 	// For DELREF mode, also remove PEL entries for trimmed entries
-	handleTrim := func(id shared.StreamID) {
+	handleTrim := func(id shared.StreamID) error {
 		if opts.RefMode != shared.RefModeDelRef {
-			return
+			return nil
 		}
 		groupNames := listGroupNames(cmd, key)
 		for _, gName := range groupNames {
-			pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+			pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+			if err != nil {
+				return err
+			}
 			if pelSnap != nil && pelSnap.NetAdds != nil {
 				elemID := encodeStreamElementID(id)
 				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
-					emitPELRemove(cmd, key, gName, id)
+					if err := emitPELRemove(cmd, key, gName, id); err != nil {
+						return err
+					}
 				}
 			}
 		}
+		return nil
 	}
 
 	trimCount := int64(0)
@@ -474,11 +505,21 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			if entry.ID.Compare(*opts.MinID) >= 0 {
 				break
 			}
-			if !canTrim(entry.ID) {
+			canRemove, err := canTrim(entry.ID)
+			if err != nil {
+				return err
+			}
+
+			if !canRemove {
 				continue
 			}
-			emitStreamRemove(cmd, key, entry.ID)
-			handleTrim(entry.ID)
+			if err := emitStreamRemove(cmd, key, entry.ID); err != nil {
+				return err
+			}
+
+			if err := handleTrim(entry.ID); err != nil {
+				return err
+			}
 			trimCount++
 		}
 	}
@@ -507,19 +548,30 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 				if trimmedHere >= toTrim {
 					break
 				}
-				if !canTrim(entry.ID) {
+				canRemove, err := canTrim(entry.ID)
+				if err != nil {
+					return err
+				}
+
+				if !canRemove {
 					continue
 				}
 				// Check if already trimmed by MINID
 				if opts.MinID != nil && entry.ID.Compare(*opts.MinID) < 0 {
 					continue // already counted
 				}
-				emitStreamRemove(cmd, key, entry.ID)
-				handleTrim(entry.ID)
+				if err := emitStreamRemove(cmd, key, entry.ID); err != nil {
+					return err
+				}
+
+				if err := handleTrim(entry.ID); err != nil {
+					return err
+				}
 				trimmedHere++
 			}
 		}
 	}
+	return nil
 }
 
 // handleXLen handles XLEN key
@@ -1889,6 +1941,14 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -1922,7 +1982,11 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 		// Populate consumer groups for ACKED/DELREF ref modes
 		if trimOpts.RefMode == shared.RefModeAcked || trimOpts.RefMode == shared.RefModeDelRef {
-			populateStreamGroups(cmd, key, sv)
+			if err := populateStreamGroups(cmd, key, sv); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 		}
 
 		trimmed := sv.Trim(trimOpts)
@@ -1938,7 +2002,11 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 			for _, entry := range entries {
 				if !remainingMap[entry.ID.Key()] {
-					emitStreamRemove(cmd, key, entry.ID)
+					if err := emitStreamRemove(cmd, key, entry.ID); err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 				}
 			}
 
@@ -1946,7 +2014,12 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if trimOpts.RefMode == shared.RefModeDelRef {
 				groupNames := listGroupNames(cmd, key)
 				for _, gName := range groupNames {
-					pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+					if err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					if pelSnap == nil || pelSnap.NetAdds == nil {
 						continue
 					}
@@ -1956,7 +2029,11 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 						}
 						pelElemID := encodeStreamElementID(entry.ID)
 						if _, hasPEL := pelSnap.NetAdds[string(pelElemID)]; hasPEL {
-							emitPELRemove(cmd, key, gName, entry.ID)
+							if err := emitPELRemove(cmd, key, gName, entry.ID); err != nil {
+								w.WriteError(err.Error())
+
+								return
+							}
 						}
 					}
 				}
@@ -1964,6 +2041,7 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		}
 
 		_ = beforeLen
+		succeeded = true
 		w.WriteInteger(trimmed)
 	}
 	return
@@ -1971,10 +2049,13 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 // entriesToStreamValue converts snapshot entries to a StreamValue for trim logic reuse.
 // populateStreamGroups loads consumer group data from the effects system into a StreamValue.
-func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValue) {
+func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValue) error {
 	groupNames := listGroupNames(cmd, key)
 	for _, gName := range groupNames {
-		gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
+		gSnap, _, err := getGroupSnapshot(cmd, key, gName)
+		if err != nil {
+			return err
+		}
 		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 
 		group := &shared.ConsumerGroup{
@@ -1986,7 +2067,10 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 		}
 
 		// Load PEL
-		pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+		if err != nil {
+			return err
+		}
 		if pelSnap != nil && pelSnap.NetAdds != nil {
 			for elemID, elem := range pelSnap.NetAdds {
 				if len(elemID) == 16 {
@@ -2005,6 +2089,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 
 		sv.Groups[gName] = group
 	}
+	return nil
 }
 
 func entriesToStreamValue(entries []*shared.StreamEntry, snap *pb.ReducedEffect) *shared.StreamValue {
@@ -2095,6 +2180,14 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -2141,13 +2234,23 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				canDelete := true
 				groupNames := listGroupNames(cmd, key)
 				for _, gName := range groupNames {
-					gSnap, _, _ := getGroupSnapshot(cmd, key, gName)
+					gSnap, _, err := getGroupSnapshot(cmd, key, gName)
+					if err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					lastDelivered, _, _ := getGroupMeta(gSnap)
 					if id.Compare(lastDelivered) > 0 {
 						canDelete = false
 						break
 					}
-					pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+					if err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					if pelSnap != nil && pelSnap.NetAdds != nil {
 						pelElemID := encodeStreamElementID(id)
 						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
@@ -2172,11 +2275,20 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if refMode == shared.RefModeDelRef {
 				groupNames := listGroupNames(cmd, key)
 				for _, gName := range groupNames {
-					pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
+					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
+					if err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					if pelSnap != nil && pelSnap.NetAdds != nil {
 						pelElemID := encodeStreamElementID(id)
 						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
-							emitPELRemove(cmd, key, gName, id)
+							if err := emitPELRemove(cmd, key, gName, id); err != nil {
+								w.WriteError(err.Error())
+
+								return
+							}
 						}
 					}
 				}
@@ -2185,6 +2297,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			results[j] = 1
 		}
 
+		succeeded = true
 		w.WriteArray(numIds)
 		for _, r := range results {
 			w.WriteInteger(r)
@@ -2498,6 +2611,14 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -2530,9 +2651,14 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 
 		if changed {
-			clearAllProducerKeys(cmd, key)
+			if err := clearAllProducerKeys(cmd, key); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 		}
 
+		succeeded = true
 		w.WriteOK()
 	}
 	return

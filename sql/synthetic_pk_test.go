@@ -44,7 +44,11 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SELECT: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close rows: %v", err)
+		}
+	}()
 	var got []struct {
 		a string
 		b int
@@ -58,6 +62,10 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 			t.Fatalf("Scan: %v", err)
 		}
 		got = append(got, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read rows: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)

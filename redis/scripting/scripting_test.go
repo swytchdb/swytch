@@ -186,7 +186,9 @@ func TestFunctionRegistry(t *testing.T) {
 			},
 		}
 
-		r.Load(lib, false)
+		if err := r.Load(lib, false); err != nil {
+			t.Fatal(err)
+		}
 		if r.LibraryCount() != 1 {
 			t.Errorf("expected 1 library, got %d", r.LibraryCount())
 		}
@@ -220,7 +222,9 @@ func TestFunctionRegistry(t *testing.T) {
 					"func" + string(rune('a'+i)): {Name: "func" + string(rune('a'+i))},
 				},
 			}
-			r.Load(lib, false)
+			if err := r.Load(lib, false); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		if r.LibraryCount() != 5 {
@@ -247,7 +251,9 @@ func TestFunctionRegistry(t *testing.T) {
 					"func_" + name: {Name: "func_" + name},
 				},
 			}
-			r.Load(lib, false)
+			if err := r.Load(lib, false); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		// List all

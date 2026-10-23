@@ -13,7 +13,11 @@ func TestProbeAutoincrement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close SQLite connection: %v", err)
+		}
+	})
 
 	if err := execSimple(conn, `CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)`); err != nil {
 		t.Logf("native CREATE: %v", err)
@@ -26,6 +30,11 @@ func TestProbeAutoincrement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := stmt.Finalize(); err != nil {
+			t.Errorf("finalize table info query: %v", err)
+		}
+	})
 	for {
 		has, err := stmt.Step()
 		if err != nil {
@@ -38,9 +47,16 @@ func TestProbeAutoincrement(t *testing.T) {
 			stmt.ColumnInt64(0), stmt.ColumnText(1), stmt.ColumnText(2),
 			stmt.ColumnInt64(3), stmt.ColumnInt64(4))
 	}
-	stmt.Finalize()
+	stmt2, _, err := conn.PrepareTransient(`SELECT sql FROM sqlite_master WHERE name = 't'`)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	stmt2, _, _ := conn.PrepareTransient(`SELECT sql FROM sqlite_master WHERE name = 't'`)
+	t.Cleanup(func() {
+		if err := stmt2.Finalize(); err != nil {
+			t.Errorf("finalize schema query: %v", err)
+		}
+	})
 	for {
 		has, err := stmt2.Step()
 		if err != nil {
@@ -51,7 +67,6 @@ func TestProbeAutoincrement(t *testing.T) {
 		}
 		t.Logf("sqlite_master sql: %s", stmt2.ColumnText(0))
 	}
-	stmt2.Finalize()
 
 	if err := execSimple(conn, `INSERT INTO t (v) VALUES ('a')`); err != nil {
 		t.Logf("insert: %v", err)

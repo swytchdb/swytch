@@ -184,8 +184,13 @@ func (c *Client) doGet(ctx context.Context, params url.Values) {
 	}
 	resp, err := c.httpClient.Do(req)
 	if resp != nil && resp.Body != nil {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			slog.Debug("telemetry: drain response", "error", err)
+		}
+
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("telemetry: close response", "error", err)
+		}
 	}
 	if err != nil {
 		slog.Debug("telemetry: send", "error", err)

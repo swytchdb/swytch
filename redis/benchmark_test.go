@@ -732,10 +732,12 @@ func BenchmarkParser_Set(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		reader.Seek(0, 0)
+		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
-		parser.ReadCommandInto(cmd)
+		if _, err := parser.ReadCommandInto(cmd); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -748,10 +750,12 @@ func BenchmarkParser_Get(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		reader.Seek(0, 0)
+		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
-		parser.ReadCommandInto(cmd)
+		if _, err := parser.ReadCommandInto(cmd); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -764,10 +768,12 @@ func BenchmarkParser_LPush(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		reader.Seek(0, 0)
+		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
-		parser.ReadCommandInto(cmd)
+		if _, err := parser.ReadCommandInto(cmd); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

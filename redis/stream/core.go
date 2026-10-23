@@ -1057,9 +1057,7 @@ func incrementIidsDuplicates(cmd *shared.Command, streamKey string) error {
 
 // clearAllProducerKeys invalidates all IDMP history by incrementing the generation counter.
 // Old entries remain in producer keys but are ignored during lookup (generation mismatch).
-func clearAllProducerKeys(cmd *shared.Command, streamKey string) {
+func clearAllProducerKeys(cmd *shared.Command, streamKey string) error {
 	gen := getIdmpGeneration(cmd, streamKey)
-	emitCfgSet(cmd, streamKey, "idmp-generation", gen+1)
-	// Also reset iids-added counter since history is cleared
-	// (iids-added is a lifetime counter, but generation change means fresh start)
+	return emitCfgSet(cmd, streamKey, "idmp-generation", gen+1)
 }

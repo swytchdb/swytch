@@ -261,7 +261,11 @@ Examples:
 		NodeID:      uint64(shared.GetNodeID()),
 		Insecure:    *otelInsecure,
 	})
-	defer tracingShutdown(context.Background())
+	defer func() {
+		if err := tracingShutdown(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to shut down tracing: %v\n", err)
+		}
+	}()
 
 	// Initialize cluster replication if configured (effects builds only)
 	if err := InitializeCluster(effectsCfg, server.Handler()); err != nil {

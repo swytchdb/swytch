@@ -57,7 +57,8 @@ func newRedisClient(t *testing.T, addr string) *redisClient {
 }
 
 func (c *redisClient) close() {
-	c.conn.Close()
+	// Test teardown: the connection will not be used again.
+	_ = c.conn.Close()
 }
 
 // sendCommand sends a RESP array command
@@ -455,7 +456,11 @@ func startRedisTestServer(t *testing.T) (addr string, cleanup func()) {
 		t.Fatalf("failed to start server: %v", err)
 	}
 
-	return server.Addr().String(), func() { server.Stop() }
+	return server.Addr().String(), func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("stop Redis test server: %v", err)
+		}
+	}
 }
 
 // startRedisTestServerWithEffects starts a test server with a standalone effects engine.
@@ -492,7 +497,11 @@ func startRedisTestServerWithEffects(t *testing.T) (addr string, cleanup func())
 		t.Fatalf("failed to start server: %v", err)
 	}
 
-	return server.Addr().String(), func() { server.Stop() }
+	return server.Addr().String(), func() {
+		if err := server.Stop(); err != nil {
+			t.Errorf("stop Redis test server: %v", err)
+		}
+	}
 }
 
 // =============================================================================
@@ -584,21 +593,27 @@ func TestCorrectness_Quit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
-		defer conn.Close()
+		defer func() {
+			// Test teardown: the connection will not be used again.
+			_ = conn.Close()
+		}()
 
-		fmt.Fprint(conn, "*1\r\n$4\r\nQUIT\r\n")
+		if _, err := fmt.Fprint(conn, "*1\r\n$4\r\nQUIT\r\n"); err != nil {
+			t.Fatal(err)
+		}
 
-		// Connection should be closed
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		buf := make([]byte, 1)
-		n, _ := conn.Read(buf)
-		if n > 0 {
-			// May get +OK before close, try again
-			conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-			n, err = conn.Read(buf)
-			if n != 0 || err == nil {
-				t.Error("connection should be closed after quit")
-			}
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+
+		// Read through the optional +OK reply and require EOF, not a timeout.
+		response, err := io.ReadAll(conn)
+		if err != nil {
+			t.Fatalf("connection should close after QUIT: %v", err)
+		}
+
+		if len(response) != 0 && string(response) != "+OK\r\n" {
+			t.Errorf("unexpected QUIT response: %q", response)
 		}
 	}
 }

@@ -332,6 +332,14 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool,
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -352,7 +360,12 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool,
 		}
 
 		// Count pending entries for this consumer
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 		pendingCount := consumerPendingCount(pelSnap, consumerName)
 
 		// Remove pending entries for this consumer
@@ -361,7 +374,11 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool,
 				consumer, _, _ := decodePELEntry(elem.Data.Decompress())
 				if consumer == consumerName && len(elemID) == 16 {
 					id := decodeStreamElementID([]byte(elemID))
-					emitPELRemove(cmd, key, groupName, id)
+					if err := emitPELRemove(cmd, key, groupName, id); err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 				}
 			}
 		}
@@ -371,6 +388,7 @@ func handleXGroupDelConsumer(cmd *shared.Command, w *shared.Writer) (valid bool,
 			return
 		}
 
+		succeeded = true
 		w.WriteInteger(pendingCount)
 	}
 	return
@@ -895,7 +913,12 @@ parseRGStreams:
 
 	if claimMinIdle >= 0 && hasNewOnly {
 		tryClaimStreams := func() ([]streamResultWithClaim, bool) {
-			results, noGrp, wrongT := doXReadGroupClaim(cmd, streamKeys, useNewOnly, groupName, consumerName, count, noAck, claimMinIdle)
+			results, noGrp, wrongT, err := doXReadGroupClaim(cmd, streamKeys, useNewOnly, groupName, consumerName, count, noAck, claimMinIdle)
+			if err != nil {
+				w.WriteError(err.Error())
+
+				return nil, false
+			}
 			if noGrp {
 				w.WriteError("NOGROUP No such key '" + streamKeys[0] + "' or consumer group '" + groupName + "' in XREADGROUP with GROUP option")
 				return nil, false
@@ -988,7 +1011,12 @@ parseRGStreams:
 	}
 
 	tryReadGroupStreams := func() ([]streamResult, bool) {
-		results, noGrp, wrongT := doXReadGroup(cmd, streamKeys, useNewOnly, ids, groupName, consumerName, count, noAck)
+		results, noGrp, wrongT, err := doXReadGroup(cmd, streamKeys, useNewOnly, ids, groupName, consumerName, count, noAck)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return nil, false
+		}
 		if noGrp {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + streamKeys[0] + "'")
 			return nil, false
@@ -1159,7 +1187,12 @@ parseNBRGStreams:
 	keys = streamKeys
 	valid = true
 	runner = func() {
-		results, noGrp, wrongT := doXReadGroup(cmd, streamKeys, useNewOnly, ids, groupName, consumerName, count, noAck)
+		results, noGrp, wrongT, err := doXReadGroup(cmd, streamKeys, useNewOnly, ids, groupName, consumerName, count, noAck)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 		if noGrp {
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + streamKeys[0] + "'")
 			return
@@ -1178,26 +1211,39 @@ parseNBRGStreams:
 }
 
 // doXReadGroup performs the actual XREADGROUP logic.
-func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, ids []shared.StreamID, groupName, consumerName string, count int, noAck bool) (results []streamResult, noGroup bool, wrongTypeKey bool) {
+func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, ids []shared.StreamID, groupName, consumerName string, count int, noAck bool) (results []streamResult, noGroup bool, wrongTypeKey bool, readErr error) {
+	// Roll back this read's deliveries without losing earlier EXEC commands.
+	savepoint := cmd.Context.TakeSavepoint()
+
+	defer func() {
+		if readErr != nil || noGroup || wrongTypeKey {
+			cmd.Context.RestoreSavepoint(savepoint)
+		}
+	}()
 
 	for j, sKey := range streamKeys {
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
 		if err != nil {
-			continue
+			return nil, false, false, err
 		}
 		if wrongType {
 			wrongTypeKey = true
 			return
 		}
 
-		if !exists || !groupExists(cmd, sKey, groupName) {
+		gSnap, _, err := getGroupSnapshot(cmd, sKey, groupName)
+		if err != nil {
+			return nil, false, false, err
+		}
+
+		_, hasGroup := gSnap.GetNetAdds()["__group__"]
+		if !exists || !hasGroup {
 			noGroup = true
 			return
 		}
 
 		if useNewOnly[j] {
 			// New entries mode (>)
-			gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
 			lastDelivered, entriesRead, createdAt := getGroupMeta(gSnap)
 
 			entries := snapshotToEntries(snap)
@@ -1216,17 +1262,23 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 					newEntriesRead = int64(len(filtered))
 				}
 				metaRaw := encodeGroupMeta(newLastDelivered, newEntriesRead, createdAt)
-				emitGroupInsert(cmd, sKey, groupName, metaRaw)
+				if err := emitGroupInsert(cmd, sKey, groupName, metaRaw); err != nil {
+					return nil, false, false, err
+				}
 
 				// Ensure consumer exists
 				consumerMeta := encodeConsumerMeta(now, now)
-				emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta)
+				if err := emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta); err != nil {
+					return nil, false, false, err
+				}
 
 				// Add to PEL unless NOACK
 				if !noAck {
 					for _, entry := range filtered {
 						pelRaw := encodePELEntry(consumerName, now, 1)
-						emitPELInsert(cmd, sKey, groupName, entry.ID, pelRaw)
+						if err := emitPELInsert(cmd, sKey, groupName, entry.ID, pelRaw); err != nil {
+							return nil, false, false, err
+						}
 					}
 				}
 
@@ -1234,7 +1286,10 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 			}
 		} else {
 			// History mode (specific ID) — read from PEL
-			pelSnap, _, _ := getPELSnapshot(cmd, sKey, groupName)
+			pelSnap, _, err := getPELSnapshot(cmd, sKey, groupName)
+			if err != nil {
+				return nil, false, false, err
+			}
 			if pelSnap == nil || pelSnap.NetAdds == nil {
 				continue
 			}
@@ -1272,13 +1327,14 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 			// Update consumer seen time
 			now := time.Now().UnixMilli()
 			consumerMeta := encodeConsumerMeta(now, 0)
-			gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
 			consumers := getConsumersFromGroup(gSnap)
 			if elem, ok := consumers[consumerName]; ok {
 				_, activeTime := decodeConsumerMeta(elem.Data.Decompress())
 				consumerMeta = encodeConsumerMeta(now, activeTime)
 			}
-			emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta)
+			if err := emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta); err != nil {
+				return nil, false, false, err
+			}
 
 			if len(pendingEntries) > 0 {
 				results = append(results, streamResult{key: sKey, entries: pendingEntries})
@@ -1286,24 +1342,38 @@ func doXReadGroup(cmd *shared.Command, streamKeys []string, useNewOnly []bool, i
 		}
 	}
 
-	return results, false, false
+	return results, false, false, nil
 }
 
 // doXReadGroupClaim performs XREADGROUP with the CLAIM option.
 // It claims pending entries idle >= claimMinIdle, then reads new entries from ">".
 // Returns results in claimEntry format with idle_time and delivery_count metadata.
-func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bool, groupName, consumerName string, count int, noAck bool, claimMinIdle int64) (results []streamResultWithClaim, noGroup bool, wrongTypeKey bool) {
+func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bool, groupName, consumerName string, count int, noAck bool, claimMinIdle int64) (results []streamResultWithClaim, noGroup bool, wrongTypeKey bool, readErr error) {
+	// Roll back this read's deliveries without losing earlier EXEC commands.
+	savepoint := cmd.Context.TakeSavepoint()
+
+	defer func() {
+		if readErr != nil || noGroup || wrongTypeKey {
+			cmd.Context.RestoreSavepoint(savepoint)
+		}
+	}()
 	for j, sKey := range streamKeys {
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
 		if err != nil {
-			continue
+			return nil, false, false, err
 		}
 		if wrongType {
 			wrongTypeKey = true
 			return
 		}
 
-		if !exists || !groupExists(cmd, sKey, groupName) {
+		gSnap, _, err := getGroupSnapshot(cmd, sKey, groupName)
+		if err != nil {
+			return nil, false, false, err
+		}
+
+		_, hasGroup := gSnap.GetNetAdds()["__group__"]
+		if !exists || !hasGroup {
 			noGroup = true
 			return
 		}
@@ -1318,7 +1388,10 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 
 		// Step 1: Claim pending entries idle >= claimMinIdle
 		if useNewOnly[j] {
-			pelSnap, _, _ := getPELSnapshot(cmd, sKey, groupName)
+			pelSnap, _, err := getPELSnapshot(cmd, sKey, groupName)
+			if err != nil {
+				return nil, false, false, err
+			}
 			pelEntries := pelToEntries(pelSnap)
 
 			for _, pe := range pelEntries {
@@ -1343,7 +1416,9 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 
 				// Claim: transfer ownership, increment delivery count in PEL
 				pelRaw := encodePELEntry(consumerName, now, pe.DeliveryCount+1)
-				emitPELInsert(cmd, sKey, groupName, pe.ID, pelRaw)
+				if err := emitPELInsert(cmd, sKey, groupName, pe.ID, pelRaw); err != nil {
+					return nil, false, false, err
+				}
 
 				claimEntries = append(claimEntries, claimEntry{
 					entry:         entry,
@@ -1355,7 +1430,6 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 
 			// Step 2: Read new entries from ">"
 			if remaining > 0 {
-				gSnap, _, _ := getGroupSnapshot(cmd, sKey, groupName)
 				lastDelivered, entriesRead, createdAt := getGroupMeta(gSnap)
 
 				filtered := rangeEntries(entries, lastDelivered, shared.MaxStreamID, true, false, remaining)
@@ -1370,13 +1444,17 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 						newEntriesRead = int64(len(filtered))
 					}
 					metaRaw := encodeGroupMeta(newLastDelivered, newEntriesRead, createdAt)
-					emitGroupInsert(cmd, sKey, groupName, metaRaw)
+					if err := emitGroupInsert(cmd, sKey, groupName, metaRaw); err != nil {
+						return nil, false, false, err
+					}
 
 					// Add to PEL unless NOACK
 					if !noAck {
 						for _, entry := range filtered {
 							pelRaw := encodePELEntry(consumerName, now, 1)
-							emitPELInsert(cmd, sKey, groupName, entry.ID, pelRaw)
+							if err := emitPELInsert(cmd, sKey, groupName, entry.ID, pelRaw); err != nil {
+								return nil, false, false, err
+							}
 						}
 					}
 
@@ -1394,7 +1472,9 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 		// Ensure consumer exists
 		if len(claimEntries) > 0 {
 			consumerMeta := encodeConsumerMeta(now, now)
-			emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta)
+			if err := emitConsumerInsert(cmd, sKey, groupName, consumerName, consumerMeta); err != nil {
+				return nil, false, false, err
+			}
 		}
 
 		if len(claimEntries) > 0 {
@@ -1402,7 +1482,7 @@ func doXReadGroupClaim(cmd *shared.Command, streamKeys []string, useNewOnly []bo
 		}
 	}
 
-	return results, false, false
+	return results, false, false, nil
 }
 
 // handleXAckDel handles XACKDEL key group [KEEPREF|DELREF|ACKED] IDS numids id [id ...]
@@ -1477,6 +1557,14 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
@@ -1502,7 +1590,12 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			return
 		}
 
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 
 		results := make([]int64, numIds)
 		for j, id := range ids {
@@ -1517,12 +1610,20 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 
 			// Remove from this group's PEL
-			emitPELRemove(cmd, key, groupName, id)
+			if err := emitPELRemove(cmd, key, groupName, id); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 
 			switch refMode {
 			case shared.RefModeKeepRef:
 				// Ack + delete stream entry, but don't touch other groups' PELs
-				emitStreamRemove(cmd, key, id)
+				if err := emitStreamRemove(cmd, key, id); err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
 				results[j] = 1
 
 			case shared.RefModeDelRef:
@@ -1531,9 +1632,17 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					if g == groupName {
 						continue
 					}
-					emitPELRemove(cmd, key, g, id)
+					if err := emitPELRemove(cmd, key, g, id); err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 				}
-				emitStreamRemove(cmd, key, id)
+				if err := emitStreamRemove(cmd, key, id); err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
 				results[j] = 1
 
 			case shared.RefModeAcked:
@@ -1543,7 +1652,12 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					if g == groupName {
 						continue
 					}
-					otherPEL, _, _ := getPELSnapshot(cmd, key, g)
+					otherPEL, _, err := getPELSnapshot(cmd, key, g)
+					if err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					if otherPEL != nil && otherPEL.NetAdds != nil {
 						if _, ok := otherPEL.NetAdds[string(elemID)]; ok {
 							allAcked = false
@@ -1552,7 +1666,11 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					}
 				}
 				if allAcked {
-					emitStreamRemove(cmd, key, id)
+					if err := emitStreamRemove(cmd, key, id); err != nil {
+						w.WriteError(err.Error())
+
+						return
+					}
 					results[j] = 1
 				} else {
 					results[j] = 2
@@ -1560,6 +1678,7 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 		}
 
+		succeeded = true
 		w.WriteArray(numIds)
 		for _, r := range results {
 			w.WriteInteger(r)
@@ -1657,32 +1776,41 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		cmd.Context.BeginTx()
 
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
-			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
 		}
 		if !exists {
-			cmd.Context.Abort()
 			w.WriteArray(0)
 			return
 		}
 		if wrongType {
-			cmd.Context.Abort()
 			w.WriteWrongType()
 			return
 		}
 
 		if !groupExists(cmd, key, groupName) {
-			cmd.Context.Abort()
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 			return
 		}
 
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 		entries := snapshotToEntries(snap)
 		now := time.Now().UnixMilli()
 
@@ -1747,7 +1875,11 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}
 
 			pelRaw := encodePELEntry(consumerName, deliveryTime, delCount)
-			emitPELInsert(cmd, key, groupName, id, pelRaw)
+			if err := emitPELInsert(cmd, key, groupName, id, pelRaw); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 
 			// Only include existing entries in the response
 			if entry != nil {
@@ -1757,7 +1889,13 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		// Ensure consumer exists
 		consumerMeta := encodeConsumerMeta(now, now)
-		emitConsumerInsert(cmd, key, groupName, consumerName, consumerMeta)
+		if err := emitConsumerInsert(cmd, key, groupName, consumerName, consumerMeta); err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		succeeded = true
 
 		if justID {
 			w.WriteArray(len(claimed))
@@ -1823,16 +1961,22 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 	valid = true
 	runner = func() {
+		savepoint := cmd.Context.TakeSavepoint()
+
+		succeeded := false
+		defer func() {
+			if !succeeded {
+				cmd.Context.RestoreSavepoint(savepoint)
+			}
+		}()
 		cmd.Context.BeginTx()
 
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
-			cmd.Context.Abort()
 			w.WriteError(err.Error())
 			return
 		}
 		if !exists {
-			cmd.Context.Abort()
 			w.WriteArray(3)
 			w.WriteBulkStringStr(zeroStreamID)
 			w.WriteArray(0)
@@ -1840,18 +1984,21 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			return
 		}
 		if wrongType {
-			cmd.Context.Abort()
 			w.WriteWrongType()
 			return
 		}
 
 		if !groupExists(cmd, key, groupName) {
-			cmd.Context.Abort()
 			w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
 			return
 		}
 
-		pelSnap, _, _ := getPELSnapshot(cmd, key, groupName)
+		pelSnap, _, err := getPELSnapshot(cmd, key, groupName)
+		if err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
 		pelEntries := pelToEntries(pelSnap)
 		entries := snapshotToEntries(snap)
 		now := time.Now().UnixMilli()
@@ -1887,21 +2034,35 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 			if entry == nil {
 				deletedIDs = append(deletedIDs, pe.ID)
-				emitPELRemove(cmd, key, groupName, pe.ID)
+				if err := emitPELRemove(cmd, key, groupName, pe.ID); err != nil {
+					w.WriteError(err.Error())
+
+					return
+				}
 				claimed_count++
 				continue
 			}
 
 			// Claim
 			pelRaw := encodePELEntry(consumerName, now, pe.DeliveryCount+1)
-			emitPELInsert(cmd, key, groupName, pe.ID, pelRaw)
+			if err := emitPELInsert(cmd, key, groupName, pe.ID, pelRaw); err != nil {
+				w.WriteError(err.Error())
+
+				return
+			}
 			claimed = append(claimed, entry)
 			claimed_count++
 		}
 
 		// Ensure consumer exists
 		consumerMeta := encodeConsumerMeta(now, now)
-		emitConsumerInsert(cmd, key, groupName, consumerName, consumerMeta)
+		if err := emitConsumerInsert(cmd, key, groupName, consumerName, consumerMeta); err != nil {
+			w.WriteError(err.Error())
+
+			return
+		}
+
+		succeeded = true
 
 		// Write response: [cursor, entries, deleted_ids]
 		w.WriteArray(3)
