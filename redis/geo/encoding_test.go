@@ -21,6 +21,7 @@ package geo
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -65,7 +66,7 @@ func TestGeoHashToString(t *testing.T) {
 	}
 	// Should only contain valid base32 characters
 	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'b' && c <= 'z' && c != 'i' && c != 'l' && c != 'o')) {
+		if !strings.ContainsRune("0123456789bcdefghjkmnpqrstuvwxyz", c) {
 			t.Errorf("invalid geohash character: %c in %q", c, s)
 		}
 	}
