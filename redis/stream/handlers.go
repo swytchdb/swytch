@@ -58,13 +58,13 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		case "NOMKSTREAM":
 			noMkStream = true
 			i++
-		case "KEEPREF":
+		case optionKeepRef:
 			trimOpts.RefMode = shared.RefModeKeepRef
 			i++
-		case "DELREF":
+		case optionDelRef:
 			trimOpts.RefMode = shared.RefModeDelRef
 			i++
-		case "ACKED":
+		case optionAcked:
 			trimOpts.RefMode = shared.RefModeAcked
 			i++
 		case "IDMP":
@@ -140,7 +140,7 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			trimOpts.HasMaxLen = true
 			i++
 			// Check for LIMIT
-			if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == "LIMIT" {
+			if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == optionLimit {
 				i++
 				if i >= len(cmd.Args) {
 					w.WriteError("ERR syntax error")
@@ -182,7 +182,7 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			trimOpts.MinID = &minID
 			i++
 			// Check for LIMIT
-			if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == "LIMIT" {
+			if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == optionLimit {
 				i++
 				if i >= len(cmd.Args) {
 					w.WriteError("ERR syntax error")
@@ -568,7 +568,7 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	// Parse COUNT option
 	count := 0
 	if len(cmd.Args) >= 5 {
-		if string(shared.ToUpper(cmd.Args[3])) == "COUNT" {
+		if string(shared.ToUpper(cmd.Args[3])) == optionCount {
 			c, err := strconv.Atoi(string(cmd.Args[4]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
@@ -633,7 +633,7 @@ func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	// Parse COUNT option
 	count := 0
 	if len(cmd.Args) >= 5 {
-		if string(shared.ToUpper(cmd.Args[3])) == "COUNT" {
+		if string(shared.ToUpper(cmd.Args[3])) == optionCount {
 			c, err := strconv.Atoi(string(cmd.Args[4]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
@@ -703,7 +703,7 @@ func handleXRead(cmd *shared.Command, w *shared.Writer, db *shared.Database, con
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -716,7 +716,7 @@ func handleXRead(cmd *shared.Command, w *shared.Writer, db *shared.Database, con
 			}
 			count = c
 			i++
-		case "BLOCK":
+		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -729,10 +729,10 @@ func handleXRead(cmd *shared.Command, w *shared.Writer, db *shared.Database, con
 			}
 			block = b / 1000.0 // Convert ms to seconds
 			i++
-		case "STREAMS":
+		case optionStreams:
 			i++
 			goto parseStreams
-		case "CLAIM":
+		case optionClaim:
 			w.WriteError("ERR The CLAIM option is only supported when using the GROUP option")
 			return
 		default:
@@ -913,7 +913,7 @@ func handleXReadNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Da
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -926,7 +926,7 @@ func handleXReadNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Da
 			}
 			count = c
 			i++
-		case "BLOCK":
+		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -939,10 +939,10 @@ func handleXReadNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Da
 				return
 			}
 			i++
-		case "STREAMS":
+		case optionStreams:
 			i++
 			goto parseNBStreams
-		case "CLAIM":
+		case optionClaim:
 			w.WriteError("ERR The CLAIM option is only supported when using the GROUP option")
 			return
 		default:
@@ -1242,7 +1242,7 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			handleXInfoGroups(cmd, w)
 		case "CONSUMERS":
 			handleXInfoConsumers(cmd, w)
-		case "HELP":
+		case subcommandHelp:
 			if len(cmd.Args) > 1 {
 				w.WriteError("ERR wrong number of arguments for 'xinfo|help' command")
 				return
@@ -1271,7 +1271,7 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 		switch opt {
 		case "FULL":
 			full = true
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -1761,7 +1761,7 @@ func handleXInfoHelp(w *shared.Writer) {
 		"    Show the stream consumer groups.",
 		"STREAM <key> [FULL [COUNT <count>]]",
 		"    Show information about the stream.",
-		"HELP",
+		subcommandHelp,
 		"    Print this help.",
 	}
 	w.WriteArray(len(help))
@@ -1842,7 +1842,7 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		return
 	}
 
-	if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == "LIMIT" {
+	if i < len(cmd.Args) && string(shared.ToUpper(cmd.Args[i])) == optionLimit {
 		i++
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
@@ -1865,13 +1865,13 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	if i < len(cmd.Args) {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		switch opt {
-		case "KEEPREF":
+		case optionKeepRef:
 			trimOpts.RefMode = shared.RefModeKeepRef
 			i++
-		case "DELREF":
+		case optionDelRef:
 			trimOpts.RefMode = shared.RefModeDelRef
 			i++
-		case "ACKED":
+		case optionAcked:
 			trimOpts.RefMode = shared.RefModeAcked
 			i++
 		default:
@@ -2039,16 +2039,16 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	if i < len(cmd.Args) {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		switch opt {
-		case "KEEPREF":
+		case optionKeepRef:
 			refMode = shared.RefModeKeepRef
 			i++
-		case "DELREF":
+		case optionDelRef:
 			refMode = shared.RefModeDelRef
 			i++
-		case "ACKED":
+		case optionAcked:
 			refMode = shared.RefModeAcked
 			i++
-		case "IDS":
+		case optionIDs:
 			// Not a mode option, fall through
 		default:
 			w.WriteError("ERR syntax error")
@@ -2056,7 +2056,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		}
 	}
 
-	if i >= len(cmd.Args) || string(shared.ToUpper(cmd.Args[i])) != "IDS" {
+	if i >= len(cmd.Args) || string(shared.ToUpper(cmd.Args[i])) != optionIDs {
 		w.WriteError("ERR syntax error")
 		return
 	}

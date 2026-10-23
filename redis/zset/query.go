@@ -361,7 +361,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		// Parse WITHSCORES option
 		if len(cmd.Args) > 2 {
 			opt := shared.ToUpper(cmd.Args[2])
-			if string(opt) == "WITHSCORES" {
+			if string(opt) == optionWithScores {
 				withScores = true
 			} else {
 				w.WriteSyntaxError()

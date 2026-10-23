@@ -643,7 +643,7 @@ func (s *Server) handleAlterAddColumn(sess *session, name, rest string) (*wire.P
 		return nil, true, fmt.Errorf(
 			"ALTER TABLE ADD COLUMN %s NOT NULL requires a DEFAULT", colName)
 	}
-	if notNull && def != nil && def.Kind == "null" {
+	if notNull && def != nil && def.Kind == defaultKindNull {
 		return nil, true, fmt.Errorf(
 			"ALTER TABLE ADD COLUMN %s NOT NULL with DEFAULT NULL is contradictory", colName)
 	}
@@ -788,25 +788,25 @@ func parseDefaultLiteral(tokens []string) (*defaultValue, int, error) {
 	upper := strings.ToUpper(first)
 	switch upper {
 	case "NULL":
-		return &defaultValue{Kind: "null"}, 1, nil
+		return &defaultValue{Kind: defaultKindNull}, 1, nil
 	case "TRUE":
-		return &defaultValue{Kind: "int", Int: 1}, 1, nil
+		return &defaultValue{Kind: defaultKindInt, Int: 1}, 1, nil
 	case "FALSE":
-		return &defaultValue{Kind: "int", Int: 0}, 1, nil
+		return &defaultValue{Kind: defaultKindInt, Int: 0}, 1, nil
 	}
 	// Numeric literal?
 	if n, err := strconv.ParseInt(first, 10, 64); err == nil {
-		return &defaultValue{Kind: "int", Int: n}, 1, nil
+		return &defaultValue{Kind: defaultKindInt, Int: n}, 1, nil
 	}
 	if f, err := strconv.ParseFloat(first, 64); err == nil {
-		return &defaultValue{Kind: "float", Float: f}, 1, nil
+		return &defaultValue{Kind: defaultKindFloat, Float: f}, 1, nil
 	}
 	// Single-quoted string literal, possibly split across tokens
 	// by the simple splitter if the quoted text contains spaces.
 	if strings.HasPrefix(first, "'") {
 		if strings.HasSuffix(first, "'") && len(first) >= 2 {
 			return &defaultValue{
-				Kind: "text",
+				Kind: defaultKindText,
 				Text: unescapeSQL(first[1 : len(first)-1]),
 			}, 1, nil
 		}
@@ -821,7 +821,7 @@ func parseDefaultLiteral(tokens []string) (*defaultValue, int, error) {
 			return nil, 0, fmt.Errorf("DEFAULT: unterminated string literal")
 		}
 		return &defaultValue{
-			Kind: "text",
+			Kind: defaultKindText,
 			Text: unescapeSQL(joined[1 : len(joined)-1]),
 		}, consumed, nil
 	}

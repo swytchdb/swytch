@@ -39,6 +39,8 @@ import (
 	"github.com/swytchdb/engine/effects"
 )
 
+const defaultAdvertisedVersion = "17.0 (Swytch)"
+
 // ServerConfig holds configuration for the SQL server.
 type ServerConfig struct {
 	// Address is the TCP address to listen on (e.g. ":5433").
@@ -66,7 +68,7 @@ type ServerConfig struct {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Address:           ":5433",
-		AdvertisedVersion: "17.0 (Swytch)",
+		AdvertisedVersion: defaultAdvertisedVersion,
 	}
 }
 
@@ -129,7 +131,7 @@ type Server struct {
 // begin listening — call Start or StartAsync.
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.AdvertisedVersion == "" {
-		cfg.AdvertisedVersion = "17.0 (Swytch)"
+		cfg.AdvertisedVersion = defaultAdvertisedVersion
 	}
 	log := cfg.Logger
 	if log == nil {

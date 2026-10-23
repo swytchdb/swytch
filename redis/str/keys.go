@@ -135,7 +135,7 @@ func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffe
 // typeTagToString maps proto ValueType to Redis TYPE response strings.
 func typeTagToString(tag pb.ValueType) string {
 	switch tag {
-	case pb.ValueType_TYPE_STRING:
+	case pb.ValueType_TYPE_STRING, pb.ValueType_TYPE_HLL, pb.ValueType_TYPE_BITMAP:
 		return "string"
 	case pb.ValueType_TYPE_LIST:
 		return "list"
@@ -147,10 +147,6 @@ func typeTagToString(tag pb.ValueType) string {
 		return "zset"
 	case pb.ValueType_TYPE_STREAM:
 		return "stream"
-	case pb.ValueType_TYPE_HLL:
-		return "string"
-	case pb.ValueType_TYPE_BITMAP:
-		return "string"
 	default:
 		return "none"
 	}
@@ -342,7 +338,7 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		compareValue = cmd.Args[2]
 
 		// Validate condition
-		if optStr != "IFEQ" && optStr != "IFNE" && optStr != "IFDEQ" && optStr != "IFDNE" {
+		if optStr != optionIfEqual && optStr != optionIfNotEqual && optStr != optionIfDigestEqual && optStr != optionIfDigestNotEqual {
 			w.WriteError("ERR Invalid condition for DELEX")
 			return
 		}
@@ -387,7 +383,7 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		}
 
 		// Validate digest format
-		if (optStr == "IFDEQ" || optStr == "IFDNE") && !isValidHexDigest(compareValue) {
+		if (optStr == optionIfDigestEqual || optStr == optionIfDigestNotEqual) && !isValidHexDigest(compareValue) {
 			w.WriteError("ERR digest must be exactly 16 hexadecimal characters")
 			return
 		}
@@ -395,13 +391,13 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		raw := snapshotToRaw(snap)
 		shouldDelete := false
 		switch optStr {
-		case "IFEQ":
+		case optionIfEqual:
 			shouldDelete = bytes.Equal(raw, compareValue)
-		case "IFNE":
+		case optionIfNotEqual:
 			shouldDelete = !bytes.Equal(raw, compareValue)
-		case "IFDEQ":
+		case optionIfDigestEqual:
 			shouldDelete = digestEquals(xxh3.Hash(raw), compareValue)
-		case "IFDNE":
+		case optionIfDigestNotEqual:
 			shouldDelete = !digestEquals(xxh3.Hash(raw), compareValue)
 		}
 

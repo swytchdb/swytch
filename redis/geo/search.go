@@ -27,6 +27,8 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const optionStoreDist = "STOREDIST"
+
 // handleGeoSearch handles the GEOSEARCH command
 // GEOSEARCH key FROMMEMBER member | FROMLONLAT longitude latitude
 //
@@ -109,7 +111,7 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			}
 			destKey = string(cmd.Args[i+1])
 			i++ // skip the key
-		case "STOREDIST":
+		case optionStoreDist:
 			if isRO {
 				w.WriteError("ERR STOREDIST option not allowed in GEORADIUS_RO")
 				return
@@ -145,7 +147,7 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		newArgs = append(newArgs, filteredOpts...)          // remaining options (without STORE/STOREDIST)
 
 		if storeDist {
-			newArgs = append(newArgs, []byte("STOREDIST"))
+			newArgs = append(newArgs, []byte(optionStoreDist))
 		}
 
 		modCmd := &shared.Command{
@@ -190,7 +192,7 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 			}
 			destKey = string(cmd.Args[i+1])
 			i++ // skip the key
-		case "STOREDIST":
+		case optionStoreDist:
 			if isRO {
 				w.WriteError("ERR STOREDIST option not allowed in GEORADIUSBYMEMBER_RO")
 				return
@@ -226,7 +228,7 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 		newArgs = append(newArgs, filteredOpts...)          // remaining options (without STORE/STOREDIST)
 
 		if storeDist {
-			newArgs = append(newArgs, []byte("STOREDIST"))
+			newArgs = append(newArgs, []byte(optionStoreDist))
 		}
 
 		modCmd := &shared.Command{
@@ -378,7 +380,7 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 		case "WITHHASH":
 			withHash = true
 			i++
-		case "STOREDIST":
+		case optionStoreDist:
 			if !isStore {
 				// STOREDIST is only valid for GEOSEARCHSTORE, not GEOSEARCH
 				w.WriteError("ERR syntax error")

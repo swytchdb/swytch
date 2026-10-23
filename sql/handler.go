@@ -309,7 +309,7 @@ func showParamResponse(trimmed string) (string, string) {
 	case "STANDARD_CONFORMING_STRINGS":
 		return "standard_conforming_strings", "on"
 	case "SERVER_VERSION":
-		return "server_version", "17.0 (Swytch)"
+		return "server_version", defaultAdvertisedVersion
 	case "SERVER_ENCODING", "CLIENT_ENCODING":
 		return strings.ToLower(name), "UTF8"
 	case "TIMEZONE", "TIME ZONE":

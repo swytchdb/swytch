@@ -29,6 +29,15 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const (
+	optionExpireAt         = "EXAT"
+	optionPExpireAt        = "PXAT"
+	optionIfEqual          = "IFEQ"
+	optionIfNotEqual       = "IFNE"
+	optionIfDigestEqual    = "IFDEQ"
+	optionIfDigestNotEqual = "IFDNE"
+)
+
 // maxExpireSeconds is the maximum number of seconds that can be safely converted to milliseconds
 // without overflow: (math.MaxInt64 / 1000)
 const maxExpireSeconds int64 = 9223372036854775

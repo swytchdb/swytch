@@ -54,9 +54,9 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			byLex = true
 		case "REV":
 			rev = true
-		case "WITHSCORES":
+		case optionWithScores:
 			withScores = true
-		case "LIMIT":
+		case optionLimit:
 			hasLimit = true
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
@@ -261,7 +261,7 @@ func handleZRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	var withScores bool
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
-		if string(opt) == "WITHSCORES" {
+		if string(opt) == optionWithScores {
 			withScores = true
 		} else {
 			w.WriteSyntaxError()
@@ -319,9 +319,9 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "WITHSCORES":
+		case optionWithScores:
 			withScores = true
-		case "LIMIT":
+		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -395,9 +395,9 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "WITHSCORES":
+		case optionWithScores:
 			withScores = true
-		case "LIMIT":
+		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return

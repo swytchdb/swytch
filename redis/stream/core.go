@@ -31,6 +31,20 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const (
+	subcommandHelp = "HELP"
+	zeroStreamID   = "0-0"
+	optionCount    = "COUNT"
+	optionBlock    = "BLOCK"
+	optionClaim    = "CLAIM"
+	optionStreams  = "STREAMS"
+	optionKeepRef  = "KEEPREF"
+	optionDelRef   = "DELREF"
+	optionAcked    = "ACKED"
+	optionIDs      = "IDS"
+	optionLimit    = "LIMIT"
+)
+
 // timeNow is a function variable for getting current time, allowing tests to override.
 var timeNow = time.Now
 

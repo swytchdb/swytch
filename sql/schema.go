@@ -35,6 +35,14 @@ import (
 	"github.com/swytchdb/engine/effects"
 )
 
+const (
+	defaultKindNull  = "null"
+	defaultKindInt   = "int"
+	defaultKindFloat = "float"
+	defaultKindText  = "text"
+	defaultKindBlob  = "blob"
+)
+
 // columnSchema describes a single column in a swytch-backed table.
 //
 // Default, when non-nil, is applied at read time: if a row has no

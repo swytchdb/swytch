@@ -36,7 +36,7 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	key := string(cmd.Args[0])
 
 	// Check for FIELDS keyword
-	if strings.ToUpper(string(cmd.Args[1])) != "FIELDS" {
+	if strings.ToUpper(string(cmd.Args[1])) != optionFields {
 		w.WriteError("ERR mandatory argument FIELDS is missing, or not at the right position")
 		return
 	}

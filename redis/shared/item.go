@@ -39,7 +39,8 @@ func (t ValueType) String() string {
 	switch t {
 	case TypeNone:
 		return "none"
-	case TypeString:
+	case TypeString, TypeCounter, TypeHLL:
+		// Redis reports counters and HyperLogLogs as strings.
 		return "string"
 	case TypeList:
 		return "list"
@@ -49,14 +50,10 @@ func (t ValueType) String() string {
 		return "set"
 	case TypeZSet:
 		return "zset"
-	case TypeCounter:
-		return "string"
 	case TypeStream:
 		return "stream"
-	case TypeHLL:
-		return "string" // Redis reports HLL as string type
 	default:
-		return "unknown"
+		return unknownName
 	}
 }
 

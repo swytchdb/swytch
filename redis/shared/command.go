@@ -25,6 +25,8 @@ import (
 	"github.com/swytchdb/engine/effects"
 )
 
+const unknownName = "unknown"
+
 // CommandType represents the type of Redis command
 type CommandType int
 
@@ -969,7 +971,7 @@ func (c CommandType) String() string {
 	if s, ok := commandStrings[c]; ok {
 		return s
 	}
-	return "unknown"
+	return unknownName
 }
 
 // commandStringPtrs interns each command's display name so hot paths can

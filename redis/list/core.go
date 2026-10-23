@@ -29,6 +29,12 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const (
+	directionLeft  = "LEFT"
+	directionRight = "RIGHT"
+	optionCount    = "COUNT"
+)
+
 func getListSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, tips []effects.Tip, exists bool, wrongType bool, err error) {
 	snap, tips, err = cmd.Context.GetSnapshot(key)
 	if err != nil {
@@ -912,7 +918,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				return
 			}
 			rank = int(r)
-		case "COUNT":
+		case optionCount:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -1085,9 +1091,9 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	direction := shared.ToUpper(cmd.Args[dirIdx])
 	var left bool
 	switch string(direction) {
-	case "LEFT":
+	case directionLeft:
 		left = true
-	case "RIGHT":
+	case directionRight:
 		left = false
 	default:
 		w.WriteError("ERR syntax error")
@@ -1102,7 +1108,7 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			return
 		}
 		countArg := shared.ToUpper(cmd.Args[dirIdx+1])
-		if string(countArg) != "COUNT" {
+		if string(countArg) != optionCount {
 			w.WriteError("ERR syntax error")
 			return
 		}
@@ -1204,18 +1210,18 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	// Parse directions
 	var popLeft, pushLeft bool
 	switch string(whereFrom) {
-	case "LEFT":
+	case directionLeft:
 		popLeft = true
-	case "RIGHT":
+	case directionRight:
 		popLeft = false
 	default:
 		w.WriteError("ERR syntax error")
 		return
 	}
 	switch string(whereTo) {
-	case "LEFT":
+	case directionLeft:
 		pushLeft = true
-	case "RIGHT":
+	case directionRight:
 		pushLeft = false
 	default:
 		w.WriteError("ERR syntax error")

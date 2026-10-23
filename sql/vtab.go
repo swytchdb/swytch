@@ -1938,17 +1938,17 @@ func (c *swytchCursor) loadRow(ectx *effects.Context, pk string) (*materialisedR
 // has no stored field for the column, letting ALTER TABLE ADD COLUMN
 // DEFAULT take effect without rewriting existing rows.
 func defaultValueToSqlite(d *defaultValue) sqlite.Value {
-	if d == nil || d.Kind == "null" {
+	if d == nil || d.Kind == defaultKindNull {
 		return sqlite.Value{}
 	}
 	switch d.Kind {
-	case "int":
+	case defaultKindInt:
 		return sqlite.IntegerValue(d.Int)
-	case "float":
+	case defaultKindFloat:
 		return sqlite.FloatValue(d.Float)
-	case "text":
+	case defaultKindText:
 		return sqlite.TextValue(d.Text)
-	case "blob":
+	case defaultKindBlob:
 		return sqlite.BlobValue(d.Blob)
 	}
 	return sqlite.Value{}

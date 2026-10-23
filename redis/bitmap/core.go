@@ -35,6 +35,12 @@ import (
 // stringified bit offset. This makes concurrent SETBITs on different bits
 // commutative — they merge correctly without data loss.
 
+const (
+	bitfieldGet    = "GET"
+	bitfieldSet    = "SET"
+	bitfieldIncrBy = "INCRBY"
+)
+
 // getBitmapSnapshot returns the snapshot for a bitmap key.
 // Returns (snapshot, tips, exists, wrongType, error).
 func getBitmapSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, tips []effects.Tip, exists bool, wrongType bool, err error) {
@@ -1054,7 +1060,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		op := strings.ToUpper(string(cmd.Args[i]))
 
 		switch op {
-		case "GET":
+		case bitfieldGet:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -1070,7 +1076,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				return
 			}
 			subCmds = append(subCmds, subCommand{
-				op:        "GET",
+				op:        bitfieldGet,
 				signed:    signed,
 				bits:      bitWidth,
 				offset:    offset,
@@ -1079,7 +1085,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			})
 			i += 3
 
-		case "SET":
+		case bitfieldSet:
 			if i+3 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -1100,7 +1106,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				return
 			}
 			subCmds = append(subCmds, subCommand{
-				op:        "SET",
+				op:        bitfieldSet,
 				signed:    signed,
 				bits:      bitWidth,
 				offset:    offset,
@@ -1110,7 +1116,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			})
 			i += 4
 
-		case "INCRBY":
+		case bitfieldIncrBy:
 			if i+3 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -1131,7 +1137,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				return
 			}
 			subCmds = append(subCmds, subCommand{
-				op:        "INCRBY",
+				op:        bitfieldIncrBy,
 				signed:    signed,
 				bits:      bitWidth,
 				offset:    offset,
@@ -1200,11 +1206,11 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 		for idx, sc := range subCmds {
 			switch sc.op {
-			case "GET":
+			case bitfieldGet:
 				value := getBitfieldInt(data, sc.offset, sc.bits, sc.signed)
 				results[idx] = value
 
-			case "SET":
+			case bitfieldSet:
 				oldValue := getBitfieldInt(data, sc.offset, sc.bits, sc.signed)
 				newValue := sc.value
 
@@ -1229,7 +1235,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				results[idx] = oldValue
 				modified = true
 
-			case "INCRBY":
+			case bitfieldIncrBy:
 				oldValue := getBitfieldInt(data, sc.offset, sc.bits, sc.signed)
 
 				// Check for arithmetic overflow before adding
@@ -1318,7 +1324,7 @@ func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		op := strings.ToUpper(string(cmd.Args[i]))
 
 		switch op {
-		case "GET":
+		case bitfieldGet:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return

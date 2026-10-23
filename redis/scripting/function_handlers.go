@@ -28,6 +28,11 @@ import (
 	lua "github.com/yuin/gopher-lua"
 )
 
+const (
+	subcommandFlush = "FLUSH"
+	optionReplace   = "REPLACE"
+)
+
 // HandleFunction handles FUNCTION subcommands.
 func (e *Engine) HandleFunction(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
@@ -44,7 +49,7 @@ func (e *Engine) HandleFunction(cmd *shared.Command, w *shared.Writer) {
 		e.handleFunctionDelete(cmd, w)
 	case "LIST":
 		e.handleFunctionList(cmd, w)
-	case "FLUSH":
+	case subcommandFlush:
 		e.handleFunctionFlush(w)
 	case "STATS":
 		e.handleFunctionStats(w)
@@ -77,7 +82,7 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 	codeIdx := 1
 
 	// Check for REPLACE option
-	if strings.ToUpper(string(cmd.Args[1])) == "REPLACE" {
+	if strings.ToUpper(string(cmd.Args[1])) == optionReplace {
 		replace = true
 		codeIdx = 2
 		if len(cmd.Args) < 3 {
@@ -373,9 +378,9 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 	}
 
 	switch policy {
-	case "FLUSH":
+	case subcommandFlush:
 		e.functionRegistry.Flush()
-	case "APPEND", "REPLACE":
+	case "APPEND", optionReplace:
 		// APPEND: fail if library exists
 		// REPLACE: overwrite existing libraries
 	default:
@@ -384,7 +389,7 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 	}
 
 	// Split by delimiter and restore each library
-	replace := policy == "REPLACE"
+	replace := policy == optionReplace
 	parts := strings.SplitSeq(data, "\n---\n")
 
 	for source := range parts {

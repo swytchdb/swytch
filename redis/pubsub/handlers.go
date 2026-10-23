@@ -28,7 +28,7 @@ import (
 // handleSubscribe handles the SUBSCRIBE command
 func handleSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) < 1 {
-		w.WriteWrongNumArguments("subscribe")
+		w.WriteWrongNumArguments(messageTypeSubscribe)
 		return
 	}
 
@@ -51,7 +51,7 @@ func handleSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connect
 	// Send confirmation messages for each channel
 	for i, channel := range channels {
 		msg := &shared.PubSubMessage{
-			Type:    "subscribe",
+			Type:    messageTypeSubscribe,
 			Channel: channel,
 			Count:   counts[i],
 		}
@@ -67,7 +67,7 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 	if conn.PubSubClient == nil {
 		if len(cmd.Args) == 0 {
 			msg := &shared.PubSubMessage{
-				Type:  "unsubscribe",
+				Type:  messageTypeUnsubscribe,
 				Count: 0,
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
@@ -75,7 +75,7 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 		}
 		for _, arg := range cmd.Args {
 			msg := &shared.PubSubMessage{
-				Type:    "unsubscribe",
+				Type:    messageTypeUnsubscribe,
 				Channel: string(arg),
 				Count:   0,
 			}
@@ -99,14 +99,14 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 	// If no channels were specified and none subscribed
 	if len(names) == 0 {
 		msg := &shared.PubSubMessage{
-			Type:  "unsubscribe",
+			Type:  messageTypeUnsubscribe,
 			Count: broker.SubscriptionCount(conn.PubSubClient),
 		}
 		w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
 	} else {
 		for i, name := range names {
 			msg := &shared.PubSubMessage{
-				Type:    "unsubscribe",
+				Type:    messageTypeUnsubscribe,
 				Channel: name,
 				Count:   counts[i],
 			}
@@ -124,7 +124,7 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 // handlePSubscribe handles the PSUBSCRIBE command
 func handlePSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) < 1 {
-		w.WriteWrongNumArguments("psubscribe")
+		w.WriteWrongNumArguments(messageTypePSubscribe)
 		return
 	}
 
@@ -147,7 +147,7 @@ func handlePSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connec
 	// Send confirmation messages for each pattern
 	for i, pattern := range patterns {
 		msg := &shared.PubSubMessage{
-			Type:    "psubscribe",
+			Type:    messageTypePSubscribe,
 			Pattern: pattern,
 			Count:   counts[i],
 		}
@@ -163,7 +163,7 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 	if conn.PubSubClient == nil {
 		if len(cmd.Args) == 0 {
 			msg := &shared.PubSubMessage{
-				Type:  "punsubscribe",
+				Type:  messageTypePUnsubscribe,
 				Count: 0,
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
@@ -171,7 +171,7 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 		}
 		for _, arg := range cmd.Args {
 			msg := &shared.PubSubMessage{
-				Type:    "punsubscribe",
+				Type:    messageTypePUnsubscribe,
 				Pattern: string(arg),
 				Count:   0,
 			}
@@ -195,14 +195,14 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 	// If no patterns were specified and none subscribed
 	if len(names) == 0 {
 		msg := &shared.PubSubMessage{
-			Type:  "punsubscribe",
+			Type:  messageTypePUnsubscribe,
 			Count: broker.SubscriptionCount(conn.PubSubClient),
 		}
 		w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
 	} else {
 		for i, name := range names {
 			msg := &shared.PubSubMessage{
-				Type:    "punsubscribe",
+				Type:    messageTypePUnsubscribe,
 				Pattern: name,
 				Count:   counts[i],
 			}

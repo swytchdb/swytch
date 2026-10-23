@@ -29,6 +29,8 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const aclSubcommandList = "LIST"
+
 // handleAcl dispatches ACL subcommands
 func (h *Handler) handleAcl(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) == 0 {
@@ -44,7 +46,7 @@ func (h *Handler) handleAcl(cmd *shared.Command, w *shared.Writer, conn *shared.
 		h.handleAclGetUser(cmd, w, conn)
 	case "DELUSER":
 		h.handleAclDelUser(cmd, w)
-	case "LIST":
+	case aclSubcommandList:
 		h.handleAclList(w)
 	case "USERS":
 		h.handleAclUsers(w)
@@ -205,7 +207,7 @@ func (h *Handler) handleAclDelUser(cmd *shared.Command, w *shared.Writer) {
 	count := 0
 	for _, arg := range cmd.Args[1:] {
 		username := string(arg)
-		if username == "default" {
+		if username == defaultUsername {
 			// Cannot delete default user
 			continue
 		}
@@ -279,7 +281,7 @@ func (h *Handler) handleAclCat(cmd *shared.Command, w *shared.Writer) {
 // handleAclWhoami handles ACL WHOAMI
 func (h *Handler) handleAclWhoami(w *shared.Writer, conn *shared.Connection) {
 	if conn.User == nil {
-		w.WriteBulkStringStr("default")
+		w.WriteBulkStringStr(defaultUsername)
 	} else {
 		w.WriteBulkStringStr(conn.User.Name)
 	}
@@ -504,7 +506,7 @@ func (h *Handler) handleAclHelp(w *shared.Writer) {
 		"    Generate a random password of the specified length (default: 256 bits).",
 		"GETUSER <username>",
 		"    Get the ACL rules for a user.",
-		"LIST",
+		aclSubcommandList,
 		"    List all users and their ACL rules.",
 		"LOAD",
 		"    Reload users from the ACL file.",

@@ -29,6 +29,16 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const (
+	keywordMin         = "MIN"
+	keywordMax         = "MAX"
+	optionCount        = "COUNT"
+	optionLimit        = "LIMIT"
+	optionWithScores   = "WITHSCORES"
+	syntaxErrorMessage = "syntax error"
+	aggregateSum       = "SUM"
+)
+
 // getZSetSnapshot returns the snapshot for a zset key.
 // Returns (snapshot, tips, exists, wrongType, error).
 func getZSetSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, tips []effects.Tip, exists bool, wrongType bool, err error) {

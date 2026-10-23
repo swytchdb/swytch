@@ -71,7 +71,7 @@ func parseZStoreArgs(args [][]byte, cmdName string) ([]string, []float64, string
 	}
 
 	if len(args) < 1+numKeys {
-		return nil, nil, "", "syntax error"
+		return nil, nil, "", syntaxErrorMessage
 	}
 
 	keys := make([]string, numKeys)
@@ -84,7 +84,7 @@ func parseZStoreArgs(args [][]byte, cmdName string) ([]string, []float64, string
 		weights[i] = 1.0
 	}
 
-	aggregate := "SUM"
+	aggregate := aggregateSum
 
 	// Parse optional arguments
 	i := 1 + numKeys
@@ -95,7 +95,7 @@ func parseZStoreArgs(args [][]byte, cmdName string) ([]string, []float64, string
 			i++
 			for j := range numKeys {
 				if i >= len(args) {
-					return nil, nil, "", "syntax error"
+					return nil, nil, "", syntaxErrorMessage
 				}
 				w, err := strconv.ParseFloat(string(args[i]), 64)
 				if err != nil || math.IsNaN(w) {
@@ -107,18 +107,18 @@ func parseZStoreArgs(args [][]byte, cmdName string) ([]string, []float64, string
 		case "AGGREGATE":
 			i++
 			if i >= len(args) {
-				return nil, nil, "", "syntax error"
+				return nil, nil, "", syntaxErrorMessage
 			}
 			agg := shared.ToUpper(args[i])
 			switch string(agg) {
-			case "SUM", "MIN", "MAX":
+			case aggregateSum, keywordMin, keywordMax:
 				aggregate = string(agg)
 			default:
-				return nil, nil, "", "syntax error"
+				return nil, nil, "", syntaxErrorMessage
 			}
 			i++
 		default:
-			return nil, nil, "", "syntax error"
+			return nil, nil, "", syntaxErrorMessage
 		}
 	}
 
@@ -167,17 +167,17 @@ func handleZUnionStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 				}
 				if existing, ok := result[member]; ok {
 					switch aggregate {
-					case "SUM":
+					case aggregateSum:
 						sum := existing + weightedScore
 						if math.IsNaN(sum) {
 							sum = 0
 						}
 						result[member] = sum
-					case "MIN":
+					case keywordMin:
 						if weightedScore < existing {
 							result[member] = weightedScore
 						}
-					case "MAX":
+					case keywordMax:
 						if weightedScore > existing {
 							result[member] = weightedScore
 						}
@@ -289,19 +289,19 @@ func handleZInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 						weightedScore = 0
 					}
 					switch aggregate {
-					case "SUM":
+					case aggregateSum:
 						sum := existingScore + weightedScore
 						if math.IsNaN(sum) {
 							sum = 0
 						}
 						newResult[member] = sum
-					case "MIN":
+					case keywordMin:
 						if weightedScore < existingScore {
 							newResult[member] = weightedScore
 						} else {
 							newResult[member] = existingScore
 						}
-					case "MAX":
+					case keywordMax:
 						if weightedScore > existingScore {
 							newResult[member] = weightedScore
 						} else {
@@ -363,7 +363,7 @@ func parseZSetOpArgs(args [][]byte, cmdName string) ([]string, []float64, string
 	}
 
 	if len(args) < 1+numKeys {
-		return nil, nil, "", false, "syntax error"
+		return nil, nil, "", false, syntaxErrorMessage
 	}
 
 	keys := make([]string, numKeys)
@@ -376,7 +376,7 @@ func parseZSetOpArgs(args [][]byte, cmdName string) ([]string, []float64, string
 		weights[i] = 1.0
 	}
 
-	aggregate := "SUM"
+	aggregate := aggregateSum
 	withScores := false
 
 	// Parse optional arguments
@@ -388,7 +388,7 @@ func parseZSetOpArgs(args [][]byte, cmdName string) ([]string, []float64, string
 			i++
 			for j := range numKeys {
 				if i >= len(args) {
-					return nil, nil, "", false, "syntax error"
+					return nil, nil, "", false, syntaxErrorMessage
 				}
 				w, err := strconv.ParseFloat(string(args[i]), 64)
 				if err != nil || math.IsNaN(w) {
@@ -400,21 +400,21 @@ func parseZSetOpArgs(args [][]byte, cmdName string) ([]string, []float64, string
 		case "AGGREGATE":
 			i++
 			if i >= len(args) {
-				return nil, nil, "", false, "syntax error"
+				return nil, nil, "", false, syntaxErrorMessage
 			}
 			agg := shared.ToUpper(args[i])
 			switch string(agg) {
-			case "SUM", "MIN", "MAX":
+			case aggregateSum, keywordMin, keywordMax:
 				aggregate = string(agg)
 			default:
-				return nil, nil, "", false, "syntax error"
+				return nil, nil, "", false, syntaxErrorMessage
 			}
 			i++
-		case "WITHSCORES":
+		case optionWithScores:
 			withScores = true
 			i++
 		default:
-			return nil, nil, "", false, "syntax error"
+			return nil, nil, "", false, syntaxErrorMessage
 		}
 	}
 
@@ -460,17 +460,17 @@ func handleZUnion(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				}
 				if existing, ok := result[member]; ok {
 					switch aggregate {
-					case "SUM":
+					case aggregateSum:
 						sum := existing + weightedScore
 						if math.IsNaN(sum) {
 							sum = 0
 						}
 						result[member] = sum
-					case "MIN":
+					case keywordMin:
 						if weightedScore < existing {
 							result[member] = weightedScore
 						}
-					case "MAX":
+					case keywordMax:
 						if weightedScore > existing {
 							result[member] = weightedScore
 						}
@@ -564,19 +564,19 @@ func handleZInter(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 						weightedScore = 0
 					}
 					switch aggregate {
-					case "SUM":
+					case aggregateSum:
 						sum := existingScore + weightedScore
 						if math.IsNaN(sum) {
 							sum = 0
 						}
 						newResult[member] = sum
-					case "MIN":
+					case keywordMin:
 						if weightedScore < existingScore {
 							newResult[member] = weightedScore
 						} else {
 							newResult[member] = existingScore
 						}
-					case "MAX":
+					case keywordMax:
 						if weightedScore > existingScore {
 							newResult[member] = weightedScore
 						} else {
@@ -639,7 +639,7 @@ func handleZInterCard(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	i := 1 + numKeys
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
-		if string(opt) == "LIMIT" {
+		if string(opt) == optionLimit {
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteSyntaxError()
@@ -754,7 +754,7 @@ func handleZDiff(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	i := 1 + numKeys
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
-		if string(opt) == "WITHSCORES" {
+		if string(opt) == optionWithScores {
 			withScores = true
 			i++
 		} else {
@@ -975,7 +975,7 @@ func handleZRangeStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			byLex = true
 		case "REV":
 			rev = true
-		case "LIMIT":
+		case optionLimit:
 			hasLimit = true
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()

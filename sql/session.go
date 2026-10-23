@@ -31,6 +31,11 @@ import (
 	"zombiezen.com/go/sqlite"
 )
 
+const (
+	schemaObjectTable = "table"
+	schemaObjectView  = "view"
+)
+
 // sessionCtxKey is the typed context key under which the per-connection
 // session is stored. We use our own context key (rather than
 // psql-wire's SetAttribute) because SessionMiddleware runs before the
@@ -253,7 +258,7 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 			name := stmt.ColumnText(0)
 			kind := stmt.ColumnText(1)
 			entry := localSchemaEntry{kind: kind, sqlText: stmt.ColumnText(2)}
-			if kind == "table" {
+			if kind == schemaObjectTable {
 				innerErr := iterateRows(sess.conn,
 					"PRAGMA table_info("+quoteIdent(name)+")",
 					func(pstmt *sqlite.Stmt) error {
@@ -283,7 +288,7 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 
 	present := make(map[string]string, len(swytchTables)+len(swytchViews))
 	for _, name := range swytchTables {
-		present[name] = "table"
+		present[name] = schemaObjectTable
 	}
 	for _, name := range swytchViews {
 		if _, clash := present[name]; clash {
@@ -293,7 +298,7 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 			// until the view is queried.
 			continue
 		}
-		present[name] = "view"
+		present[name] = schemaObjectView
 	}
 
 	// Reconcile tables: create missing, redeclare drifted.
@@ -312,9 +317,9 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 			continue
 		}
 		// Kind flip (was a view, now a table) or column drift.
-		if entry.kind != "table" || !vtabColumnsMatch(live.Columns, entry.cols) {
+		if entry.kind != schemaObjectTable || !vtabColumnsMatch(live.Columns, entry.cols) {
 			dropStmt := "DROP TABLE " + quoteIdent(name)
-			if entry.kind == "view" {
+			if entry.kind == schemaObjectView {
 				dropStmt = "DROP VIEW " + quoteIdent(name)
 			}
 			if err := execSimple(sess.conn, dropStmt); err != nil {
@@ -342,9 +347,9 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 			continue
 		}
 		wantSQL := "CREATE VIEW " + quoteIdent(v.Name) + " " + v.Body
-		if entry.kind != "view" || entry.sqlText != wantSQL {
+		if entry.kind != schemaObjectView || entry.sqlText != wantSQL {
 			dropStmt := "DROP VIEW " + quoteIdent(name)
-			if entry.kind == "table" {
+			if entry.kind == schemaObjectTable {
 				dropStmt = "DROP TABLE " + quoteIdent(name)
 			}
 			if err := execSimple(sess.conn, dropStmt); err != nil {
@@ -365,7 +370,7 @@ func (s *Server) ensureFreshVTabs(sess *session) error {
 			continue
 		}
 		var dropStmt string
-		if entry.kind == "view" {
+		if entry.kind == schemaObjectView {
 			dropStmt = "DROP VIEW " + quoteIdent(name)
 		} else {
 			dropStmt = "DROP TABLE " + quoteIdent(name)

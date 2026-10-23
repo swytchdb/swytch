@@ -2,6 +2,9 @@ version: "2"
 
 linters:
   default: none
+  settings:
+    goconst:
+      ignore-tests: true
   enable:
     - wsl_v5
     - nlreturn

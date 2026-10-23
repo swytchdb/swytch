@@ -35,6 +35,11 @@ import (
 
 // Server command implementations
 
+const (
+	infoSectionAll       = "ALL"
+	clientSubcommandList = "LIST"
+)
+
 func (h *Handler) handleInfo(cmd *shared.Command, w *shared.Writer) {
 	// Build info string
 	info := h.buildInfoString(cmd.Args)
@@ -51,7 +56,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	var info strings.Builder
 
 	// Server section
-	if section == "" || section == "SERVER" || section == "ALL" {
+	if section == "" || section == "SERVER" || section == infoSectionAll {
 		info.WriteString("# Server\r\n")
 		info.WriteString("redis_version:8.4.0-swytch\r\n")
 		info.WriteString("redis_git_sha1:00000000\r\n")
@@ -71,7 +76,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Clients section
-	if section == "" || section == "CLIENTS" || section == "ALL" {
+	if section == "" || section == "CLIENTS" || section == infoSectionAll {
 		info.WriteString("# Clients\r\n")
 		if h.stats != nil {
 			fmt.Fprintf(&info, "connected_clients:%d\r\n", h.stats.CurrConnections.Load())
@@ -88,7 +93,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Memory section
-	if section == "" || section == "MEMORY" || section == "ALL" {
+	if section == "" || section == "MEMORY" || section == infoSectionAll {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 
@@ -116,7 +121,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Stats section
-	if section == "" || section == "STATS" || section == "ALL" {
+	if section == "" || section == "STATS" || section == infoSectionAll {
 		info.WriteString("# Stats\r\n")
 		if h.stats != nil {
 			fmt.Fprintf(&info, "total_connections_received:%d\r\n", h.stats.TotalConnections.Load())
@@ -131,7 +136,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Persistence section
-	if section == "" || section == "PERSISTENCE" || section == "ALL" {
+	if section == "" || section == "PERSISTENCE" || section == infoSectionAll {
 		info.WriteString("# Persistence\r\n")
 		info.WriteString("loading:0\r\n")
 		info.WriteString("rdb_changes_since_last_save:0\r\n")
@@ -150,7 +155,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Replication section
-	if section == "" || section == "REPLICATION" || section == "ALL" {
+	if section == "" || section == "REPLICATION" || section == infoSectionAll {
 		info.WriteString("# Replication\r\n")
 		info.WriteString("role:master\r\n")
 		info.WriteString("connected_slaves:0\r\n")
@@ -158,7 +163,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// CPU section
-	if section == "" || section == "CPU" || section == "ALL" {
+	if section == "" || section == "CPU" || section == infoSectionAll {
 		info.WriteString("# CPU\r\n")
 		info.WriteString("used_cpu_sys:0.0\r\n")
 		info.WriteString("used_cpu_user:0.0\r\n")
@@ -166,7 +171,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Errorstats section
-	if section == "ERRORSTATS" || section == "ALL" {
+	if section == "ERRORSTATS" || section == infoSectionAll {
 		info.WriteString("# Errorstats\r\n")
 		if h.stats != nil {
 			errorStats := h.stats.GetErrorStats()
@@ -178,7 +183,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Commandstats section
-	if section == "COMMANDSTATS" || section == "ALL" {
+	if section == "COMMANDSTATS" || section == infoSectionAll {
 		info.WriteString("# Commandstats\r\n")
 		if h.stats != nil {
 			cmdStats := h.stats.GetCommandStats()
@@ -195,7 +200,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	}
 
 	// Keyspace section
-	if section == "" || section == "KEYSPACE" || section == "ALL" {
+	if section == "" || section == "KEYSPACE" || section == infoSectionAll {
 		info.WriteString("# Keyspace\r\n")
 		if h.engine != nil {
 			keyCount := h.engine.KeyCount()
@@ -588,7 +593,7 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 
 	subCmd := shared.ToUpper(cmd.Args[0])
 	switch string(subCmd) {
-	case "LIST":
+	case clientSubcommandList:
 		// Return client list from registry
 		if h.clientRegistry != nil {
 			w.WriteBulkStringStr(h.clientRegistry.FormatClientList())

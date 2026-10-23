@@ -24,6 +24,15 @@ import (
 	"strings"
 )
 
+const (
+	categoryNameSet    = "set"
+	categoryNameList   = "list"
+	categoryNameHash   = "hash"
+	categoryNameString = "string"
+	categoryNameStream = "stream"
+	categoryNamePubSub = "pubsub"
+)
+
 // CommandCategory represents a category of Redis commands
 type CommandCategory int
 
@@ -54,44 +63,44 @@ const (
 
 // categoryNames maps category names to values
 var categoryNames = map[string]CommandCategory{
-	"read":        CatRead,
-	"write":       CatWrite,
-	"set":         CatSet,
-	"sortedset":   CatSortedSet,
-	"list":        CatList,
-	"hash":        CatHash,
-	"string":      CatString,
-	"bitmap":      CatBitmap,
-	"hyperloglog": CatHyperLogLog,
-	"geo":         CatGeo,
-	"stream":      CatStream,
-	"pubsub":      CatPubSub,
-	"admin":       CatAdmin,
-	"fast":        CatFast,
-	"slow":        CatSlow,
-	"blocking":    CatBlocking,
-	"dangerous":   CatDangerous,
-	"connection":  CatConnection,
-	"transaction": CatTransaction,
-	"scripting":   CatScripting,
-	"keyspace":    CatKeyspace,
-	"all":         CatAll,
+	"read":             CatRead,
+	"write":            CatWrite,
+	categoryNameSet:    CatSet,
+	"sortedset":        CatSortedSet,
+	categoryNameList:   CatList,
+	categoryNameHash:   CatHash,
+	categoryNameString: CatString,
+	"bitmap":           CatBitmap,
+	"hyperloglog":      CatHyperLogLog,
+	"geo":              CatGeo,
+	categoryNameStream: CatStream,
+	categoryNamePubSub: CatPubSub,
+	"admin":            CatAdmin,
+	"fast":             CatFast,
+	"slow":             CatSlow,
+	"blocking":         CatBlocking,
+	"dangerous":        CatDangerous,
+	"connection":       CatConnection,
+	"transaction":      CatTransaction,
+	"scripting":        CatScripting,
+	"keyspace":         CatKeyspace,
+	"all":              CatAll,
 }
 
 // categoryToName maps category values to names
 var categoryToName = map[CommandCategory]string{
 	CatRead:        "read",
 	CatWrite:       "write",
-	CatSet:         "set",
+	CatSet:         categoryNameSet,
 	CatSortedSet:   "sortedset",
-	CatList:        "list",
-	CatHash:        "hash",
-	CatString:      "string",
+	CatList:        categoryNameList,
+	CatHash:        categoryNameHash,
+	CatString:      categoryNameString,
 	CatBitmap:      "bitmap",
 	CatHyperLogLog: "hyperloglog",
 	CatGeo:         "geo",
-	CatStream:      "stream",
-	CatPubSub:      "pubsub",
+	CatStream:      categoryNameStream,
+	CatPubSub:      categoryNamePubSub,
 	CatAdmin:       "admin",
 	CatFast:        "fast",
 	CatSlow:        "slow",
@@ -115,7 +124,7 @@ func GetCategoryName(cat CommandCategory) string {
 	if name, ok := categoryToName[cat]; ok {
 		return name
 	}
-	return "unknown"
+	return unknownName
 }
 
 // GetAllCategoryNames returns all category names

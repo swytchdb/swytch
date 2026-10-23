@@ -37,6 +37,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const defaultUsername = "default"
+
 // ACL errors
 var (
 	ErrUserNotFound     = errors.New("ERR User not found")
@@ -78,8 +80,8 @@ func NewACLManager() *ACLManager {
 		logMaxLen: 128,
 	}
 	// Create default user with nopass and all permissions
-	m.users["default"] = &shared.ACLUser{
-		Name:        "default",
+	m.users[defaultUsername] = &shared.ACLUser{
+		Name:        defaultUsername,
 		Enabled:     true,
 		NoPass:      true,
 		AllCommands: true,
@@ -119,7 +121,7 @@ func (m *ACLManager) SetUser(user *shared.ACLUser) {
 
 // DeleteUser removes a user (thread-safe)
 func (m *ACLManager) DeleteUser(name string) bool {
-	if name == "default" {
+	if name == defaultUsername {
 		return false // Cannot delete default user
 	}
 	m.mu.Lock()
@@ -162,7 +164,7 @@ func (m *ACLManager) Authenticate(username, password string) (*shared.ACLUser, e
 // AuthenticateDefault returns the default user if it has nopass, otherwise requires auth
 func (m *ACLManager) AuthenticateDefault() (*shared.ACLUser, bool) {
 	token := m.mu.RLock()
-	user, ok := m.users["default"]
+	user, ok := m.users[defaultUsername]
 	m.mu.RUnlock(token)
 
 	if !ok || !user.Enabled {
@@ -180,7 +182,7 @@ func (m *ACLManager) AuthenticateDefault() (*shared.ACLUser, bool) {
 func (m *ACLManager) RequiresAuth() bool {
 	token := m.mu.RLock()
 	defer m.mu.RUnlock(token)
-	user, ok := m.users["default"]
+	user, ok := m.users[defaultUsername]
 	if !ok || !user.Enabled {
 		return true
 	}
@@ -420,9 +422,9 @@ func (m *ACLManager) LoadFromFile(path string) error {
 	}
 
 	// Ensure default user exists
-	if _, ok := m.users["default"]; !ok {
-		m.users["default"] = &shared.ACLUser{
-			Name:        "default",
+	if _, ok := m.users[defaultUsername]; !ok {
+		m.users[defaultUsername] = &shared.ACLUser{
+			Name:        defaultUsername,
 			Enabled:     true,
 			NoPass:      true,
 			AllCommands: true,

@@ -20,6 +20,7 @@
 package hash
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,14 @@ import (
 	pb "github.com/swytchdb/engine/cluster/proto"
 	"github.com/swytchdb/swytch/redis/shared"
 )
+
+const (
+	optionFields    = "FIELDS"
+	optionExpireAt  = "EXAT"
+	optionPExpireAt = "PXAT"
+)
+
+var errWrongNumArguments = errors.New("wrong number of arguments")
 
 // parseHExpireArgs parses the common arguments for HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT
 // Returns: (nx, xx, gt, lt, fields, error)
@@ -62,7 +71,7 @@ func parseHExpireArgs(args [][]byte, startIdx int) (bool, bool, bool, bool, []st
 			}
 			lt = true
 			idx++
-		case "FIELDS":
+		case optionFields:
 			goto parseFields
 		default:
 			return false, false, false, false, nil, fmt.Errorf("ERR unknown argument '%s'", string(args[idx]))
@@ -72,7 +81,7 @@ func parseHExpireArgs(args [][]byte, startIdx int) (bool, bool, bool, bool, []st
 parseFields:
 
 	// Must have FIELDS keyword
-	if idx >= len(args) || strings.ToUpper(string(args[idx])) != "FIELDS" {
+	if idx >= len(args) || strings.ToUpper(string(args[idx])) != optionFields {
 		return false, false, false, false, nil, fmt.Errorf("ERR syntax error")
 	}
 	idx++
@@ -92,7 +101,7 @@ parseFields:
 
 	// Must have at least numFields field names
 	if int64(len(args)-idx) < numFields {
-		return false, false, false, false, nil, fmt.Errorf("wrong number of arguments")
+		return false, false, false, false, nil, errWrongNumArguments
 	}
 
 	fields := make([]string, numFields)
@@ -129,7 +138,7 @@ parseFields:
 			}
 			lt = true
 			idx++
-		case "FIELDS":
+		case optionFields:
 			return false, false, false, false, nil, fmt.Errorf("ERR FIELDS keyword specified multiple times")
 		default:
 			return false, false, false, false, nil, fmt.Errorf("ERR unknown argument '%s'", string(args[idx]))
@@ -142,11 +151,11 @@ parseFields:
 // parseHTTLArgs parses arguments for HTTL/HPTTL/HEXPIRETIME/HPEXPIRETIME/HPERSIST
 func parseHTTLArgs(args [][]byte) ([]string, error) {
 	if len(args) < 3 {
-		return nil, fmt.Errorf("wrong number of arguments")
+		return nil, errWrongNumArguments
 	}
 
 	// Must have FIELDS keyword
-	if strings.ToUpper(string(args[1])) != "FIELDS" {
+	if strings.ToUpper(string(args[1])) != optionFields {
 		return nil, fmt.Errorf("ERR unknown argument '%s'", string(args[1]))
 	}
 
@@ -160,7 +169,7 @@ func parseHTTLArgs(args [][]byte) ([]string, error) {
 
 	// Must have at least numFields field names
 	if int64(len(args)-3) < numFields {
-		return nil, fmt.Errorf("wrong number of arguments")
+		return nil, errWrongNumArguments
 	}
 
 	fields := make([]string, numFields)
@@ -482,7 +491,7 @@ func handleHTTL(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	key := string(cmd.Args[0])
 	fields, err := parseHTTLArgs(cmd.Args)
 	if err != nil {
-		if err.Error() == "wrong number of arguments" {
+		if errors.Is(err, errWrongNumArguments) {
 			w.WriteWrongNumArguments("httl")
 		} else {
 			w.WriteError(err.Error())
@@ -538,7 +547,7 @@ func handleHPTTL(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	key := string(cmd.Args[0])
 	fields, err := parseHTTLArgs(cmd.Args)
 	if err != nil {
-		if err.Error() == "wrong number of arguments" {
+		if errors.Is(err, errWrongNumArguments) {
 			w.WriteWrongNumArguments("hpttl")
 		} else {
 			w.WriteError(err.Error())
@@ -594,7 +603,7 @@ func handleHExpireTime(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	key := string(cmd.Args[0])
 	fields, err := parseHTTLArgs(cmd.Args)
 	if err != nil {
-		if err.Error() == "wrong number of arguments" {
+		if errors.Is(err, errWrongNumArguments) {
 			w.WriteWrongNumArguments("hexpiretime")
 		} else {
 			w.WriteError(err.Error())
@@ -650,7 +659,7 @@ func handleHPExpireTime(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 	key := string(cmd.Args[0])
 	fields, err := parseHTTLArgs(cmd.Args)
 	if err != nil {
-		if err.Error() == "wrong number of arguments" {
+		if errors.Is(err, errWrongNumArguments) {
 			w.WriteWrongNumArguments("hpexpiretime")
 		} else {
 			w.WriteError(err.Error())
@@ -705,7 +714,7 @@ func handleHPersist(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 	key := string(cmd.Args[0])
 	fields, err := parseHTTLArgs(cmd.Args)
 	if err != nil {
-		if err.Error() == "wrong number of arguments" {
+		if errors.Is(err, errWrongNumArguments) {
 			w.WriteWrongNumArguments("hpersist")
 		} else {
 			w.WriteError(err.Error())
@@ -827,7 +836,7 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			expireMode = "PX"
 			expireValue = ms
 			i += 2
-		case "EXAT":
+		case optionExpireAt:
 			if expireMode != "" || keepTTL {
 				w.WriteError("ERR Only one of EX, PX, EXAT, PXAT or KEEPTTL arguments can be specified for HSETEX")
 				return
@@ -841,10 +850,10 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				w.WriteError("ERR invalid expire time in 'hsetex' command")
 				return
 			}
-			expireMode = "EXAT"
+			expireMode = optionExpireAt
 			expireValue = seconds
 			i += 2
-		case "PXAT":
+		case optionPExpireAt:
 			if expireMode != "" || keepTTL {
 				w.WriteError("ERR Only one of EX, PX, EXAT, PXAT or KEEPTTL arguments can be specified for HSETEX")
 				return
@@ -858,7 +867,7 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				w.WriteError("ERR invalid expire time in 'hsetex' command")
 				return
 			}
-			expireMode = "PXAT"
+			expireMode = optionPExpireAt
 			expireValue = ms
 			i += 2
 		case "KEEPTTL":
@@ -868,7 +877,7 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}
 			keepTTL = true
 			i++
-		case "FIELDS":
+		case optionFields:
 			// Parse numfields
 			if i+1 >= len(cmd.Args) {
 				w.WriteWrongNumArguments("hsetex")
@@ -921,9 +930,9 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			expiresAtMs = uint64(time.Now().UnixMilli() + expireValue*1000)
 		case "PX":
 			expiresAtMs = uint64(time.Now().UnixMilli() + expireValue)
-		case "EXAT":
+		case optionExpireAt:
 			expiresAtMs = uint64(expireValue * 1000)
-		case "PXAT":
+		case optionPExpireAt:
 			expiresAtMs = uint64(expireValue)
 		}
 
@@ -1080,7 +1089,7 @@ func handleHGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			expireMode = "PX"
 			expireValue = ms
 			i += 2
-		case "EXAT":
+		case optionExpireAt:
 			if expireMode != "" || persist {
 				w.WriteError("ERR Only one of EX, PX, EXAT, PXAT or PERSIST arguments can be specified for HGETEX")
 				return
@@ -1102,10 +1111,10 @@ func handleHGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				w.WriteError("ERR invalid expire time in 'hgetex' command")
 				return
 			}
-			expireMode = "EXAT"
+			expireMode = optionExpireAt
 			expireValue = seconds
 			i += 2
-		case "PXAT":
+		case optionPExpireAt:
 			if expireMode != "" || persist {
 				w.WriteError("ERR Only one of EX, PX, EXAT, PXAT or PERSIST arguments can be specified for HGETEX")
 				return
@@ -1127,7 +1136,7 @@ func handleHGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				w.WriteError("ERR invalid expire time in 'hgetex' command")
 				return
 			}
-			expireMode = "PXAT"
+			expireMode = optionPExpireAt
 			expireValue = ms
 			i += 2
 		case "PERSIST":
@@ -1137,7 +1146,7 @@ func handleHGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}
 			persist = true
 			i++
-		case "FIELDS":
+		case optionFields:
 			// Parse numfields
 			if i+1 >= len(cmd.Args) {
 				w.WriteWrongNumArguments("hgetex")
@@ -1189,9 +1198,9 @@ func handleHGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			expiresAtMs = uint64(time.Now().UnixMilli() + expireValue*1000)
 		case "PX":
 			expiresAtMs = uint64(time.Now().UnixMilli() + expireValue)
-		case "EXAT":
+		case optionExpireAt:
 			expiresAtMs = uint64(expireValue * 1000)
-		case "PXAT":
+		case optionPExpireAt:
 			expiresAtMs = uint64(expireValue)
 		}
 

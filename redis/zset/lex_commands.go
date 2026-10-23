@@ -92,7 +92,7 @@ func handleZRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "LIMIT":
+		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -187,7 +187,7 @@ func handleZRevRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "LIMIT":
+		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return

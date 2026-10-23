@@ -223,9 +223,9 @@ func handleBZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	directionArg := shared.ToUpper(cmd.Args[2+numKeys])
 	var popMin bool
 	switch string(directionArg) {
-	case "MIN":
+	case keywordMin:
 		popMin = true
-	case "MAX":
+	case keywordMax:
 		popMin = false
 	default:
 		w.WriteSyntaxError()
@@ -238,7 +238,7 @@ func handleBZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	argIdx := 3 + numKeys
 	for argIdx < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[argIdx])
-		if string(opt) == "COUNT" {
+		if string(opt) == optionCount {
 			if hasCount {
 				w.WriteSyntaxError()
 				return
@@ -487,9 +487,9 @@ func handleBZMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 	directionArg := shared.ToUpper(cmd.Args[2+numKeys])
 	var popMin bool
 	switch string(directionArg) {
-	case "MIN":
+	case keywordMin:
 		popMin = true
-	case "MAX":
+	case keywordMax:
 		popMin = false
 	default:
 		w.WriteSyntaxError()
@@ -502,7 +502,7 @@ func handleBZMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 	argIdx := 3 + numKeys
 	for argIdx < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[argIdx])
-		if string(opt) == "COUNT" {
+		if string(opt) == optionCount {
 			if hasCount {
 				w.WriteSyntaxError()
 				return

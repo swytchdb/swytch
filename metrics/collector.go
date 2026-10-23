@@ -26,6 +26,8 @@ import (
 	"github.com/swytchdb/engine/cache"
 )
 
+const labelShard = "shard"
+
 // StatsProvider defines the interface for retrieving server statistics.
 // Both Redis and Memcached servers implement this interface via adapters.
 type StatsProvider interface {
@@ -219,47 +221,47 @@ func NewCollector(provider StatsProvider) *Collector {
 		adaptiveKThreshold: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_k_threshold"),
 			"Adaptive K threshold per shard",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		graduationRate: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_graduation_rate"),
 			"Fraction of evicted candidates that graduated past k — drives k up when above rate_high, down when below rate_low",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		rateLow: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_rate_low"),
 			"Learned graduation-rate threshold below which k decreases",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		rateHigh: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_rate_high"),
 			"Learned graduation-rate threshold above which k increases",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		evictedUnprotected: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_evicted_unprotected"),
 			"Windowed count of victims evicted with freq <= k (cold, expected)",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		evictedProtected: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_evicted_protected"),
 			"Windowed count of victims evicted with freq > k (forced — pressure too high)",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		reachedProtected: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_reached_protected"),
 			"Windowed count of leaves that graduated past k (graduation-rate numerator)",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		windowHitRate: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "adaptive_window_hit_rate"),
 			"Current adapt-window hit rate (self-tuning gradient input)",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		ghostCount: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "ghost_count"),
 			"Ghost leaves retained for warm restart after eviction",
-			[]string{"shard"}, nil,
+			[]string{labelShard}, nil,
 		),
 		bytesReadTotal: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, subsystem, "bytes_read_total"),

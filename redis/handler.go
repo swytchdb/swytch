@@ -114,7 +114,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		}
 	} else if cfg.Password != "" {
 		// Legacy mode: configure default user with password
-		defaultUser := aclMgr.GetUser("default")
+		defaultUser := aclMgr.GetUser(defaultUsername)
 		if defaultUser != nil {
 			hash, err := HashPassword(cfg.Password)
 			if err != nil {
@@ -649,7 +649,7 @@ func (h *Handler) handleAuth(cmd *shared.Command, w *shared.Writer, conn *shared
 	switch len(cmd.Args) {
 	case 1:
 		// AUTH password (use default user)
-		username = "default"
+		username = defaultUsername
 		password = string(cmd.Args[0])
 	case 2:
 		// AUTH username password
@@ -1111,7 +1111,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 	// Apply the authorization context from the origin node
 	username := tx.GetAuthorizedUser()
 	if username == "" {
-		username = "default"
+		username = defaultUsername
 	}
 	user := h.aclManager.GetUser(username)
 	if user == nil {

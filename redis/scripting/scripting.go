@@ -189,7 +189,7 @@ func (e *Engine) HandleScript(cmd *shared.Command, w *shared.Writer) {
 		e.handleScriptLoad(cmd, w)
 	case "EXISTS":
 		e.handleScriptExists(cmd, w)
-	case "FLUSH":
+	case subcommandFlush:
 		e.handleScriptFlush(w)
 	case "KILL":
 		e.handleScriptKill(w)

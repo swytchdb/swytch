@@ -50,7 +50,7 @@ func handleXGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		return handleXGroupDelConsumer(cmd, w)
 	case "SETID":
 		return handleXGroupSetID(cmd, w)
-	case "HELP":
+	case subcommandHelp:
 		if len(cmd.Args) > 1 {
 			w.WriteError("ERR wrong number of arguments for 'xgroup|help' command")
 			return
@@ -167,7 +167,7 @@ func handleXGroupCreate(cmd *shared.Command, w *shared.Writer) (valid bool, keys
 				}
 				lastDeliveredID = lastID
 			}
-		case "0", "0-0":
+		case "0", zeroStreamID:
 			lastDeliveredID = shared.StreamID{}
 		default:
 			id, _, isSpecial, err := shared.ParseStreamID(idStr)
@@ -444,7 +444,7 @@ func handleXGroupSetID(cmd *shared.Command, w *shared.Writer) (valid bool, keys 
 				lastID = streamLastID(entries)
 			}
 			lastDeliveredID = lastID
-		case "0", "0-0", "-":
+		case "0", zeroStreamID, "-":
 			lastDeliveredID = shared.StreamID{}
 		default:
 			id, _, isSpecial, err := shared.ParseStreamID(idStr)
@@ -504,7 +504,7 @@ func handleXGroupHelp(w *shared.Writer) {
 		"    Create a consumer named <consumername> in the group.",
 		"DELCONSUMER <key> <groupname> <consumername>",
 		"    Remove the specified consumer.",
-		"HELP",
+		subcommandHelp,
 		"    Print this help.",
 	}
 	w.WriteArray(len(help))
@@ -782,7 +782,7 @@ func handleXReadGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -795,7 +795,7 @@ func handleXReadGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			}
 			count = c
 			i++
-		case "BLOCK":
+		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -812,7 +812,7 @@ func handleXReadGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			}
 			block = float64(b) / 1000.0
 			i++
-		case "CLAIM":
+		case optionClaim:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -841,7 +841,7 @@ func handleXReadGroup(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		case "NOACK":
 			noAck = true
 			i++
-		case "STREAMS":
+		case optionStreams:
 			i++
 			goto parseRGStreams
 		default:
@@ -877,7 +877,7 @@ parseRGStreams:
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
 				return
 			}
-			if isSpecial && idStr != "0" && idStr != "0-0" {
+			if isSpecial && idStr != "0" && idStr != zeroStreamID {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
 				return
 			}
@@ -1082,7 +1082,7 @@ func handleXReadGroupNonBlocking(cmd *shared.Command, w *shared.Writer, db *shar
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
 		switch string(opt) {
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -1095,14 +1095,14 @@ func handleXReadGroupNonBlocking(cmd *shared.Command, w *shared.Writer, db *shar
 			}
 			count = c
 			i++
-		case "BLOCK":
+		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
 				return
 			}
 			i++ // skip value
-		case "CLAIM":
+		case optionClaim:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -1112,7 +1112,7 @@ func handleXReadGroupNonBlocking(cmd *shared.Command, w *shared.Writer, db *shar
 		case "NOACK":
 			noAck = true
 			i++
-		case "STREAMS":
+		case optionStreams:
 			i++
 			goto parseNBRGStreams
 		default:
@@ -1148,7 +1148,7 @@ parseNBRGStreams:
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
 				return
 			}
-			if isSpecial && idStr != "0" && idStr != "0-0" {
+			if isSpecial && idStr != "0" && idStr != zeroStreamID {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
 				return
 			}
@@ -1421,16 +1421,16 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	if i < len(cmd.Args) {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		switch opt {
-		case "KEEPREF":
+		case optionKeepRef:
 			refMode = shared.RefModeKeepRef
 			i++
-		case "DELREF":
+		case optionDelRef:
 			refMode = shared.RefModeDelRef
 			i++
-		case "ACKED":
+		case optionAcked:
 			refMode = shared.RefModeAcked
 			i++
-		case "IDS":
+		case optionIDs:
 			// fall through
 		default:
 			w.WriteError("ERR syntax error")
@@ -1438,7 +1438,7 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 	}
 
-	if i >= len(cmd.Args) || string(shared.ToUpper(cmd.Args[i])) != "IDS" {
+	if i >= len(cmd.Args) || string(shared.ToUpper(cmd.Args[i])) != optionIDs {
 		w.WriteError("ERR syntax error")
 		return
 	}
@@ -1801,7 +1801,7 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	for i := 5; i < len(cmd.Args); i++ {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		switch opt {
-		case "COUNT":
+		case optionCount:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
@@ -1834,7 +1834,7 @@ func handleXAutoClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		if !exists {
 			cmd.Context.Abort()
 			w.WriteArray(3)
-			w.WriteBulkStringStr("0-0")
+			w.WriteBulkStringStr(zeroStreamID)
 			w.WriteArray(0)
 			w.WriteArray(0)
 			return

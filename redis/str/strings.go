@@ -276,7 +276,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 				return
 			}
 			expireMillis = ms
-		case "EXAT":
+		case optionExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -292,7 +292,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 				return
 			}
 			expireAt = ts
-		case "PXAT":
+		case optionPExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -312,7 +312,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			nx = true
 		case "XX":
 			xx = true
-		case "IFEQ":
+		case optionIfEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -320,7 +320,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			i++
 			ifeq = true
 			compareValue = cmd.Args[i]
-		case "IFNE":
+		case optionIfNotEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -328,7 +328,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			i++
 			ifne = true
 			compareValue = cmd.Args[i]
-		case "IFDEQ":
+		case optionIfDigestEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -336,7 +336,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			i++
 			ifdeq = true
 			compareValue = cmd.Args[i]
-		case "IFDNE":
+		case optionIfDigestNotEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -791,7 +791,7 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				return
 			}
 			expireMillis = ms
-		case "EXAT":
+		case optionExpireAt:
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
 				return
@@ -806,7 +806,7 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				return
 			}
 			expireAt = ts
-		case "PXAT":
+		case optionPExpireAt:
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
 				return
@@ -1095,7 +1095,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}
 			expireMillis = ms
 			expireCount++
-		case "EXAT":
+		case optionExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return
@@ -1108,7 +1108,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}
 			expireAt = ts
 			expireCount++
-		case "PXAT":
+		case optionPExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
 				return

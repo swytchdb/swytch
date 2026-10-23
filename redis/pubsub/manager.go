@@ -28,6 +28,15 @@ import (
 	"github.com/swytchdb/swytch/redis/shared"
 )
 
+const (
+	messageTypeMessage      = "message"
+	messageTypePMessage     = "pmessage"
+	messageTypeSubscribe    = "subscribe"
+	messageTypeUnsubscribe  = "unsubscribe"
+	messageTypePSubscribe   = "psubscribe"
+	messageTypePUnsubscribe = "punsubscribe"
+)
+
 // Manager manages pub/sub subscriptions.
 //
 // When a cluster router is registered via shared.SetPubSubClusterRouter,
@@ -258,7 +267,7 @@ func (m *Manager) deliverLocal(channel string, message []byte) int {
 	if subs, ok := m.channels[channel]; ok {
 		for client := range subs {
 			if client.Send(&shared.PubSubMessage{
-				Type:    "message",
+				Type:    messageTypeMessage,
 				Channel: channel,
 				Payload: message,
 			}) {
@@ -272,7 +281,7 @@ func (m *Manager) deliverLocal(channel string, message []byte) int {
 		if keytrie.MatchGlob(channel, pattern) {
 			for client := range subs {
 				if client.Send(&shared.PubSubMessage{
-					Type:    "pmessage",
+					Type:    messageTypePMessage,
 					Pattern: pattern,
 					Channel: channel,
 					Payload: message,
@@ -454,28 +463,28 @@ func FormatPubSubMessage(msg *shared.PubSubMessage, protocol shared.ProtocolVers
 	w.SetProtocol(protocol)
 
 	switch msg.Type {
-	case "message":
+	case messageTypeMessage:
 		if protocol == shared.RESP3 {
 			w.WritePush(3)
 		} else {
 			w.WriteArray(3)
 		}
-		w.WriteBulkStringStr("message")
+		w.WriteBulkStringStr(messageTypeMessage)
 		w.WriteBulkStringStr(msg.Channel)
 		w.WriteBulkString(msg.Payload)
 
-	case "pmessage":
+	case messageTypePMessage:
 		if protocol == shared.RESP3 {
 			w.WritePush(4)
 		} else {
 			w.WriteArray(4)
 		}
-		w.WriteBulkStringStr("pmessage")
+		w.WriteBulkStringStr(messageTypePMessage)
 		w.WriteBulkStringStr(msg.Pattern)
 		w.WriteBulkStringStr(msg.Channel)
 		w.WriteBulkString(msg.Payload)
 
-	case "subscribe", "unsubscribe":
+	case messageTypeSubscribe, messageTypeUnsubscribe:
 		if protocol == shared.RESP3 {
 			w.WritePush(3)
 		} else {
@@ -489,7 +498,7 @@ func FormatPubSubMessage(msg *shared.PubSubMessage, protocol shared.ProtocolVers
 		}
 		w.WriteInteger(int64(msg.Count))
 
-	case "psubscribe", "punsubscribe":
+	case messageTypePSubscribe, messageTypePUnsubscribe:
 		if protocol == shared.RESP3 {
 			w.WritePush(3)
 		} else {
