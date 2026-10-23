@@ -559,9 +559,9 @@ func handleXAck(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		acked := int64(0)
 		for _, id := range ids {
-			elemID := string(encodeStreamElementID(id))
+			elemID := encodeStreamElementID(id)
 			if pelSnap != nil && pelSnap.NetAdds != nil {
-				if _, ok := pelSnap.NetAdds[elemID]; ok {
+				if _, ok := pelSnap.NetAdds[string(elemID)]; ok {
 					if err := emitPELRemove(cmd, key, groupName, id); err != nil {
 						w.WriteError(err.Error())
 						return
@@ -1506,12 +1506,12 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 		results := make([]int64, numIds)
 		for j, id := range ids {
-			elemID := string(encodeStreamElementID(id))
+			elemID := encodeStreamElementID(id)
 			if pelSnap == nil || pelSnap.NetAdds == nil {
 				results[j] = -1
 				continue
 			}
-			if _, ok := pelSnap.NetAdds[elemID]; !ok {
+			if _, ok := pelSnap.NetAdds[string(elemID)]; !ok {
 				results[j] = -1
 				continue
 			}
@@ -1545,7 +1545,7 @@ func handleXAckDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					}
 					otherPEL, _, _ := getPELSnapshot(cmd, key, g)
 					if otherPEL != nil && otherPEL.NetAdds != nil {
-						if _, ok := otherPEL.NetAdds[elemID]; ok {
+						if _, ok := otherPEL.NetAdds[string(elemID)]; ok {
 							allAcked = false
 							break
 						}
@@ -1688,12 +1688,12 @@ func handleXClaim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		var claimed []*shared.StreamEntry
 		for _, id := range claimIDs {
-			elemID := string(encodeStreamElementID(id))
+			elemID := encodeStreamElementID(id)
 
 			// Check if entry exists in PEL
 			var pe *shared.PendingEntry
 			if pelSnap != nil && pelSnap.NetAdds != nil {
-				if elem, ok := pelSnap.NetAdds[elemID]; ok {
+				if elem, ok := pelSnap.NetAdds[string(elemID)]; ok {
 					consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.Decompress())
 					pe = &shared.PendingEntry{
 						ID:            id,

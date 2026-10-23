@@ -953,9 +953,8 @@ func handleHSetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				allExist := true
 				noneExist := true
 				for j := int64(0); j < numFields; j++ {
-					field := string(fieldValues[j*2])
 					if snap != nil && snap.NetAdds != nil {
-						if _, has := snap.NetAdds[field]; has {
+						if _, has := snap.NetAdds[string(fieldValues[j*2])]; has {
 							noneExist = false
 						} else {
 							allExist = false

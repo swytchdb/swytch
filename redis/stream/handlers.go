@@ -437,8 +437,8 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			}
 			pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
 			if pelSnap != nil && pelSnap.NetAdds != nil {
-				elemID := string(encodeStreamElementID(id))
-				if _, pending := pelSnap.NetAdds[elemID]; pending {
+				elemID := encodeStreamElementID(id)
+				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
 					return false
 				}
 			}
@@ -455,8 +455,8 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 		for _, gName := range groupNames {
 			pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
 			if pelSnap != nil && pelSnap.NetAdds != nil {
-				elemID := string(encodeStreamElementID(id))
-				if _, pending := pelSnap.NetAdds[elemID]; pending {
+				elemID := encodeStreamElementID(id)
+				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
 					emitPELRemove(cmd, key, gName, id)
 				}
 			}
@@ -1176,8 +1176,8 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		deleted := int64(0)
 		var toDelete []shared.StreamID
 		for _, id := range ids {
-			elemID := string(encodeStreamElementID(id))
-			if entrySet[elemID] {
+			elemID := encodeStreamElementID(id)
+			if entrySet[string(elemID)] {
 				toDelete = append(toDelete, id)
 				deleted++
 			}
@@ -1954,8 +1954,8 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 						if remainingMap[entry.ID.Key()] {
 							continue
 						}
-						pelElemID := string(encodeStreamElementID(entry.ID))
-						if _, hasPEL := pelSnap.NetAdds[pelElemID]; hasPEL {
+						pelElemID := encodeStreamElementID(entry.ID)
+						if _, hasPEL := pelSnap.NetAdds[string(pelElemID)]; hasPEL {
 							emitPELRemove(cmd, key, gName, entry.ID)
 						}
 					}
@@ -2130,8 +2130,8 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		results := make([]int64, numIds)
 		for j, id := range ids {
-			elemID := string(encodeStreamElementID(id))
-			if !entrySet[elemID] {
+			elemID := encodeStreamElementID(id)
+			if !entrySet[string(elemID)] {
 				results[j] = -1
 				continue
 			}
@@ -2149,8 +2149,8 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 					}
 					pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
 					if pelSnap != nil && pelSnap.NetAdds != nil {
-						pelElemID := string(encodeStreamElementID(id))
-						if _, pending := pelSnap.NetAdds[pelElemID]; pending {
+						pelElemID := encodeStreamElementID(id)
+						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
 							canDelete = false
 							break
 						}
@@ -2174,8 +2174,8 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				for _, gName := range groupNames {
 					pelSnap, _, _ := getPELSnapshot(cmd, key, gName)
 					if pelSnap != nil && pelSnap.NetAdds != nil {
-						pelElemID := string(encodeStreamElementID(id))
-						if _, pending := pelSnap.NetAdds[pelElemID]; pending {
+						pelElemID := encodeStreamElementID(id)
+						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
 							emitPELRemove(cmd, key, gName, id)
 						}
 					}

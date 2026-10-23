@@ -319,9 +319,8 @@ func handleHDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		deleted := 0
 		for _, f := range cmd.Args[1:] {
-			field := string(f)
 			if snap.NetAdds != nil {
-				if _, has := snap.NetAdds[field]; has {
+				if _, has := snap.NetAdds[string(f)]; has {
 					deleted++
 					if err := emitHashRemove(cmd, key, f); err != nil {
 						w.WriteError(err.Error())
