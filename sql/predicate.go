@@ -245,6 +245,8 @@ func evalTri(p *Predicate, row *RowWrite) triState {
 			return triFalse
 		case triFalse:
 			return triTrue
+		case triUnknown:
+			return triUnknown
 		default:
 			return triUnknown
 		}
@@ -313,6 +315,8 @@ func compareTyped(a TypedValue, op CmpOp, b TypedValue) triState {
 	// Same kind: direct compare.
 	if a.Kind == b.Kind {
 		switch a.Kind {
+		case sqlite.TypeNull:
+			return triUnknown
 		case sqlite.TypeInteger:
 			return fromCmp(cmpInt(a.Int, b.Int), op)
 		case sqlite.TypeFloat:

@@ -125,7 +125,9 @@ func jsonSizeOf(v *Value) int64 {
 			size += scalarFootprint + int64(len(m.Key)) + jsonSizeOf(m.Val)
 		}
 		return size
-	default:
-		return scalarFootprint
+	case KindNull, KindBool, KindInt, KindFloat:
+		// These scalars have no variable-size payload.
 	}
+
+	return scalarFootprint
 }

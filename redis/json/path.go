@@ -399,6 +399,8 @@ func (p *Path) resolveMatches(root *Value) []match {
 			}
 		case segWildcard:
 			switch v.Kind {
+			case KindNull, KindBool, KindInt, KindFloat, KindString:
+				// Scalars have no children for a wildcard to match.
 			case KindObject:
 				for _, m := range v.Obj {
 					rec(m.Val, appendKey(concrete, m.Key), rest)
@@ -433,6 +435,8 @@ func (p *Path) resolveMatches(root *Value) []match {
 			walk = func(n *Value, c []segment) {
 				rec(n, c, rest)
 				switch n.Kind {
+				case KindNull, KindBool, KindInt, KindFloat, KindString:
+					// The scalar was visited above and has no descendants.
 				case KindObject:
 					for _, m := range n.Obj {
 						walk(m.Val, appendKey(c, m.Key))
@@ -446,6 +450,8 @@ func (p *Path) resolveMatches(root *Value) []match {
 			walk(v, concrete)
 		case segFilter:
 			switch v.Kind {
+			case KindNull, KindBool, KindInt, KindFloat, KindString:
+				// Filters select children of containers only.
 			case KindArray:
 				for i, e := range v.Arr {
 					if s.filter.test(e) {

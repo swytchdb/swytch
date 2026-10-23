@@ -26,11 +26,7 @@ import (
 )
 
 func isJSONNode(t pb.ValueType) bool {
-	switch t {
-	case pb.ValueType_TYPE_JSON, pb.ValueType_TYPE_JSON_OBJECT, pb.ValueType_TYPE_JSON_ARRAY:
-		return true
-	}
-	return false
+	return t == pb.ValueType_TYPE_JSON || t == pb.ValueType_TYPE_JSON_OBJECT || t == pb.ValueType_TYPE_JSON_ARRAY
 }
 
 // getJSONSnapshot reads the key's root node. exists=false when the key is
@@ -324,6 +320,9 @@ func walkToParent(root *pb.ReducedEffect, segs []segment) (parentVid string, par
 				return "", nil, false
 			}
 			el = elementByIndex(parent, s.idx)
+		case segWildcard, segSlice, segUnion, segRecursive, segFilter:
+			// Writes must resolve selectors to concrete keys and indexes first.
+			return "", nil, false
 		}
 		if el == nil {
 			return "", nil, false
@@ -386,6 +385,9 @@ func setValueAtPath(emit emitFn, root *pb.ReducedEffect, key string, path *Path,
 			return false, err
 		}
 		return true, emit(orderedSelfEffect(key, parentVid, el.GetData().GetId(), ref))
+	case segWildcard, segSlice, segUnion, segRecursive, segFilter:
+		// A selector cannot identify a single location to create or replace.
+		return false, nil
 	}
 	return false, nil
 }

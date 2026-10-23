@@ -413,6 +413,8 @@ func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 			if !c.Usable || c.Column != lastOrd {
 				continue
 			}
+			// Only range constraints contribute bounds; SQLite evaluates the rest.
+			//exhaustive:ignore
 			switch c.Op {
 			case sqlite.IndexConstraintGT:
 				if lowerI < 0 {

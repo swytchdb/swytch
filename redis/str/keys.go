@@ -147,6 +147,9 @@ func typeTagToString(tag pb.ValueType) string {
 		return "zset"
 	case pb.ValueType_TYPE_STREAM:
 		return "stream"
+	case pb.ValueType_TYPE_UNSPECIFIED, pb.ValueType_TYPE_JSON, pb.ValueType_TYPE_JSON_OBJECT, pb.ValueType_TYPE_JSON_ARRAY:
+		// These tags have no string-module TYPE name.
+		return "none"
 	default:
 		return "none"
 	}

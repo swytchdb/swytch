@@ -164,6 +164,8 @@ func cmpOpFromProto(op pb.PredicateCmpOp) CmpOp {
 func typedValueToProto(v TypedValue) *pb.TypedValue {
 	out := &pb.TypedValue{}
 	switch v.Kind {
+	case sqlite.TypeNull:
+		out.Kind = pb.TypedValue_NULL_VALUE
 	case sqlite.TypeInteger:
 		out.Kind = pb.TypedValue_INT
 		out.IntVal = v.Int
@@ -187,6 +189,8 @@ func typedValueFromProto(v *pb.TypedValue) TypedValue {
 		return NullVal()
 	}
 	switch v.Kind {
+	case pb.TypedValue_NULL_VALUE:
+		return NullVal()
 	case pb.TypedValue_INT:
 		return IntVal(v.IntVal)
 	case pb.TypedValue_FLOAT:

@@ -123,6 +123,9 @@ func (o pathOperand) value(cur *Value) (*Value, bool) {
 				return nil, false
 			}
 			v = v.Arr[i]
+		case segWildcard, segSlice, segUnion, segRecursive, segFilter:
+			// Filter operands resolve one value, not a set of matches.
+			return nil, false
 		default:
 			return nil, false
 		}

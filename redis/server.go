@@ -945,6 +945,8 @@ func isTLSHandshakeError(err error) bool {
 // isBlockingCommand returns true for commands that may block the connection
 // waiting for data. These commands need pending writes flushed before execution.
 func isBlockingCommand(cmd shared.CommandType) bool {
+	// Only these commands need the pre-execution flush; all others return false.
+	//exhaustive:ignore
 	switch cmd {
 	case shared.CmdBLPop, shared.CmdBRPop, shared.CmdBLMPop, shared.CmdBLMove, shared.CmdBRPopLPush,
 		shared.CmdBZPopMin, shared.CmdBZPopMax, shared.CmdBZMPop:

@@ -372,20 +372,21 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 
 	// Check if a script is running and has timed out (BUSY state)
 	if h.scriptEngine.IsScriptTimedOut() {
+		allowed := false
+		// Only the recovery and transaction commands below bypass BUSY.
+		//exhaustive:ignore
 		switch cmd.Type {
 		case shared.CmdScript, shared.CmdFunction:
-			if len(cmd.Args) > 0 {
-				sub := shared.ToUpper(cmd.Args[0])
-				if string(sub) == "KILL" {
-					break
-				}
-			}
-			fallthrough
+			allowed = len(cmd.Args) > 0 && string(shared.ToUpper(cmd.Args[0])) == "KILL"
 		case shared.CmdShutdown:
 			// SHUTDOWN is always allowed
+			allowed = true
 		case shared.CmdMulti, shared.CmdExec, shared.CmdDiscard:
 			// Transaction commands are allowed through
-		default:
+			allowed = true
+		}
+
+		if !allowed {
 			w.WriteError("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")
 			if conn.InTransaction {
 				conn.TxnAborted = true

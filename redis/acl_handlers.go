@@ -458,6 +458,8 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command) []string {
 	var keys []string
 
 	// Scripting commands encode the key count in their arguments.
+	// All other commands use the registry's key extractor below.
+	//exhaustive:ignore
 	switch cmd.Type {
 	case shared.CmdEval, shared.CmdEvalSha, shared.CmdEvalRO, shared.CmdEvalShaRO, shared.CmdFcall, shared.CmdFcallRO:
 		return shared.KeysNumkeysAtOffset(cmd, 1)

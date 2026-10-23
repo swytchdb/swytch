@@ -181,6 +181,10 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	// Extract elements based on collection type
 	var elements [][]byte
 	switch snap.Collection {
+	case pb.CollectionKind_SCALAR:
+		w.WriteWrongType()
+
+		return
 	case pb.CollectionKind_ORDERED:
 		// Lists
 		for _, elem := range snap.OrderedElements {

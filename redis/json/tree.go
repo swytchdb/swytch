@@ -182,6 +182,8 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 	if p == nil {
 		return nil
 	}
+	// Container tags need reconstruction; all other tags use the scalar encoding.
+	//exhaustive:ignore
 	switch p.TypeTag {
 	case pb.ValueType_TYPE_JSON_OBJECT:
 		obj := &Value{Kind: KindObject}

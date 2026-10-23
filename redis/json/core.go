@@ -525,6 +525,11 @@ func handleJSONDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					continue
 				}
 				id = el.GetData().GetId()
+			case segWildcard, segSlice, segUnion, segRecursive, segFilter:
+				// writeTargets must resolve selectors before removing an element.
+				continue
+			default:
+				continue
 			}
 			if err := emit(orderedRemoveEffect(key, parentVid, id)); err != nil {
 				w.WriteError(err.Error())
@@ -604,6 +609,8 @@ func clearValue(v *Value) (*Value, bool) {
 		return &Value{Kind: KindInt, Int: 0}, true
 	case KindFloat:
 		return &Value{Kind: KindFloat, Float: 0}, true
+	case KindNull, KindBool, KindString:
+		// JSON.CLEAR leaves these scalar values unchanged.
 	}
 	return v, false
 }

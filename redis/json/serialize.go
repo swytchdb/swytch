@@ -125,9 +125,11 @@ func appendPretty(b []byte, v *Value, opts PrintOpts, depth int) []byte {
 		b = append(b, opts.Newline...)
 		b = appendIndent(b, opts.Indent, depth)
 		return append(b, '}')
-	default:
-		return appendValue(b, v)
+	case KindNull, KindBool, KindInt, KindFloat, KindString:
+		// Scalar formatting is identical to compact output.
 	}
+
+	return appendValue(b, v)
 }
 
 func appendIndent(b []byte, indent string, depth int) []byte {
