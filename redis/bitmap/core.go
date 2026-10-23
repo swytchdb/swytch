@@ -1385,7 +1385,8 @@ func parseBitfieldType(b []byte) (bool, int, bool) {
 		return false, 0, false
 	}
 
-	signed := false
+	var signed bool
+
 	switch b[0] {
 	case 'i', 'I':
 		signed = true

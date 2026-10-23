@@ -22,19 +22,12 @@ package shared
 import (
 	"encoding/binary"
 	"errors"
-	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/swytchdb/engine/keytrie"
 )
-
-// checkUint64AddOverflow checks if a + b would overflow uint64.
-// Returns true if overflow would occur.
-func checkUint64AddOverflow(a, b uint64) bool {
-	return a > math.MaxUint64-b
-}
 
 // StreamID represents a Redis stream entry ID (milliseconds-sequence)
 type StreamID struct {
@@ -383,7 +376,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 		if opts.Approx && opts.NodeSize > 0 {
 			limit = 100 * opts.NodeSize // Implicit limit for approximate trimming
 		} else {
-			limit = int64(s.Index.Size()) // No limit for exact trimming
+			limit = s.Index.Size() // No limit for exact trimming
 		}
 	}
 
@@ -457,7 +450,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 			effectiveMaxLen = ((opts.MaxLen + opts.NodeSize - 1) / opts.NodeSize) * opts.NodeSize
 		}
 
-		currentLen := int64(s.Index.Size()) - trimCount
+		currentLen := s.Index.Size() - trimCount
 		currentKey, found, _ := s.Index.FirstWithPrefix("", false)
 
 		// Skip entries we already marked for trimming

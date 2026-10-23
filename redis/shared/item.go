@@ -19,10 +19,6 @@
 
 package shared
 
-import (
-	"container/list"
-)
-
 // ValueType represents the type of Redis value
 type ValueType byte
 
@@ -80,18 +76,14 @@ type RedisValue struct {
 	CreatedAt         int64 // Unix nanosecond timestamp when created
 }
 
-// ListValue stores list data using a doubly-linked list for O(1) push/pop
+// ListValue tracks list sequence numbers for persistent storage.
 type ListValue struct {
-	elements *list.List
 	// Sequence tracking for persistent storage (CRDT handler)
 	// HeadSeq is the sequence number of the first element (decrements on LPUSH)
 	// TailSeq is the sequence number of the last element (increments on RPUSH)
 	// For an empty list: HeadSeq=0, TailSeq=-1
 	HeadSeq int64
 	TailSeq int64
-	// cachedSize tracks the total byte size of all elements for O(1) Size() calls
-	// Updated incrementally on push/pop operations to avoid O(n) iteration
-	cachedSize int64
 }
 
 // HashValue stores hash field/value pairs

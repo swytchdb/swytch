@@ -358,23 +358,8 @@ func (v *swytchVTable) matchPKEquality(constraints []sqlite.IndexConstraint) []i
 	if slices.Contains(result, -1) {
 		return nil
 	}
-	return result
-}
 
-// indexOnColumn returns the first registered index whose leading
-// column matches the given column index, or nil.
-func (v *swytchVTable) indexOnColumn(col int) *indexSchema {
-	if col < 0 || col >= len(v.schema.Columns) {
-		return nil
-	}
-	name := v.schema.Columns[col].Name
-	for i := range v.schema.Indexes {
-		idx := &v.schema.Indexes[i]
-		if len(idx.Columns) > 0 && idx.Columns[0] == name {
-			return idx
-		}
-	}
-	return nil
+	return result
 }
 
 // rangeMatch captures the result of a composite-index range probe.

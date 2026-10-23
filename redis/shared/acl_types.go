@@ -124,7 +124,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 	if u.AllChannels {
 		info["channels"] = []string{"&*"}
 	} else {
-		var chans []string
+		chans := make([]string, 0, len(u.ChannelPatterns))
 		for _, cp := range u.ChannelPatterns {
 			chans = append(chans, "&"+cp)
 		}

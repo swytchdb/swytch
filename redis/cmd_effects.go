@@ -162,7 +162,7 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 	// Cross-cluster pub/sub: no-op in standalone (no PeerManager).
 	if pm := activeRuntime.PeerManager; pm != nil && h.pubsubManager != nil {
 		router := cluster.NewPubSubRouter(
-			cluster.NodeId(engine.NodeID()),
+			engine.NodeID(),
 			pm,
 			h.pubsubManager,
 		)

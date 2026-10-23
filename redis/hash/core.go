@@ -104,16 +104,6 @@ func emitHashTypeTag(cmd *shared.Command, key string) error {
 	})
 }
 
-func emitHashDeleteKey(cmd *shared.Command, key string, tips ...[]effects.Tip) error {
-	return cmd.Context.Emit(&pb.Effect{
-		Key: []byte(key),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op:         pb.EffectOp_REMOVE_OP,
-			Collection: pb.CollectionKind_SCALAR,
-		}},
-	}, tips...)
-}
-
 func emitHashFieldTTL(cmd *shared.Command, key string, field string, expiresAtMs time.Time) error {
 	return cmd.Context.Emit(&pb.Effect{
 		Key:  []byte(key),

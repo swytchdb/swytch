@@ -96,17 +96,6 @@ func emitGeoInsert(cmd *shared.Command, key string, member string, geohash float
 	})
 }
 
-func emitGeoRemove(cmd *shared.Command, key string, member string) error {
-	return cmd.Context.Emit(&pb.Effect{
-		Key: []byte(key),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op:         pb.EffectOp_REMOVE_OP,
-			Collection: pb.CollectionKind_KEYED,
-			Id:         []byte(member),
-		}},
-	})
-}
-
 func emitGeoTypeTag(cmd *shared.Command, key string) error {
 	return cmd.Context.Emit(&pb.Effect{
 		Key:  []byte(key),

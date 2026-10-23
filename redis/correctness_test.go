@@ -415,11 +415,7 @@ func (c *redisClient) keys(pattern string) string {
 
 func (c *redisClient) typeCmd(key string) string {
 	c.sendCommand("TYPE", key)
-	return c.readReply()
-}
 
-func (c *redisClient) psetex(key string, milliseconds int, value string) string {
-	c.sendCommand("PSETEX", key, strconv.Itoa(milliseconds), value)
 	return c.readReply()
 }
 

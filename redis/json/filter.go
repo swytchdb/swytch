@@ -371,11 +371,15 @@ func (fp *filterParser) parseOperand() (operand, error) {
 // steps.
 func (fp *filterParser) parsePathOperand() (operand, error) {
 	fp.pos++ // '@'
+
 	var segs []segment
+
 	for fp.pos < len(fp.s) {
 		c := fp.s[fp.pos]
-		if c == '.' {
+		switch c {
+		case '.':
 			fp.pos++
+
 			start := fp.pos
 			for fp.pos < len(fp.s) && !isFilterDelim(fp.s[fp.pos]) {
 				fp.pos++
@@ -383,8 +387,9 @@ func (fp *filterParser) parsePathOperand() (operand, error) {
 			if fp.pos == start {
 				return nil, errBadPath
 			}
+
 			segs = append(segs, segment{kind: segKey, key: fp.s[start:fp.pos]})
-		} else if c == '[' {
+		case '[':
 			inner, next, err := scanBracketInner(fp.s, fp.pos+1)
 			if err != nil {
 				return nil, err
@@ -393,12 +398,14 @@ func (fp *filterParser) parsePathOperand() (operand, error) {
 			if err != nil || !seg.concrete() {
 				return nil, errBadPath
 			}
+
 			segs = append(segs, seg)
 			fp.pos = next
-		} else {
-			break
+		default:
+			return pathOperand{segs}, nil
 		}
 	}
+
 	return pathOperand{segs}, nil
 }
 

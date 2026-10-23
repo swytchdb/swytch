@@ -154,38 +154,6 @@ func nextSyntheticRowID(hlc time.Time, nodeID pb.NodeID, seq uint64) int64 {
 	return int64(binary.BigEndian.Uint64(digest[:8]) & 0x7fff_ffff_ffff_ffff)
 }
 
-// columnAffinity returns the affinity of the indexed column within
-// the given table schema, or "" if the column name isn't found.
-func (s *indexSchema) columnAffinity(tbl *tableSchema) string {
-	if len(s.Columns) == 0 {
-		return ""
-	}
-	name := s.Columns[0]
-	for _, c := range tbl.Columns {
-		if c.Name == name {
-			return c.Affinity
-		}
-	}
-	return ""
-}
-
-// columnIndex returns the index into tbl.Columns for the indexed
-// column's leading entry, or -1 if not found. Kept for callers that
-// only care about the first column (typically the planner's
-// leftmost-column matcher).
-func (s *indexSchema) columnIndex(tbl *tableSchema) int {
-	if len(s.Columns) == 0 {
-		return -1
-	}
-	name := s.Columns[0]
-	for i, c := range tbl.Columns {
-		if c.Name == name {
-			return i
-		}
-	}
-	return -1
-}
-
 // columnIndexes resolves every indexed column to its ordinal in
 // tbl.Columns. Any column not found returns -1 in its slot; callers
 // should treat that as the index being stale against the current
@@ -217,12 +185,8 @@ func (s *indexSchema) columnAffinities(tbl *tableSchema) []string {
 			}
 		}
 	}
-	return out
-}
 
-// isComposite reports whether the PK has more than one column.
-func (t *tableSchema) isComposite() bool {
-	return len(t.PKColumns) > 1
+	return out
 }
 
 // hasPK reports whether the table has any form of primary-key identity

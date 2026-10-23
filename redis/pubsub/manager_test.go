@@ -68,6 +68,10 @@ func TestManager_SubscribeUnsubscribe(t *testing.T) {
 		t.Errorf("expected 2 channels unsubscribed, got %d", len(names))
 	}
 
+	if len(unsubCounts) != 2 || unsubCounts[0] != 1 || unsubCounts[1] != 0 {
+		t.Errorf("expected remaining subscription counts [1 0], got %v", unsubCounts)
+	}
+
 	// Verify subscription count
 	if count := m.SubscriptionCount(client); count != 0 {
 		t.Errorf("expected 0 subscriptions, got %d", count)

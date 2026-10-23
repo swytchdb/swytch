@@ -1050,16 +1050,3 @@ func clearAllProducerKeys(cmd *shared.Command, streamKey string) {
 	// Also reset iids-added counter since history is cleared
 	// (iids-added is a lifetime counter, but generation change means fresh start)
 }
-
-// emitProducerRegistryRemove removes a producer from the registry.
-func emitProducerRegistryRemove(cmd *shared.Command, streamKey, producer string) error {
-	registryKey := streamKey + "\x01p\x01__registry__"
-	return cmd.Context.Emit(&pb.Effect{
-		Key: []byte(registryKey),
-		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
-			Op:         pb.EffectOp_REMOVE_OP,
-			Collection: pb.CollectionKind_KEYED,
-			Id:         []byte(producer),
-		}},
-	})
-}

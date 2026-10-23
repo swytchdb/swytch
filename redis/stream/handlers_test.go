@@ -232,7 +232,12 @@ func TestHandleXAddWithMINIDProgressive(t *testing.T) {
 
 	// Trim manually
 	result = execHandler(t, handleXTrim, env, "mystream", "MINID", "8")
+	if result != ":3\r\n" {
+		t.Errorf("Expected XTRIM MINID 8 to remove 3 entries, got %q", result)
+	}
+
 	env.buf.Reset()
+
 	result = execHandler(t, handleXLen, env, "mystream")
 	if !strings.Contains(result, ":3\r\n") {
 		t.Errorf("Expected XLEN == 3 after XTRIM MINID 8, got %q", result)

@@ -986,7 +986,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		// Skip count based on RANK (how many matches to skip)
-		skipCount := 0
+		var skipCount int
 		if rank > 0 {
 			skipCount = rank - 1
 		} else {
