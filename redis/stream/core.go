@@ -66,19 +66,23 @@ func getStreamSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_ORDERED {
+
+	if snap.GetCollection() == pb.CollectionKind_ORDERED {
 		return snap, tips, true, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && snap.TypeTag == pb.ValueType_TYPE_STREAM {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && snap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 		return snap, tips, true, false, nil
 	}
 	// Legacy: accept KEYED streams that haven't been migrated yet
-	if snap.Collection == pb.CollectionKind_KEYED && snap.TypeTag == pb.ValueType_TYPE_STREAM {
+	if snap.GetCollection() == pb.CollectionKind_KEYED && snap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -90,6 +94,7 @@ func getStreamSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 func emitStreamInsert(cmd *shared.Command, key string, id shared.StreamID, fields [][]byte) error {
 	elementID := encodeStreamElementID(id)
 	raw := encodeStreamFields(fields)
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -106,6 +111,7 @@ func emitStreamInsert(cmd *shared.Command, key string, id shared.StreamID, field
 // emitStreamRemove emits a REMOVE effect for a stream entry.
 func emitStreamRemove(cmd *shared.Command, key string, id shared.StreamID) error {
 	elementID := encodeStreamElementID(id)
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -131,6 +137,7 @@ func encodeStreamElementID(id shared.StreamID) []byte {
 	buf := make([]byte, 16)
 	binary.BigEndian.PutUint64(buf[0:8], id.Ms)
 	binary.BigEndian.PutUint64(buf[8:16], id.Seq)
+
 	return buf
 }
 
@@ -139,6 +146,7 @@ func decodeStreamElementID(id []byte) shared.StreamID {
 	if len(id) != 16 {
 		return shared.StreamID{}
 	}
+
 	return shared.StreamID{
 		Ms:  binary.BigEndian.Uint64(id[0:8]),
 		Seq: binary.BigEndian.Uint64(id[8:16]),
@@ -152,8 +160,10 @@ func encodeStreamFields(fields [][]byte) []byte {
 	for _, f := range fields {
 		size += 4 + len(f)
 	}
+
 	buf := make([]byte, size)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(fields)))
+
 	off := 4
 	for _, f := range fields {
 		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(f)))
@@ -161,6 +171,7 @@ func encodeStreamFields(fields [][]byte) []byte {
 		copy(buf[off:off+len(f)], f)
 		off += len(f)
 	}
+
 	return buf
 }
 
@@ -169,21 +180,27 @@ func decodeStreamFields(raw []byte) [][]byte {
 	if len(raw) < 4 {
 		return nil
 	}
+
 	count := int(binary.LittleEndian.Uint32(raw[0:4]))
 	if count == 0 {
 		return nil
 	}
+
 	fields := make([][]byte, count)
+
 	off := 4
 	for i := 0; i < count && off+4 <= len(raw); i++ {
 		fLen := int(binary.LittleEndian.Uint32(raw[off : off+4]))
+
 		off += 4
 		if off+fLen > len(raw) {
 			break
 		}
+
 		fields[i] = raw[off : off+fLen]
 		off += fLen
 	}
+
 	return fields
 }
 
@@ -198,19 +215,21 @@ func snapshotToEntries(snap *pb.ReducedEffect) []*shared.StreamEntry {
 	}
 
 	// ORDERED path: use OrderedElements directly
-	if snap.Collection == pb.CollectionKind_ORDERED && len(snap.OrderedElements) > 0 {
-		entries := make([]*shared.StreamEntry, 0, len(snap.OrderedElements))
-		for _, elem := range snap.OrderedElements {
-			if len(elem.Data.Id) != 16 {
+	if snap.GetCollection() == pb.CollectionKind_ORDERED && len(snap.GetOrderedElements()) > 0 {
+		entries := make([]*shared.StreamEntry, 0, len(snap.GetOrderedElements()))
+		for _, elem := range snap.GetOrderedElements() {
+			if len(elem.GetData().GetId()) != 16 {
 				continue
 			}
-			id := decodeStreamElementID(elem.Data.Id)
-			fields := decodeStreamFields(elem.Data.Decompress())
+
+			id := decodeStreamElementID(elem.GetData().GetId())
+			fields := decodeStreamFields(elem.GetData().Decompress())
 			entries = append(entries, &shared.StreamEntry{
 				ID:     id,
 				Fields: fields,
 			})
 		}
+
 		return entries
 	}
 
@@ -219,17 +238,19 @@ func snapshotToEntries(snap *pb.ReducedEffect) []*shared.StreamEntry {
 		return nil
 	}
 
-	entries := make([]*shared.StreamEntry, 0, len(snap.NetAdds))
-	for elemID, elem := range snap.NetAdds {
+	entries := make([]*shared.StreamEntry, 0, len(snap.GetNetAdds()))
+	for elemID, elem := range snap.GetNetAdds() {
 		// Skip metadata element
 		if elemID == "__meta__" {
 			continue
 		}
+
 		if len(elemID) != 16 {
 			continue
 		}
+
 		id := decodeStreamElementID([]byte(elemID))
-		fields := decodeStreamFields(elem.Data.Decompress())
+		fields := decodeStreamFields(elem.GetData().Decompress())
 		entries = append(entries, &shared.StreamEntry{
 			ID:     id,
 			Fields: fields,
@@ -255,9 +276,9 @@ func streamMetadata(snap *pb.ReducedEffect) (lastID shared.StreamID, entriesAdde
 	}
 
 	// Legacy KEYED path: check for __meta__ element
-	if snap.Collection == pb.CollectionKind_KEYED && snap.NetAdds != nil {
-		if meta, ok := snap.NetAdds["__meta__"]; ok {
-			raw := meta.Data.Decompress()
+	if snap.GetCollection() == pb.CollectionKind_KEYED && snap.NetAdds != nil {
+		if meta, ok := snap.GetNetAdds()["__meta__"]; ok {
+			raw := meta.GetData().Decompress()
 			if len(raw) >= 40 {
 				lastID.Ms = binary.BigEndian.Uint64(raw[0:8])
 				lastID.Seq = binary.BigEndian.Uint64(raw[8:16])
@@ -265,24 +286,26 @@ func streamMetadata(snap *pb.ReducedEffect) (lastID shared.StreamID, entriesAdde
 				maxDeletedID.Ms = binary.BigEndian.Uint64(raw[24:32])
 				maxDeletedID.Seq = binary.BigEndian.Uint64(raw[32:40])
 				found = true
+
 				return
 			}
 		}
 	}
 
 	// ORDERED path: derive from OrderedElements and NetRemoves
-	if snap.Collection == pb.CollectionKind_ORDERED {
-		if len(snap.OrderedElements) > 0 {
-			last := snap.OrderedElements[len(snap.OrderedElements)-1]
-			if len(last.Data.Id) == 16 {
-				lastID = decodeStreamElementID(last.Data.Id)
+	if snap.GetCollection() == pb.CollectionKind_ORDERED {
+		if len(snap.GetOrderedElements()) > 0 {
+			last := snap.GetOrderedElements()[len(snap.GetOrderedElements())-1]
+			if len(last.GetData().GetId()) == 16 {
+				lastID = decodeStreamElementID(last.GetData().GetId())
 			}
+
 			found = true
 		}
 		// entries-added defaults to current count but may be overridden by cfg key
-		entriesAdded = int64(len(snap.OrderedElements))
+		entriesAdded = int64(len(snap.GetOrderedElements()))
 		// MaxDeletedID: derive from NetRemoves (the max removed ID)
-		for elemID := range snap.NetRemoves {
+		for elemID := range snap.GetNetRemoves() {
 			if len(elemID) == 16 {
 				id := decodeStreamElementID([]byte(elemID))
 				if id.Compare(maxDeletedID) > 0 {
@@ -296,9 +319,11 @@ func streamMetadata(snap *pb.ReducedEffect) (lastID shared.StreamID, entriesAdde
 			lastID = maxDeletedID
 			found = true
 		}
-		if found || len(snap.NetRemoves) > 0 {
+
+		if found || len(snap.GetNetRemoves()) > 0 {
 			found = true
 		}
+
 		return
 	}
 
@@ -310,17 +335,20 @@ func streamLen(snap *pb.ReducedEffect) int {
 	if snap == nil {
 		return 0
 	}
-	if snap.Collection == pb.CollectionKind_ORDERED {
-		return len(snap.OrderedElements)
+
+	if snap.GetCollection() == pb.CollectionKind_ORDERED {
+		return len(snap.GetOrderedElements())
 	}
 	// Legacy KEYED path
 	if snap.NetAdds == nil {
 		return 0
 	}
-	n := len(snap.NetAdds)
-	if _, hasMeta := snap.NetAdds["__meta__"]; hasMeta {
+
+	n := len(snap.GetNetAdds())
+	if _, hasMeta := snap.GetNetAdds()["__meta__"]; hasMeta {
 		n--
 	}
+
 	return n
 }
 
@@ -329,6 +357,7 @@ func streamFirstID(entries []*shared.StreamEntry) shared.StreamID {
 	if len(entries) == 0 {
 		return shared.StreamID{}
 	}
+
 	return entries[0].ID
 }
 
@@ -337,6 +366,7 @@ func streamLastID(entries []*shared.StreamEntry) shared.StreamID {
 	if len(entries) == 0 {
 		return shared.StreamID{}
 	}
+
 	return entries[len(entries)-1].ID
 }
 
@@ -355,11 +385,13 @@ func generateStreamID(snap *pb.ReducedEffect) shared.StreamID {
 	if now > lastID.Ms {
 		return shared.StreamID{Ms: now, Seq: 0}
 	}
+
 	if now == lastID.Ms {
 		if lastID.Seq == ^uint64(0) {
 			// Sequence overflow — increment ms
 			return shared.StreamID{Ms: now + 1, Seq: 0}
 		}
+
 		return shared.StreamID{Ms: now, Seq: lastID.Seq + 1}
 	}
 	// Clock went backwards or last entry has future timestamp
@@ -367,6 +399,7 @@ func generateStreamID(snap *pb.ReducedEffect) shared.StreamID {
 		// Sequence overflow — increment ms
 		return shared.StreamID{Ms: lastID.Ms + 1, Seq: 0}
 	}
+
 	return shared.StreamID{Ms: lastID.Ms, Seq: lastID.Seq + 1}
 }
 
@@ -381,9 +414,11 @@ func generateStreamIDWithMs(snap *pb.ReducedEffect, ms uint64) (shared.StreamID,
 	if ms > lastID.Ms {
 		return shared.StreamID{Ms: ms, Seq: 0}, nil
 	}
+
 	if ms == lastID.Ms {
 		return shared.StreamID{Ms: ms, Seq: lastID.Seq + 1}, nil
 	}
+
 	return shared.StreamID{}, shared.ErrStreamIDTooSmall
 }
 
@@ -392,6 +427,7 @@ func generateStreamIDWithMs(snap *pb.ReducedEffect, ms uint64) (shared.StreamID,
 // rangeEntries filters entries by ID range with optional count limit.
 func rangeEntries(entries []*shared.StreamEntry, start, end shared.StreamID, startExcl, endExcl bool, count int) []*shared.StreamEntry {
 	var result []*shared.StreamEntry
+
 	for _, e := range entries {
 		cmpStart := e.ID.Compare(start)
 		if startExcl {
@@ -403,6 +439,7 @@ func rangeEntries(entries []*shared.StreamEntry, start, end shared.StreamID, sta
 				continue
 			}
 		}
+
 		cmpEnd := e.ID.Compare(end)
 		if endExcl {
 			if cmpEnd >= 0 {
@@ -413,19 +450,21 @@ func rangeEntries(entries []*shared.StreamEntry, start, end shared.StreamID, sta
 				break
 			}
 		}
+
 		result = append(result, e)
 		if count > 0 && len(result) >= count {
 			break
 		}
 	}
+
 	return result
 }
 
 // rangeEntriesReverse filters entries by ID range in reverse with optional count limit.
 func rangeEntriesReverse(entries []*shared.StreamEntry, start, end shared.StreamID, startExcl, endExcl bool, count int) []*shared.StreamEntry {
 	var result []*shared.StreamEntry
-	for _, e := range slices.Backward(entries) {
 
+	for _, e := range slices.Backward(entries) {
 		cmpEnd := e.ID.Compare(end)
 		if endExcl {
 			if cmpEnd >= 0 {
@@ -436,6 +475,7 @@ func rangeEntriesReverse(entries []*shared.StreamEntry, start, end shared.Stream
 				continue
 			}
 		}
+
 		cmpStart := e.ID.Compare(start)
 		if startExcl {
 			if cmpStart <= 0 {
@@ -446,11 +486,13 @@ func rangeEntriesReverse(entries []*shared.StreamEntry, start, end shared.Stream
 				break
 			}
 		}
+
 		result = append(result, e)
 		if count > 0 && len(result) >= count {
 			break
 		}
 	}
+
 	return result
 }
 
@@ -491,6 +533,7 @@ func encodeGroupMeta(lastDeliveredID shared.StreamID, entriesRead int64, created
 	binary.BigEndian.PutUint64(buf[8:16], lastDeliveredID.Seq)
 	binary.LittleEndian.PutUint64(buf[16:24], uint64(entriesRead))
 	binary.LittleEndian.PutUint64(buf[24:32], uint64(createdAt))
+
 	return buf
 }
 
@@ -499,10 +542,12 @@ func decodeGroupMeta(raw []byte) (lastDeliveredID shared.StreamID, entriesRead i
 	if len(raw) < 32 {
 		return
 	}
+
 	lastDeliveredID.Ms = binary.BigEndian.Uint64(raw[0:8])
 	lastDeliveredID.Seq = binary.BigEndian.Uint64(raw[8:16])
 	entriesRead = int64(binary.LittleEndian.Uint64(raw[16:24]))
 	createdAt = int64(binary.LittleEndian.Uint64(raw[24:32]))
+
 	return
 }
 
@@ -538,6 +583,7 @@ func encodeConsumerMeta(seenTime, activeTime int64) []byte {
 	buf := make([]byte, 16)
 	binary.LittleEndian.PutUint64(buf[0:8], uint64(seenTime))
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(activeTime))
+
 	return buf
 }
 
@@ -546,8 +592,10 @@ func decodeConsumerMeta(raw []byte) (seenTime, activeTime int64) {
 	if len(raw) < 16 {
 		return
 	}
+
 	seenTime = int64(binary.LittleEndian.Uint64(raw[0:8]))
 	activeTime = int64(binary.LittleEndian.Uint64(raw[8:16]))
+
 	return
 }
 
@@ -556,6 +604,7 @@ func decodeConsumerMeta(raw []byte) (seenTime, activeTime int64) {
 // emitPELInsert inserts or updates a PEL entry.
 func emitPELInsert(cmd *shared.Command, streamKey, group string, id shared.StreamID, pelRaw []byte) error {
 	elementID := encodeStreamElementID(id)
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(pelKey(streamKey, group)),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -582,6 +631,7 @@ func emitPELKeyRemove(cmd *shared.Command, streamKey, group string) error {
 // emitPELRemove removes a PEL entry.
 func emitPELRemove(cmd *shared.Command, streamKey, group string, id shared.StreamID) error {
 	elementID := encodeStreamElementID(id)
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(pelKey(streamKey, group)),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -601,6 +651,7 @@ func encodePELEntry(consumer string, deliveryTime, deliveryCount int64) []byte {
 	off := 4 + len(consumer)
 	binary.LittleEndian.PutUint64(buf[off:off+8], uint64(deliveryTime))
 	binary.LittleEndian.PutUint64(buf[off+8:off+16], uint64(deliveryCount))
+
 	return buf
 }
 
@@ -609,14 +660,17 @@ func decodePELEntry(raw []byte) (consumer string, deliveryTime, deliveryCount in
 	if len(raw) < 4 {
 		return
 	}
+
 	nameLen := int(binary.LittleEndian.Uint32(raw[0:4]))
 	if len(raw) < 4+nameLen+16 {
 		return
 	}
+
 	consumer = string(raw[4 : 4+nameLen])
 	off := 4 + nameLen
 	deliveryTime = int64(binary.LittleEndian.Uint64(raw[off : off+8]))
 	deliveryCount = int64(binary.LittleEndian.Uint64(raw[off+8 : off+16]))
+
 	return
 }
 
@@ -626,12 +680,14 @@ func decodePELEntry(raw []byte) (consumer string, deliveryTime, deliveryCount in
 // The group key stores: "__group__" element for group meta, "c\x00{consumer}" for consumers.
 func getGroupSnapshot(cmd *shared.Command, streamKey, group string) (snap *pb.ReducedEffect, tips []effects.Tip, err error) {
 	snap, tips, err = cmd.Context.GetSnapshot(groupKey(streamKey, group))
+
 	return
 }
 
 // getPELSnapshot retrieves the PEL snapshot for a group.
 func getPELSnapshot(cmd *shared.Command, streamKey, group string) (snap *pb.ReducedEffect, tips []effects.Tip, err error) {
 	snap, tips, err = cmd.Context.GetSnapshot(pelKey(streamKey, group))
+
 	return
 }
 
@@ -641,7 +697,9 @@ func groupExists(cmd *shared.Command, streamKey, groupName string) bool {
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return false
 	}
-	_, exists := snap.NetAdds["__group__"]
+
+	_, exists := snap.GetNetAdds()["__group__"]
+
 	return exists
 }
 
@@ -650,11 +708,14 @@ func getGroupMeta(snap *pb.ReducedEffect) (lastDeliveredID shared.StreamID, entr
 	if snap == nil || snap.NetAdds == nil {
 		return
 	}
-	elem, ok := snap.NetAdds["__group__"]
+
+	elem, ok := snap.GetNetAdds()["__group__"]
 	if !ok {
 		return
 	}
-	lastDeliveredID, entriesRead, createdAt = decodeGroupMeta(elem.Data.Decompress())
+
+	lastDeliveredID, entriesRead, createdAt = decodeGroupMeta(elem.GetData().Decompress())
+
 	return
 }
 
@@ -664,12 +725,15 @@ func getConsumersFromGroup(snap *pb.ReducedEffect) map[string]*pb.ReducedElement
 	if snap == nil || snap.NetAdds == nil {
 		return nil
 	}
+
 	consumers := make(map[string]*pb.ReducedElement)
-	for key, elem := range snap.NetAdds {
+
+	for key, elem := range snap.GetNetAdds() {
 		if len(key) > 2 && key[0] == 'c' && key[1] == '\x00' {
 			consumers[key[2:]] = elem
 		}
 	}
+
 	return consumers
 }
 
@@ -681,21 +745,26 @@ func listGroupNames(cmd *shared.Command, streamKey string) []string {
 	// We can't enumerate keys from the effects engine easily, so we use
 	// a registry key that tracks group names.
 	registryKey := streamKey + "\x01g\x01__registry__"
+
 	snap, _, err := cmd.Context.GetSnapshot(registryKey)
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return nil
 	}
-	names := make([]string, 0, len(snap.NetAdds))
-	for name := range snap.NetAdds {
+
+	names := make([]string, 0, len(snap.GetNetAdds()))
+	for name := range snap.GetNetAdds() {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
 // emitGroupRegistryInsert adds a group name to the registry.
 func emitGroupRegistryInsert(cmd *shared.Command, streamKey, groupName string) error {
 	registryKey := streamKey + "\x01g\x01__registry__"
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(registryKey),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -711,6 +780,7 @@ func emitGroupRegistryInsert(cmd *shared.Command, streamKey, groupName string) e
 // emitGroupRegistryRemove removes a group name from the registry.
 func emitGroupRegistryRemove(cmd *shared.Command, streamKey, groupName string) error {
 	registryKey := streamKey + "\x01g\x01__registry__"
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(registryKey),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -727,13 +797,14 @@ func pelToEntries(pelSnap *pb.ReducedEffect) []*shared.PendingEntry {
 		return nil
 	}
 
-	entries := make([]*shared.PendingEntry, 0, len(pelSnap.NetAdds))
-	for elemID, elem := range pelSnap.NetAdds {
+	entries := make([]*shared.PendingEntry, 0, len(pelSnap.GetNetAdds()))
+	for elemID, elem := range pelSnap.GetNetAdds() {
 		if len(elemID) != 16 {
 			continue
 		}
+
 		id := decodeStreamElementID([]byte(elemID))
-		consumer, deliveryTime, deliveryCount := decodePELEntry(elem.Data.Decompress())
+		consumer, deliveryTime, deliveryCount := decodePELEntry(elem.GetData().Decompress())
 		entries = append(entries, &shared.PendingEntry{
 			ID:            id,
 			Consumer:      consumer,
@@ -754,13 +825,16 @@ func consumerPendingCount(pelSnap *pb.ReducedEffect, consumer string) int64 {
 	if pelSnap == nil || pelSnap.NetAdds == nil {
 		return 0
 	}
+
 	var count int64
-	for _, elem := range pelSnap.NetAdds {
-		c, _, _ := decodePELEntry(elem.Data.Decompress())
+
+	for _, elem := range pelSnap.GetNetAdds() {
+		c, _, _ := decodePELEntry(elem.GetData().Decompress())
 		if c == consumer {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -773,18 +847,21 @@ func getStreamEntriesAdded(cmd *shared.Command, streamKey string) int64 {
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return -1
 	}
-	if elem, ok := snap.NetAdds["entries-added"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["entries-added"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
 	}
+
 	return -1
 }
 
 // incrementStreamEntriesAdded increments the stream's entries-added counter.
 func incrementStreamEntriesAdded(cmd *shared.Command, streamKey string) error {
 	current := max(getStreamEntriesAdded(cmd, streamKey), 0)
+
 	return emitCfgSet(cmd, streamKey, "entries-added", current+1)
 }
 
@@ -799,12 +876,14 @@ func getIdmpGeneration(cmd *shared.Command, streamKey string) int64 {
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return 0
 	}
-	if elem, ok := snap.NetAdds["idmp-generation"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["idmp-generation"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
 	}
+
 	return 0
 }
 
@@ -812,6 +891,7 @@ func getIdmpGeneration(cmd *shared.Command, streamKey string) int64 {
 func emitProducerSeq(cmd *shared.Command, streamKey, producer, seq string, entryID shared.StreamID) error {
 	gen := getIdmpGeneration(cmd, streamKey)
 	_, maxsize, _ := getStreamConfig(cmd, streamKey)
+
 	return emitProducerSeqWithConfig(cmd, streamKey, producer, seq, entryID, gen, maxsize)
 }
 
@@ -848,12 +928,14 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 				seq     string
 				entryID shared.StreamID
 			}
-			entries := make([]entry, 0, len(snap.NetAdds))
-			for s, elem := range snap.NetAdds {
+
+			entries := make([]entry, 0, len(snap.GetNetAdds()))
+			for s, elem := range snap.GetNetAdds() {
 				if s == seq {
 					continue // skip the entry we just inserted
 				}
-				r := elem.Data.Decompress()
+
+				r := elem.GetData().Decompress()
 				if len(r) >= 32 {
 					entryGen := int64(binary.LittleEndian.Uint64(r[24:32]))
 					if entryGen != gen {
@@ -862,12 +944,15 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 				} else if gen != 0 {
 					continue // old format, skip if current gen > 0
 				}
+
 				var eid shared.StreamID
 				if len(r) >= 16 {
 					eid = decodeStreamElementID(r[:16])
 				}
+
 				entries = append(entries, entry{seq: s, entryID: eid})
 			}
+
 			if int64(len(entries)) >= maxsize {
 				// Sort by stream entry ID (monotonically increasing)
 				sort.Slice(entries, func(i, j int) bool {
@@ -897,6 +982,7 @@ func emitProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq str
 // emitProducerRegistryInsert adds a producer name to the registry.
 func emitProducerRegistryInsert(cmd *shared.Command, streamKey, producer string) error {
 	registryKey := streamKey + "\x01p\x01__registry__"
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(registryKey),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -912,14 +998,17 @@ func emitProducerRegistryInsert(cmd *shared.Command, streamKey, producer string)
 // listProducerNames returns all registered producer names for a stream.
 func listProducerNames(cmd *shared.Command, streamKey string) []string {
 	registryKey := streamKey + "\x01p\x01__registry__"
+
 	snap, _, err := cmd.Context.GetSnapshot(registryKey)
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return nil
 	}
-	names := make([]string, 0, len(snap.NetAdds))
-	for name := range snap.NetAdds {
+
+	names := make([]string, 0, len(snap.GetNetAdds()))
+	for name := range snap.GetNetAdds() {
 		names = append(names, name)
 	}
+
 	return names
 }
 
@@ -927,10 +1016,12 @@ func listProducerNames(cmd *shared.Command, streamKey string) []string {
 // Respects IDMP-DURATION config: entries older than the duration are treated as expired.
 func lookupProducerSeq(cmd *shared.Command, streamKey, producer, seq string) (shared.StreamID, bool) {
 	gen := getIdmpGeneration(cmd, streamKey)
+
 	duration, _, durationExplicit := getStreamConfig(cmd, streamKey)
 	if !durationExplicit {
 		duration = 0
 	}
+
 	return lookupProducerSeqWithConfig(cmd, streamKey, producer, seq, gen, duration)
 }
 
@@ -939,15 +1030,18 @@ func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq s
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return shared.StreamID{}, false
 	}
-	entry, exists := snap.NetAdds[seq]
+
+	entry, exists := snap.GetNetAdds()[seq]
 	if !exists {
 		return shared.StreamID{}, false
 	}
-	raw := entry.Data.Decompress()
+
+	raw := entry.GetData().Decompress()
 	// Support both old 16-byte format and new 24-byte format
 	if len(raw) < 16 {
 		return shared.StreamID{}, false
 	}
+
 	id := decodeStreamElementID(raw[:16])
 
 	// Check generation — entries from old generations are stale
@@ -975,6 +1069,7 @@ func lookupProducerSeqWithConfig(cmd *shared.Command, streamKey, producer, seq s
 func emitCfgSet(cmd *shared.Command, streamKey, field string, value int64) error {
 	raw := make([]byte, 8)
 	binary.LittleEndian.PutUint64(raw, uint64(value))
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(cfgKey(streamKey)),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -993,23 +1088,27 @@ func emitCfgSet(cmd *shared.Command, streamKey, field string, value int64) error
 func getStreamConfig(cmd *shared.Command, streamKey string) (duration int64, maxsize int64, durationExplicit bool) {
 	duration = 100
 	maxsize = 100
+
 	snap, _, err := cmd.Context.GetSnapshot(cfgKey(streamKey))
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return
 	}
-	if elem, ok := snap.NetAdds["idmp-duration"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["idmp-duration"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			duration = int64(binary.LittleEndian.Uint64(raw))
 			durationExplicit = true
 		}
 	}
-	if elem, ok := snap.NetAdds["idmp-maxsize"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["idmp-maxsize"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			maxsize = int64(binary.LittleEndian.Uint64(raw))
 		}
 	}
+
 	return
 }
 
@@ -1019,18 +1118,21 @@ func getIidsAdded(cmd *shared.Command, streamKey string) int64 {
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return 0
 	}
-	if elem, ok := snap.NetAdds["iids-added"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["iids-added"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
 	}
+
 	return 0
 }
 
 // incrementIidsAdded increments the lifetime iids-added counter.
 func incrementIidsAdded(cmd *shared.Command, streamKey string) error {
 	current := getIidsAdded(cmd, streamKey)
+
 	return emitCfgSet(cmd, streamKey, "iids-added", current+1)
 }
 
@@ -1040,18 +1142,21 @@ func getIidsDuplicates(cmd *shared.Command, streamKey string) int64 {
 	if err != nil || snap == nil || snap.NetAdds == nil {
 		return 0
 	}
-	if elem, ok := snap.NetAdds["iids-duplicates"]; ok {
-		raw := elem.Data.Decompress()
+
+	if elem, ok := snap.GetNetAdds()["iids-duplicates"]; ok {
+		raw := elem.GetData().Decompress()
 		if len(raw) == 8 {
 			return int64(binary.LittleEndian.Uint64(raw))
 		}
 	}
+
 	return 0
 }
 
 // incrementIidsDuplicates increments the lifetime iids-duplicates counter.
 func incrementIidsDuplicates(cmd *shared.Command, streamKey string) error {
 	current := getIidsDuplicates(cmd, streamKey)
+
 	return emitCfgSet(cmd, streamKey, "iids-duplicates", current+1)
 }
 
@@ -1059,5 +1164,6 @@ func incrementIidsDuplicates(cmd *shared.Command, streamKey string) error {
 // Old entries remain in producer keys but are ignored during lookup (generation mismatch).
 func clearAllProducerKeys(cmd *shared.Command, streamKey string) error {
 	gen := getIdmpGeneration(cmd, streamKey)
+
 	return emitCfgSet(cmd, streamKey, "idmp-generation", gen+1)
 }

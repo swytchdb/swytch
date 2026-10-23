@@ -41,10 +41,12 @@ func startTestServer(t *testing.T) (*Server, *sql.DB) {
 
 	logOut := io.Discard
 	logLevel := slog.LevelInfo
+
 	if testing.Verbose() {
 		logOut = os.Stderr
 		logLevel = slog.LevelDebug
 	}
+
 	srv, err := NewServer(ServerConfig{
 		Address:           "127.0.0.1:0",
 		AdvertisedVersion: "17.0",
@@ -53,6 +55,7 @@ func startTestServer(t *testing.T) (*Server, *sql.DB) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
+
 	if err := srv.StartAsync(); err != nil {
 		t.Fatalf("StartAsync: %v", err)
 	}
@@ -68,19 +71,23 @@ func startTestServer(t *testing.T) (*Server, *sql.DB) {
 		"host=127.0.0.1 port=%d user=test dbname=test sslmode=disable default_query_exec_mode=simple_protocol",
 		tcp.Port,
 	)
+
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
+
 	db.SetMaxOpenConns(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var one int
 	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
 			t.Logf("db.Close during setup: %v", closeErr)
 		}
+
 		shutdown(t, srv)
 		t.Fatalf("probe SELECT 1: %v", err)
 	}
@@ -89,15 +96,19 @@ func startTestServer(t *testing.T) (*Server, *sql.DB) {
 		if err := db.Close(); err != nil {
 			t.Errorf("db.Close: %v", err)
 		}
+
 		shutdown(t, srv)
 	})
+
 	return srv, db
 }
 
 func shutdown(t *testing.T, srv *Server) {
 	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	if err := srv.Stop(ctx); err != nil {
 		t.Errorf("Stop: %v", err)
 	}
@@ -111,6 +122,7 @@ func TestSelectLiterals(t *testing.T) {
 		if err := db.QueryRow("SELECT 1").Scan(&got); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		if got != 1 {
 			t.Errorf("got %d, want 1", got)
 		}
@@ -121,6 +133,7 @@ func TestSelectLiterals(t *testing.T) {
 		if err := db.QueryRow("SELECT 1+1").Scan(&got); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		if got != 2 {
 			t.Errorf("got %d, want 2", got)
 		}
@@ -131,6 +144,7 @@ func TestSelectLiterals(t *testing.T) {
 		if err := db.QueryRow("SELECT 'hello'").Scan(&got); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		if got != "hello" {
 			t.Errorf("got %q, want %q", got, "hello")
 		}
@@ -141,6 +155,7 @@ func TestSelectLiterals(t *testing.T) {
 		if err := db.QueryRow("SELECT 1.5").Scan(&got); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		if got != 1.5 {
 			t.Errorf("got %v, want 1.5", got)
 		}
@@ -151,6 +166,7 @@ func TestSelectLiterals(t *testing.T) {
 		if err := db.QueryRow("SELECT NULL").Scan(&got); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		if got.Valid {
 			t.Errorf("got %v, want NULL", got)
 		}
@@ -171,16 +187,20 @@ func TestMultipleRows(t *testing.T) {
 	}()
 
 	var got []int64
+
 	for rows.Next() {
 		var v int64
 		if err := rows.Scan(&v); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		got = append(got, v)
 	}
+
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
 	}
+
 	if len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
 		t.Errorf("got %v, want [1 2 3]", got)
 	}
@@ -231,12 +251,15 @@ func TestCreateTableAcrossSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select on second session: %v", err)
 	}
+
 	if rows.Next() {
 		t.Error("expected empty result from fresh table")
 	}
+
 	if err := rows.Err(); err != nil {
 		t.Errorf("rows.Err: %v", err)
 	}
+
 	if err := rows.Close(); err != nil {
 		t.Errorf("rows.Close: %v", err)
 	}
@@ -248,10 +271,12 @@ func TestCreateTableDuplicateName(t *testing.T) {
 	if _, err := db.Exec("CREATE TABLE foo (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
+
 	_, err := db.Exec("CREATE TABLE foo (id INTEGER PRIMARY KEY)")
 	if err == nil {
 		t.Fatal("expected error creating duplicate table")
 	}
+
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("expected 'already exists' in error, got: %v", err)
 	}
@@ -264,6 +289,7 @@ func TestShowSwytchDialect(t *testing.T) {
 	if err := db.QueryRow("SHOW swytch.dialect").Scan(&got); err != nil {
 		t.Fatalf("SHOW: %v", err)
 	}
+
 	if got != "sqlite" {
 		t.Errorf("SHOW swytch.dialect = %q, want %q", got, "sqlite")
 	}
@@ -288,14 +314,16 @@ func TestServerVersionParameter(t *testing.T) {
 func TestStartStop(t *testing.T) {
 	srv, err := NewServer(ServerConfig{
 		Address: "127.0.0.1:0",
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:  slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
+
 	if err := srv.StartAsync(); err != nil {
 		t.Fatalf("StartAsync: %v", err)
 	}
+
 	addr := srv.Addr()
 	if addr == nil {
 		t.Fatal("Addr nil")
@@ -303,6 +331,7 @@ func TestStartStop(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	if err := srv.Stop(ctx); err != nil {
 		t.Errorf("Stop: %v", err)
 	}

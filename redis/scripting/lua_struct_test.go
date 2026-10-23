@@ -88,8 +88,10 @@ func TestStructPack(t *testing.T) {
 			if err := L.DoString(tt.luaCode); err != nil {
 				t.Fatalf("DoString failed: %v", err)
 			}
+
 			result := L.Get(-1)
 			L.Pop(1)
+
 			if str, ok := result.(lua.LString); ok {
 				if string(str) != tt.expected {
 					t.Errorf("got %q, want %q", string(str), tt.expected)
@@ -165,6 +167,7 @@ func TestStructUnpack(t *testing.T) {
 				L.SetTop(0)
 				t.Fatalf("got %d return values, want %d", top, len(tt.expected))
 			}
+
 			for i := 1; i <= top; i++ {
 				result := L.Get(i)
 				switch expected := tt.expected[i-1].(type) {
@@ -186,6 +189,7 @@ func TestStructUnpack(t *testing.T) {
 					}
 				}
 			}
+
 			L.SetTop(0)
 		})
 	}
@@ -244,8 +248,10 @@ func TestStructSize(t *testing.T) {
 			if err := L.DoString(tt.luaCode); err != nil {
 				t.Fatalf("DoString failed: %v", err)
 			}
+
 			result := L.Get(-1)
 			L.Pop(1)
+
 			if num, ok := result.(lua.LNumber); ok {
 				if int(num) != tt.expected {
 					t.Errorf("got %d, want %d", int(num), tt.expected)
@@ -274,6 +280,7 @@ func TestStructRoundTrip(t *testing.T) {
 	}
 
 	expected := []float64{42, 1000, 100000}
+
 	for i := 1; i <= 3; i++ {
 		result := L.Get(i)
 		if num, ok := result.(lua.LNumber); ok {
@@ -282,6 +289,7 @@ func TestStructRoundTrip(t *testing.T) {
 			}
 		}
 	}
+
 	result := L.Get(4)
 	if str, ok := result.(lua.LString); ok {
 		if string(str) != "test" {
@@ -303,8 +311,10 @@ func TestStructInVM(t *testing.T) {
 	if err := L.DoString(luaCode); err != nil {
 		t.Fatalf("struct not available in VM pool: %v", err)
 	}
+
 	result := L.Get(-1)
 	L.Pop(1)
+
 	if str, ok := result.(lua.LString); ok {
 		if string(str) != "*" {
 			t.Errorf("got %q, want %q", string(str), "*")

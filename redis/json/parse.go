@@ -47,6 +47,7 @@ func Parse(data []byte) (*Value, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errInvalidJSON
 	}
+
 	return v, nil
 }
 
@@ -55,6 +56,7 @@ func parseValue(dec *json.Decoder) (*Value, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return parseFromToken(dec, tok)
 }
 
@@ -64,15 +66,18 @@ func parseFromToken(dec *json.Decoder, tok json.Token) (*Value, error) {
 		switch t {
 		case '{':
 			obj := &Value{Kind: KindObject}
+
 			for dec.More() {
 				keyTok, err := dec.Token()
 				if err != nil {
 					return nil, err
 				}
+
 				key, ok := keyTok.(string)
 				if !ok {
 					return nil, errInvalidJSON
 				}
+
 				val, err := parseValue(dec)
 				if err != nil {
 					return nil, err
@@ -81,45 +86,57 @@ func parseFromToken(dec *json.Decoder, tok json.Token) (*Value, error) {
 				// the first, so a lookup and a re-parse of the serialized form
 				// agree on which one is live.
 				replaced := false
+
 				for i := range obj.Obj {
 					if obj.Obj[i].Key == key {
 						obj.Obj[i].Val = val
 						replaced = true
+
 						break
 					}
 				}
+
 				if !replaced {
 					obj.Obj = append(obj.Obj, Member{Key: key, Val: val})
 				}
 			}
+
 			if _, err := dec.Token(); err != nil { // consume '}'
 				return nil, err
 			}
+
 			return obj, nil
 		case '[':
 			arr := &Value{Kind: KindArray}
+
 			for dec.More() {
 				val, err := parseValue(dec)
 				if err != nil {
 					return nil, err
 				}
+
 				arr.Arr = append(arr.Arr, val)
 			}
+
 			if _, err := dec.Token(); err != nil { // consume ']'
 				return nil, err
 			}
+
 			return arr, nil
 		}
+
 		return nil, errInvalidJSON
 	case json.Number:
 		s := t.String()
 		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return &Value{Kind: KindInt, Int: i}, nil
 		}
+
 		f, err := strconv.ParseFloat(s, 64)
 		if err != nil {
 			return nil, errInvalidJSON
 		}
+
 		return &Value{Kind: KindFloat, Float: f}, nil
 	case string:
 		return &Value{Kind: KindString, Str: t}, nil
@@ -128,5 +145,6 @@ func parseFromToken(dec *json.Decoder, tok json.Token) (*Value, error) {
 	case nil:
 		return &Value{Kind: KindNull}, nil
 	}
+
 	return nil, errInvalidJSON
 }

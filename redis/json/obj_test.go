@@ -39,6 +39,7 @@ func TestJSON_ObjLen(t *testing.T) {
 	if got := h.run(handleJSONObjLen, "k", ".n"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("OBJLEN .n should error: %q", got)
 	}
+
 	if got := h.run(handleJSONObjLen, "k", "$.n"); !strings.Contains(got, "*1\r\n$-1") {
 		t.Fatalf("OBJLEN $.n should be [null]: %q", got)
 	}
@@ -63,6 +64,7 @@ func TestJSON_ObjKeys(t *testing.T) {
 	if got := h.run(handleJSONObjKeys, "k", ".n"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("OBJKEYS .n should error: %q", got)
 	}
+
 	if got := h.run(handleJSONObjKeys, "k", "$.n"); !strings.Contains(got, "*1\r\n*-1") {
 		t.Fatalf("OBJKEYS $.n should be [null]: %q", got)
 	}

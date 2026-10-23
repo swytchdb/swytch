@@ -55,6 +55,7 @@ func validateExpireSeconds(seconds int64) bool {
 	// Check if now + seconds*1000 would overflow
 	nowMs := time.Now().UnixMilli()
 	millis := seconds * 1000
+
 	return millis <= math.MaxInt64-nowMs
 }
 
@@ -66,6 +67,7 @@ func validateExpireMillis(millis int64) bool {
 	}
 	// Check if now + millis would overflow
 	nowMs := time.Now().UnixMilli()
+
 	return millis <= math.MaxInt64-nowMs
 }
 
@@ -79,6 +81,7 @@ func validateExpireAtSeconds(timestamp int64) bool {
 	if timestamp > maxExpireSeconds {
 		return false
 	}
+
 	return true
 }
 
@@ -106,6 +109,7 @@ func validateExpireSecondsRelative(seconds int64) bool {
 	if millis < 0 && nowMs < math.MinInt64-millis {
 		return false
 	}
+
 	return true
 }
 
@@ -121,6 +125,7 @@ func validateExpireMillisRelative(millis int64) bool {
 	if millis < 0 && nowMs < math.MinInt64-millis {
 		return false
 	}
+
 	return true
 }
 
@@ -131,6 +136,7 @@ func validateExpireAtSecondsRelative(timestamp int64) bool {
 	if timestamp > maxExpireSeconds || timestamp < -maxExpireSeconds {
 		return false
 	}
+
 	return true
 }
 
@@ -139,18 +145,21 @@ func isValidHexDigest(digest []byte) bool {
 	if len(digest) != 16 {
 		return false
 	}
+
 	for _, c := range digest {
 		//nolint:staticcheck // QF1001: De Morgan's form is less readable than "not a hex digit"
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 			return false
 		}
 	}
+
 	return true
 }
 
 // digestEquals compares a computed hash with a provided digest (case-insensitive)
 func digestEquals(hash uint64, digest []byte) bool {
 	var hashBytes [8]byte
+
 	hashBytes[0] = byte(hash >> 56)
 	hashBytes[1] = byte(hash >> 48)
 	hashBytes[2] = byte(hash >> 40)
@@ -218,6 +227,7 @@ func shouldSetExpire(newExpireMs time.Time, currentExpireMs *timestamppb.Timesta
 			// Current has no expiry (infinite), new can't be greater
 			return false
 		}
+
 		if newExpireMs.Before(currentExpireMs.AsTime()) {
 			return false
 		}
@@ -272,12 +282,16 @@ func computeLCS(a, b []byte) ([]byte, int, []lcsMatch) {
 
 	// Backtrack to build result and collect matches
 	result := make([]byte, lcsLen)
+
 	var matches []lcsMatch
+
 	i, j, k := m, n, lcsLen-1
 
 	// Track current match range
-	var inMatch bool
-	var matchEnd1, matchEnd2 int64
+	var (
+		inMatch              bool
+		matchEnd1, matchEnd2 int64
+	)
 
 	for i > 0 && j > 0 {
 		if a[i-1] == b[j-1] {

@@ -59,6 +59,7 @@ func sqliteAffinity(declType string) string {
 		strings.Contains(upper, "DOUB"):
 		return affinityReal
 	}
+
 	return affinityNumeric
 }
 
@@ -86,6 +87,7 @@ func setEncodedValue(eff *pb.DataEffect, v sqlite.Value) bool {
 	default:
 		return false
 	}
+
 	return true
 }
 
@@ -96,7 +98,8 @@ func decodeValue(eff *pb.DataEffect, affinity string) sqlite.Value {
 	if eff == nil || eff.Value == nil {
 		return sqlite.Value{}
 	}
-	switch v := eff.Value.(type) {
+
+	switch v := eff.GetValue().(type) {
 	case *pb.DataEffect_IntVal:
 		return sqlite.IntegerValue(v.IntVal)
 	case *pb.DataEffect_FloatVal:
@@ -105,8 +108,10 @@ func decodeValue(eff *pb.DataEffect, affinity string) sqlite.Value {
 		if affinity == affinityBlob {
 			return sqlite.BlobValue(v.Raw)
 		}
+
 		return sqlite.TextValue(string(v.Raw))
 	}
+
 	return sqlite.Value{}
 }
 
@@ -126,6 +131,7 @@ func encodePK(values []sqlite.Value, affinities []string) (string, error) {
 	if len(values) != len(affinities) {
 		return "", fmt.Errorf("encodePK: %d values for %d affinities", len(values), len(affinities))
 	}
+
 	if len(values) == 1 {
 		switch affinities[0] {
 		case affinityInteger, affinityReal:
@@ -138,10 +144,12 @@ func encodePK(values []sqlite.Value, affinities []string) (string, error) {
 			return values[0].Text(), nil
 		}
 	}
+
 	var buf []byte
 	for i, v := range values {
 		buf = append(buf, encodeTupleComponent(v, affinities[i])...)
 	}
+
 	return string(buf), nil
 }
 
@@ -151,7 +159,9 @@ func decodePK(pk string, affinities []string) []sqlite.Value {
 	if len(affinities) == 1 {
 		return []sqlite.Value{decodeSinglePK(pk, affinities[0])}
 	}
+
 	out := make([]sqlite.Value, 0, len(affinities))
+
 	buf := []byte(pk)
 	for _, aff := range affinities {
 		val, rest, ok := decodeTupleComponent(buf, aff)
@@ -160,11 +170,14 @@ func decodePK(pk string, affinities []string) []sqlite.Value {
 			for len(out) < len(affinities) {
 				out = append(out, sqlite.Value{})
 			}
+
 			return out
 		}
+
 		out = append(out, val)
 		buf = rest
 	}
+
 	return out
 }
 
@@ -176,18 +189,22 @@ func decodeSinglePK(pk, affinity string) sqlite.Value {
 		if len(pk) != 8 {
 			return sqlite.TextValue(pk)
 		}
+
 		u := binary.BigEndian.Uint64([]byte(pk)) ^ (1 << 63)
+
 		return sqlite.IntegerValue(int64(u))
 	case affinityReal:
 		if len(pk) != 8 {
 			return sqlite.TextValue(pk)
 		}
+
 		bits := binary.BigEndian.Uint64([]byte(pk))
 		if bits&(1<<63) != 0 {
 			bits ^= 1 << 63
 		} else {
 			bits = ^bits
 		}
+
 		return sqlite.FloatValue(math.Float64frombits(bits))
 	case affinityBlob:
 		return sqlite.BlobValue([]byte(pk))
@@ -231,33 +248,40 @@ func decodeTupleComponent(buf []byte, affinity string) (sqlite.Value, []byte, bo
 		if len(buf) < 8 {
 			return sqlite.Value{}, nil, false
 		}
+
 		u := binary.BigEndian.Uint64(buf[:8]) ^ (1 << 63)
+
 		return sqlite.IntegerValue(int64(u)), buf[8:], true
 	case affinityReal:
 		if len(buf) < 8 {
 			return sqlite.Value{}, nil, false
 		}
+
 		bits := binary.BigEndian.Uint64(buf[:8])
 		if bits&(1<<63) != 0 {
 			bits ^= 1 << 63
 		} else {
 			bits = ^bits
 		}
+
 		return sqlite.FloatValue(math.Float64frombits(bits)), buf[8:], true
 	case affinityText, affinityBlob:
 		raw, rest, ok := decodeTupleBytes(buf)
 		if !ok {
 			return sqlite.Value{}, nil, false
 		}
+
 		if affinity == affinityBlob {
 			return sqlite.BlobValue(raw), rest, true
 		}
+
 		return sqlite.TextValue(string(raw)), rest, true
 	default:
 		raw, rest, ok := decodeTupleBytes(buf)
 		if !ok {
 			return sqlite.Value{}, nil, false
 		}
+
 		return sqlite.TextValue(string(raw)), rest, true
 	}
 }
@@ -269,10 +293,13 @@ func encodeTupleBytes(raw []byte) []byte {
 	for _, b := range raw {
 		if b == 0x00 {
 			out = append(out, 0x00, 0x01)
+
 			continue
 		}
+
 		out = append(out, b)
 	}
+
 	return append(out, 0x00, 0x00)
 }
 
@@ -284,11 +311,14 @@ func decodeTupleBytes(buf []byte) (raw []byte, rest []byte, ok bool) {
 		b := buf[i]
 		if b != 0x00 {
 			out = append(out, b)
+
 			continue
 		}
+
 		if i+1 >= len(buf) {
 			return nil, nil, false
 		}
+
 		next := buf[i+1]
 		switch next {
 		case 0x00:
@@ -300,6 +330,7 @@ func decodeTupleBytes(buf []byte) (raw []byte, rest []byte, ok bool) {
 			return nil, nil, false
 		}
 	}
+
 	return nil, nil, false
 }
 
@@ -313,10 +344,12 @@ func encodeIndexKeyTuple(vals []sqlite.Value, affinities []string) []byte {
 	if len(vals) == 1 {
 		return encodeIndexValue(vals[0], affinities[0])
 	}
+
 	var buf []byte
 	for i, v := range vals {
 		buf = append(buf, encodeTupleComponent(v, affinities[i])...)
 	}
+
 	return buf
 }
 
@@ -329,16 +362,20 @@ func encodeIndexKeyPrefix(vals []sqlite.Value, affinities []string, prefixCount 
 	if prefixCount <= 0 {
 		return nil
 	}
+
 	if prefixCount > len(vals) {
 		prefixCount = len(vals)
 	}
+
 	if prefixCount == 1 && len(affinities) == 1 {
 		return encodeIndexValue(vals[0], affinities[0])
 	}
+
 	var buf []byte
 	for i := 0; i < prefixCount; i++ {
 		buf = append(buf, encodeTupleComponent(vals[i], affinities[i])...)
 	}
+
 	return buf
 }
 
@@ -369,6 +406,7 @@ func encodeIndexValue(v sqlite.Value, affinity string) []byte {
 	case affinityInteger:
 		buf := make([]byte, 8)
 		binary.BigEndian.PutUint64(buf, uint64(v.Int64())^(1<<63))
+
 		return buf
 	case affinityReal:
 		bits := math.Float64bits(v.Float())
@@ -380,8 +418,10 @@ func encodeIndexValue(v sqlite.Value, affinity string) []byte {
 			// positives sort above flipped-negatives.
 			bits ^= 1 << 63
 		}
+
 		buf := make([]byte, 8)
 		binary.BigEndian.PutUint64(buf, bits)
+
 		return buf
 	case affinityText:
 		return []byte(v.Text())

@@ -38,10 +38,12 @@ func TestInsertAndSelect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
+
 	affected, err := result.RowsAffected()
 	if err != nil {
 		t.Fatalf("rows affected: %v", err)
 	}
+
 	if affected != 1 {
 		t.Errorf("affected=%d, want 1", affected)
 	}
@@ -75,14 +77,18 @@ func TestInsertAndSelect(t *testing.T) {
 		Name string
 		Age  int64
 	}
+
 	var got []user
+
 	for rows.Next() {
 		var u user
 		if err := rows.Scan(&u.ID, &u.Name, &u.Age); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		got = append(got, u)
 	}
+
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows err: %v", err)
 	}
@@ -91,6 +97,7 @@ func TestInsertAndSelect(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("got %d rows, want %d: %v", len(got), len(want), got)
 	}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d: got %+v, want %+v", i, got[i], want[i])
@@ -109,20 +116,25 @@ func TestUpdateSamePK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		t.Fatalf("rows affected: %v", err)
 	}
+
 	if affected != 1 {
 		t.Errorf("affected=%d, want 1", affected)
 	}
 
-	var name string
-	var age int64
+	var (
+		name string
+		age  int64
+	)
 	if err := db.QueryRowContext(ctx,
 		"SELECT name, age FROM t WHERE id = 1").Scan(&name, &age); err != nil {
 		t.Fatalf("select: %v", err)
 	}
+
 	if name != "Alice" || age != 30 {
 		t.Errorf("got (%q, %d), want (Alice, 30)", name, age)
 	}
@@ -143,6 +155,7 @@ func TestUpdateToNull(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT label FROM t WHERE id = 1").Scan(&label); err != nil {
 		t.Fatalf("select: %v", err)
 	}
+
 	if label.Valid {
 		t.Errorf("got %+v, want NULL", label)
 	}
@@ -164,6 +177,7 @@ func TestUpdateChangingPK(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t WHERE id = 1").Scan(&count); err != nil {
 		t.Fatalf("count old: %v", err)
 	}
+
 	if count != 0 {
 		t.Errorf("old row still present: count=%d", count)
 	}
@@ -173,6 +187,7 @@ func TestUpdateChangingPK(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT name FROM t WHERE id = 99").Scan(&name); err != nil {
 		t.Fatalf("select new: %v", err)
 	}
+
 	if name != "alice" {
 		t.Errorf("name=%q, want alice", name)
 	}
@@ -183,6 +198,7 @@ func TestDeleteOneRow(t *testing.T) {
 	ctx := context.Background()
 
 	mustExec(t, db, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+
 	for i, n := range []string{"alice", "bob", "carol"} {
 		if _, err := db.ExecContext(ctx,
 			"INSERT INTO t VALUES ($1, $2)", i+1, n); err != nil {
@@ -194,10 +210,12 @@ func TestDeleteOneRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		t.Fatalf("rows affected: %v", err)
 	}
+
 	if affected != 1 {
 		t.Errorf("affected=%d, want 1", affected)
 	}
@@ -214,18 +232,25 @@ func TestDeleteOneRow(t *testing.T) {
 	}()
 
 	var got [][2]any
+
 	for rows.Next() {
-		var id int64
-		var name string
+		var (
+			id   int64
+			name string
+		)
 		if err := rows.Scan(&id, &name); err != nil {
 			t.Fatal(err)
 		}
+
 		got = append(got, [2]any{id, name})
 	}
+
 	want := [][2]any{{int64(1), "alice"}, {int64(3), "carol"}}
+
 	if len(got) != 2 {
 		t.Fatalf("got %d rows, want 2: %v", len(got), got)
 	}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d: got %v, want %v", i, got[i], want[i])
@@ -245,10 +270,12 @@ func TestDeleteAllRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
+
 	affected, err := res.RowsAffected()
 	if err != nil {
 		t.Fatalf("rows affected: %v", err)
 	}
+
 	if affected != 2 {
 		t.Errorf("affected=%d, want 2", affected)
 	}
@@ -257,6 +284,7 @@ func TestDeleteAllRows(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
+
 	if count != 0 {
 		t.Errorf("count=%d, want 0", count)
 	}
@@ -283,6 +311,7 @@ func TestInsertCrossSessionVisibility(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := connA.ExecContext(ctx, "INSERT INTO t VALUES (1, 'hello')"); err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +335,7 @@ func TestInsertCrossSessionVisibility(t *testing.T) {
 		"SELECT v FROM t WHERE id = 1").Scan(&v); err != nil {
 		t.Fatalf("select on fresh session: %v", err)
 	}
+
 	if v != "hello" {
 		t.Errorf("v=%q, want hello", v)
 	}
@@ -313,6 +343,7 @@ func TestInsertCrossSessionVisibility(t *testing.T) {
 
 func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 	t.Helper()
+
 	if _, err := db.Exec(query, args...); err != nil {
 		t.Fatalf("%s: %v", query, err)
 	}
@@ -332,6 +363,7 @@ func TestDropTableRemovesAllState(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
+
 	if count != 3 {
 		t.Fatalf("pre-drop count=%d, want 3", count)
 	}
@@ -347,9 +379,11 @@ func TestDropTableRemovesAllState(t *testing.T) {
 
 	// Recreate with the same name, should not inherit old data.
 	mustExec(t, db, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count after recreate: %v", err)
 	}
+
 	if count != 0 {
 		t.Errorf("post-recreate count=%d, want 0", count)
 	}
@@ -387,6 +421,7 @@ func TestTextPKWithSlash(t *testing.T) {
 		"SELECT size FROM paths WHERE p = 'a/b/c'").Scan(&size); err != nil {
 		t.Fatalf("lookup 'a/b/c': %v", err)
 	}
+
 	if size != 42 {
 		t.Errorf("size=%d, want 42", size)
 	}
@@ -395,6 +430,7 @@ func TestTextPKWithSlash(t *testing.T) {
 		"SELECT size FROM paths WHERE p = '/leading/slash'").Scan(&size); err != nil {
 		t.Fatalf("lookup '/leading/slash': %v", err)
 	}
+
 	if size != 1 {
 		t.Errorf("size=%d, want 1", size)
 	}
@@ -404,6 +440,7 @@ func TestTextPKWithSlash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
+
 	if n, _ := res.RowsAffected(); n != 1 {
 		t.Errorf("affected=%d, want 1", n)
 	}
@@ -418,17 +455,22 @@ func TestTextPKWithSlash(t *testing.T) {
 			t.Errorf("rows close: %v", err)
 		}
 	}()
+
 	var got []string
+
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
 			t.Fatal(err)
 		}
+
 		got = append(got, p)
 	}
+
 	if len(got) != 2 {
 		t.Errorf("got %v, want 2 rows", got)
 	}
+
 	for _, p := range got {
 		if p == "a/b" {
 			t.Errorf("'a/b' still present after DELETE")
@@ -454,6 +496,7 @@ func TestTextIndexWithSlash(t *testing.T) {
 		"SELECT id FROM t WHERE path = '/a/b'").Scan(&id); err != nil {
 		t.Fatalf("equality: %v", err)
 	}
+
 	if id != 1 {
 		t.Errorf("id=%d, want 1", id)
 	}
@@ -481,6 +524,7 @@ func TestPKChangeUpdateIsTransactional(t *testing.T) {
 		"SELECT name, note FROM t WHERE id = 99").Scan(&name, &note); err != nil {
 		t.Fatalf("select new row: %v", err)
 	}
+
 	if name != "alice" || note != "first" {
 		t.Errorf("carry-over failed: name=%q note=%q, want alice/first", name, note)
 	}
@@ -490,6 +534,7 @@ func TestPKChangeUpdateIsTransactional(t *testing.T) {
 		"SELECT COUNT(*) FROM t WHERE id = 1").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
+
 	if count != 0 {
 		t.Errorf("old row still present: count=%d", count)
 	}

@@ -93,6 +93,7 @@ func (r *ClientRegistry) Unregister(conn *shared.Connection) {
 func (r *ClientRegistry) GetByConn(conn *shared.Connection) *ClientInfo {
 	token := r.mu.RLock()
 	defer r.mu.RUnlock(token)
+
 	return r.byConn[conn]
 }
 
@@ -110,6 +111,7 @@ func buildFlags(info *ClientInfo) string {
 	if info.Conn != nil && info.Conn.IsBlocked() {
 		flags = "b"
 	}
+
 	if info.Conn != nil {
 		if info.Conn.InTransaction {
 			if flags == "N" {
@@ -118,6 +120,7 @@ func buildFlags(info *ClientInfo) string {
 				flags += "x"
 			}
 		}
+
 		if info.Conn.TxnAborted {
 			if flags == "N" {
 				flags = "d"
@@ -126,6 +129,7 @@ func buildFlags(info *ClientInfo) string {
 			}
 		}
 	}
+
 	return flags
 }
 
@@ -135,6 +139,7 @@ func (r *ClientRegistry) FormatClientList() string {
 	defer r.mu.RUnlock(token)
 
 	var sb strings.Builder
+
 	now := time.Now()
 
 	for _, info := range r.clients {
@@ -158,6 +163,7 @@ func (r *ClientRegistry) FormatClientList() string {
 		// Number of queued commands in MULTI
 		multi := -1
 		watch := 0
+
 		if info.Conn != nil && info.Conn.InTransaction {
 			multi = len(info.Conn.QueuedCmds)
 			watch = len(info.Conn.WatchedKeys)
@@ -174,6 +180,7 @@ func (r *ClientRegistry) FormatClientList() string {
 func (r *ClientRegistry) Count() int {
 	token := r.mu.RLock()
 	defer r.mu.RUnlock(token)
+
 	return len(r.clients)
 }
 
@@ -183,11 +190,13 @@ func (r *ClientRegistry) CountBlocked() int {
 	defer r.mu.RUnlock(token)
 
 	count := 0
+
 	for _, info := range r.clients {
 		if info.Conn != nil && info.Conn.IsBlocked() {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -214,6 +223,7 @@ func (r *ClientRegistry) formatClientInfo(info *ClientInfo) string {
 	// Number of queued commands in MULTI
 	multi := -1
 	watch := 0
+
 	if info.Conn != nil && info.Conn.InTransaction {
 		multi = len(info.Conn.QueuedCmds)
 		watch = len(info.Conn.WatchedKeys)
@@ -227,6 +237,7 @@ func (r *ClientRegistry) formatClientInfo(info *ClientInfo) string {
 func (r *ClientRegistry) GetByID(id int64) *ClientInfo {
 	token := r.mu.RLock()
 	defer r.mu.RUnlock(token)
+
 	return r.clients[id]
 }
 

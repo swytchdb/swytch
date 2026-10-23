@@ -32,13 +32,16 @@ import (
 func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("hscan")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	cursor, ok := shared.ParseUint64(cmd.Args[1])
 	if !ok {
 		w.WriteError("ERR invalid cursor")
+
 		return
 	}
 
@@ -55,8 +58,10 @@ func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			c, ok := shared.ParseInt64(cmd.Args[i+1])
 			if !ok || c <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			count = int(c)
 		case "NOVALUES":
 			// Not implemented yet
@@ -70,24 +75,30 @@ func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			// Return empty result with cursor 0
 			w.WriteArray(2)
 			w.WriteBulkStringStr("0")
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Get all matching fields from snapshot
 		var matchedFields []string
+
 		if snap.NetAdds != nil {
-			for field := range snap.NetAdds {
+			for field := range snap.GetNetAdds() {
 				if crdt.MatchGlobPattern(field, pattern) {
 					matchedFields = append(matchedFields, field)
 				}
@@ -104,6 +115,7 @@ func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			w.WriteArray(2)
 			w.WriteBulkStringStr("0")
 			w.WriteArray(0)
+
 			return
 		}
 
@@ -122,18 +134,21 @@ func handleHScan(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		w.WriteArray(2)
 		w.WriteBulkStringStr(nextCursor)
 		w.WriteArray(len(fields) * 2) // field-value pairs
+
 		for _, field := range fields {
 			w.WriteBulkStringStr(field)
 			fieldVal, _ := hashFieldValue(snap, field)
 			w.WriteBulkString(fieldVal)
 		}
 	}
+
 	return
 }
 
 func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 3 {
 		w.WriteWrongNumArguments("hrandfield")
+
 		return
 	}
 
@@ -145,24 +160,30 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 	if len(cmd.Args) >= 2 {
 		returnArray = true
+
 		c, ok := shared.ParseInt64(cmd.Args[1])
 		if !ok {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
 		// Check for overflow: reject values outside 32-bit range
 		if c > 2147483647 || c < -2147483647 {
 			w.WriteError("ERR value is out of range")
+
 			return
 		}
+
 		count = c
 	}
 
 	if len(cmd.Args) == 3 {
 		if strings.ToUpper(string(cmd.Args[2])) != "WITHVALUES" {
 			w.WriteSyntaxError()
+
 			return
 		}
+
 		withValues = true
 	}
 
@@ -173,25 +194,31 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if returnArray {
 				w.WriteArray(0)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Collect fields from snapshot
 		var fields []string
+
 		if snap.NetAdds != nil {
-			for field := range snap.NetAdds {
+			for field := range snap.GetNetAdds() {
 				fields = append(fields, field)
 			}
 		}
@@ -202,6 +229,7 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
@@ -212,13 +240,16 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 				// Fisher-Yates shuffle to get random selection
 				shuffled := make([]string, len(fields))
 				copy(shuffled, fields)
+
 				for i := len(shuffled) - 1; i > 0; i-- {
 					j := rand.IntN(i + 1)
 					shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 				}
+
 				if withValues {
 					if w.Protocol() == shared.RESP3 {
 						w.WriteArray(n)
+
 						for i := range n {
 							w.WriteArray(2)
 							w.WriteBulkStringStr(shuffled[i])
@@ -227,6 +258,7 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 						}
 					} else {
 						w.WriteArray(n * 2)
+
 						for i := range n {
 							w.WriteBulkStringStr(shuffled[i])
 							fieldVal, _ := hashFieldValue(snap, shuffled[i])
@@ -235,6 +267,7 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 					}
 				} else {
 					w.WriteArray(n)
+
 					for i := range n {
 						w.WriteBulkStringStr(shuffled[i])
 					}
@@ -242,11 +275,14 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			} else {
 				// Negative count: return |count| fields with possible repeats
 				absCount := int(-count)
+
 				if withValues {
 					if w.Protocol() == shared.RESP3 {
 						w.WriteArray(absCount)
+
 						for range absCount {
 							idx := rand.IntN(len(fields))
+
 							w.WriteArray(2)
 							w.WriteBulkStringStr(fields[idx])
 							fieldVal, _ := hashFieldValue(snap, fields[idx])
@@ -254,6 +290,7 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 						}
 					} else {
 						w.WriteArray(absCount * 2)
+
 						for range absCount {
 							idx := rand.IntN(len(fields))
 							w.WriteBulkStringStr(fields[idx])
@@ -263,6 +300,7 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 					}
 				} else {
 					w.WriteArray(absCount)
+
 					for range absCount {
 						idx := rand.IntN(len(fields))
 						w.WriteBulkStringStr(fields[idx])
@@ -275,5 +313,6 @@ func handleHRandField(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			w.WriteBulkStringStr(fields[idx])
 		}
 	}
+
 	return
 }

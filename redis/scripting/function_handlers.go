@@ -37,6 +37,7 @@ const (
 func (e *Engine) HandleFunction(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("function")
+
 		return
 	}
 
@@ -69,11 +70,13 @@ func (e *Engine) HandleFunction(cmd *shared.Command, w *shared.Writer) {
 func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("function load")
+
 		return
 	}
 
@@ -85,8 +88,10 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 	if strings.ToUpper(string(cmd.Args[1])) == optionReplace {
 		replace = true
 		codeIdx = 2
+
 		if len(cmd.Args) < 3 {
 			w.WriteWrongNumArguments("function load")
+
 			return
 		}
 	}
@@ -97,12 +102,14 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 	engine, libName, err := parseShebang(code)
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 
 	// Check if library already exists and REPLACE was not specified
 	if !replace && e.functionRegistry.GetLibrary(libName) != nil {
 		w.WriteError("ERR Library '" + libName + "' already exists")
+
 		return
 	}
 
@@ -132,18 +139,21 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 		} else {
 			w.WriteError("ERR Error loading library: " + err.Error())
 		}
+
 		return
 	}
 
 	// Check for errors during registration
 	if loadCtx.Error != "" {
 		w.WriteError(loadCtx.Error)
+
 		return
 	}
 
 	// Check that at least one function was registered
 	if len(loadCtx.Functions) == 0 {
 		w.WriteError("ERR No functions registered in library")
+
 		return
 	}
 
@@ -158,6 +168,7 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 	// Load into registry
 	if err := e.functionRegistry.Load(lib, replace); err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 
@@ -170,11 +181,13 @@ func (e *Engine) handleFunctionLoad(cmd *shared.Command, w *shared.Writer) {
 func (e *Engine) handleFunctionDelete(cmd *shared.Command, w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("function delete")
+
 		return
 	}
 
@@ -182,6 +195,7 @@ func (e *Engine) handleFunctionDelete(cmd *shared.Command, w *shared.Writer) {
 
 	if !e.functionRegistry.Delete(libName) {
 		w.WriteError("ERR Library not found")
+
 		return
 	}
 
@@ -193,6 +207,7 @@ func (e *Engine) handleFunctionDelete(cmd *shared.Command, w *shared.Writer) {
 func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
@@ -206,8 +221,10 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 		case "LIBRARYNAME":
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			pattern = string(cmd.Args[i+1])
 			i++
 		case "WITHCODE":
@@ -219,12 +236,14 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 
 	// Write array of libraries
 	w.WriteArray(len(libraries))
+
 	for _, lib := range libraries {
 		// Each library is a map with: library_name, engine, functions, [library_code]
 		numFields := 3 // library_name, engine, functions
 		if withCode {
 			numFields = 4
 		}
+
 		w.WriteMap(numFields)
 
 		w.WriteBulkStringStr("library_name")
@@ -236,6 +255,7 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 		w.WriteBulkStringStr("functions")
 		// Write array of functions
 		w.WriteArray(len(lib.Functions))
+
 		for _, fn := range lib.Functions {
 			// Each function has: name, description, flags
 			w.WriteMap(3)
@@ -244,6 +264,7 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 			w.WriteBulkStringStr(fn.Name)
 
 			w.WriteBulkStringStr("description")
+
 			if fn.Description != "" {
 				w.WriteBulkStringStr(fn.Description)
 			} else {
@@ -252,6 +273,7 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 
 			w.WriteBulkStringStr("flags")
 			w.WriteArray(len(fn.Flags))
+
 			for _, flag := range fn.Flags {
 				w.WriteBulkStringStr(flag)
 			}
@@ -269,6 +291,7 @@ func (e *Engine) handleFunctionList(cmd *shared.Command, w *shared.Writer) {
 func (e *Engine) handleFunctionFlush(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
@@ -281,6 +304,7 @@ func (e *Engine) handleFunctionFlush(w *shared.Writer) {
 func (e *Engine) handleFunctionStats(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
@@ -291,6 +315,7 @@ func (e *Engine) handleFunctionStats(w *shared.Writer) {
 
 	// running_script - information about currently running script
 	w.WriteBulkStringStr("running_script")
+
 	if sc != nil {
 		// Return info about running script
 		w.WriteMap(2)
@@ -319,6 +344,7 @@ func (e *Engine) handleFunctionKill(w *shared.Writer) {
 	sc := e.runningScript.Load()
 	if sc == nil {
 		w.WriteError("NOTBUSY No scripts in execution right now.")
+
 		return
 	}
 
@@ -331,6 +357,7 @@ func (e *Engine) handleFunctionKill(w *shared.Writer) {
 func (e *Engine) handleFunctionDump(w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
@@ -340,16 +367,19 @@ func (e *Engine) handleFunctionDump(w *shared.Writer) {
 	if len(libraries) == 0 {
 		// Empty dump - return empty bulk string
 		w.WriteBulkStringStr("")
+
 		return
 	}
 
 	// Simple serialization format: JSON-like string representation
 	// In a real implementation, this would be a binary format
 	var dump strings.Builder
+
 	for i, lib := range libraries {
 		if i > 0 {
 			dump.WriteString("\n---\n")
 		}
+
 		dump.WriteString(lib.Source)
 	}
 
@@ -361,11 +391,13 @@ func (e *Engine) handleFunctionDump(w *shared.Writer) {
 func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("function restore")
+
 		return
 	}
 
@@ -385,6 +417,7 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 		// REPLACE: overwrite existing libraries
 	default:
 		w.WriteError("ERR invalid restore policy")
+
 		return
 	}
 
@@ -402,6 +435,7 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 		engine, libName, err := parseShebang(source)
 		if err != nil {
 			w.WriteError("ERR " + err.Error())
+
 			return
 		}
 
@@ -426,11 +460,13 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 		// Execute the library code
 		if err := L.DoString(luaCode); err != nil {
 			e.luaVMPool.Put(L)
+
 			if loadCtx.Error != "" {
 				w.WriteError(loadCtx.Error)
 			} else {
 				w.WriteError("ERR Error loading library: " + err.Error())
 			}
+
 			return
 		}
 
@@ -438,11 +474,13 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 
 		if loadCtx.Error != "" {
 			w.WriteError(loadCtx.Error)
+
 			return
 		}
 
 		if len(loadCtx.Functions) == 0 {
 			w.WriteError("ERR No functions registered in library")
+
 			return
 		}
 
@@ -456,6 +494,7 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 
 		if err := e.functionRegistry.Load(lib, replace); err != nil {
 			w.WriteError("ERR " + err.Error())
+
 			return
 		}
 	}
@@ -468,6 +507,7 @@ func (e *Engine) handleFunctionRestore(cmd *shared.Command, w *shared.Writer) {
 func (e *Engine) HandleFcall(cmd *shared.Command, w *shared.Writer, conn *shared.Connection, db *shared.Database, readOnly bool) {
 	if e.functionRegistry == nil {
 		w.WriteError("ERR function support not initialized")
+
 		return
 	}
 
@@ -477,6 +517,7 @@ func (e *Engine) HandleFcall(cmd *shared.Command, w *shared.Writer, conn *shared
 		} else {
 			w.WriteWrongNumArguments("fcall")
 		}
+
 		return
 	}
 
@@ -486,16 +527,20 @@ func (e *Engine) HandleFcall(cmd *shared.Command, w *shared.Writer, conn *shared
 	numKeys, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteError("ERR value is not an integer or out of range")
+
 		return
 	}
+
 	if numKeys < 0 {
 		w.WriteError("ERR Number of keys can't be negative")
+
 		return
 	}
 
 	// Validate argument count
 	if len(cmd.Args) < 2+int(numKeys) {
 		w.WriteError("ERR Number of keys can't be greater than number of args")
+
 		return
 	}
 
@@ -503,6 +548,7 @@ func (e *Engine) HandleFcall(cmd *shared.Command, w *shared.Writer, conn *shared
 	funcDef, lib := e.functionRegistry.GetFunction(funcName)
 	if funcDef == nil || lib == nil {
 		w.WriteError("ERR Function not found")
+
 		return
 	}
 
@@ -532,8 +578,11 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 
 	// Create context with timeout (or cancel-only when timeout is 0)
 	timeout := e.getScriptTimeout()
-	var ctx context.Context
-	var cancel context.CancelFunc
+
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	} else {
@@ -578,13 +627,18 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 	if err := L.DoString(luaCode); err != nil {
 		if sc.killed.Load() {
 			w.WriteError("ERR Script killed by user with FUNCTION KILL")
+
 			return
 		}
+
 		if ctx.Err() != nil {
 			w.WriteError("ERR Script timed out")
+
 			return
 		}
+
 		w.WriteError("ERR Error loading library: " + err.Error())
+
 		return
 	}
 
@@ -594,9 +648,11 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 
 	// Look up the function
 	funcVal := L.GetGlobal("__func_" + funcName)
+
 	fn, ok := funcVal.(*lua.LFunction)
 	if !ok {
 		w.WriteError("ERR Function not found in library")
+
 		return
 	}
 
@@ -611,10 +667,13 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 	}, keysTbl, argvTbl); err != nil {
 		if sc.killed.Load() {
 			w.WriteError("ERR Script killed by user with FUNCTION KILL")
+
 			return
 		}
+
 		if ctx.Err() != nil {
 			w.WriteError("ERR Script timed out")
+
 			return
 		}
 		// Extract just the first line of the error (RESP errors must be single-line)
@@ -627,6 +686,7 @@ func (e *Engine) executeFunction(funcName, libSource string, keys, args []string
 		// Check if this is a Redis error that should be returned directly
 		errMsg = extractRedisError(errMsg)
 		w.WriteError(errMsg)
+
 		return
 	}
 
@@ -644,6 +704,7 @@ func translateLuaError(errMsg string) string {
 	if strings.Contains(errMsg, "registry overflow") {
 		return strings.Replace(errMsg, "registry overflow", "too many results to unpack", 1)
 	}
+
 	return errMsg
 }
 

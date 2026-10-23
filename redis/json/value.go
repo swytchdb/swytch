@@ -73,6 +73,7 @@ func (v *Value) TypeName() string {
 	case KindObject:
 		return "object"
 	}
+
 	return "null"
 }
 
@@ -88,6 +89,7 @@ func (v *Value) objIndex(key string) int {
 			return i
 		}
 	}
+
 	return -1
 }
 
@@ -96,6 +98,7 @@ func (v *Value) objGet(key string) (*Value, bool) {
 	if i := v.objIndex(key); i >= 0 {
 		return v.Obj[i].Val, true
 	}
+
 	return nil, false
 }
 
@@ -104,8 +107,10 @@ func (v *Value) objGet(key string) (*Value, bool) {
 func (v *Value) objSet(key string, val *Value) {
 	if i := v.objIndex(key); i >= 0 {
 		v.Obj[i].Val = val
+
 		return
 	}
+
 	v.Obj = append(v.Obj, Member{Key: key, Val: val})
 }
 
@@ -113,8 +118,10 @@ func (v *Value) objSet(key string, val *Value) {
 func (v *Value) objDelete(key string) bool {
 	if i := v.objIndex(key); i >= 0 {
 		v.Obj = append(v.Obj[:i], v.Obj[i+1:]...)
+
 		return true
 	}
+
 	return false
 }
 
@@ -123,6 +130,7 @@ func (v *Value) DeepCopy() *Value {
 	if v == nil {
 		return nil
 	}
+
 	c := &Value{Kind: v.Kind, Bool: v.Bool, Int: v.Int, Float: v.Float, Str: v.Str}
 	if v.Arr != nil {
 		c.Arr = make([]*Value, len(v.Arr))
@@ -130,12 +138,14 @@ func (v *Value) DeepCopy() *Value {
 			c.Arr[i] = e.DeepCopy()
 		}
 	}
+
 	if v.Obj != nil {
 		c.Obj = make([]Member, len(v.Obj))
 		for i, m := range v.Obj {
 			c.Obj[i] = Member{Key: m.Key, Val: m.Val.DeepCopy()}
 		}
 	}
+
 	return c
 }
 

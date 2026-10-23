@@ -29,7 +29,13 @@ import (
 func TestBZPopMinNonBlocking(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.InScript = true; return c }()
+
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.InScript = true
+
+		return c
+	}()
 
 	// Seed the sorted set with members: a=1, b=2, c=3
 	buf := &bytes.Buffer{}
@@ -38,12 +44,14 @@ func TestBZPopMinNonBlocking(t *testing.T) {
 		[]byte("bzpopmin_key"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 	}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != ":3\r\n" {
 		t.Fatalf("ZADD seed got %q, want %q", got, ":3\r\n")
 	}
 
 	// BZPOPMIN should pop the minimum element (a with score 1)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZPopMin, Args: [][]byte{[]byte("bzpopmin_key"), []byte("0")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -54,6 +62,7 @@ func TestBZPopMinNonBlocking(t *testing.T) {
 
 	// BZPOPMIN on an empty/non-existent key should return null array
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZPopMin, Args: [][]byte{[]byte("bzpopmin_empty"), []byte("0")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -66,7 +75,13 @@ func TestBZPopMinNonBlocking(t *testing.T) {
 func TestBZPopMaxNonBlocking(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.InScript = true; return c }()
+
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.InScript = true
+
+		return c
+	}()
 
 	// Seed the sorted set with members: x=10, y=20, z=30
 	buf := &bytes.Buffer{}
@@ -75,12 +90,14 @@ func TestBZPopMaxNonBlocking(t *testing.T) {
 		[]byte("bzpopmax_key"), []byte("10"), []byte("x"), []byte("20"), []byte("y"), []byte("30"), []byte("z"),
 	}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != ":3\r\n" {
 		t.Fatalf("ZADD seed got %q, want %q", got, ":3\r\n")
 	}
 
 	// BZPOPMAX should pop the maximum element (z with score 30)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZPopMax, Args: [][]byte{[]byte("bzpopmax_key"), []byte("0")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -91,6 +108,7 @@ func TestBZPopMaxNonBlocking(t *testing.T) {
 
 	// BZPOPMAX on an empty/non-existent key should return null array
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZPopMax, Args: [][]byte{[]byte("bzpopmax_empty"), []byte("0")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -103,7 +121,13 @@ func TestBZPopMaxNonBlocking(t *testing.T) {
 func TestBZMPopNonBlocking(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.InScript = true; return c }()
+
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.InScript = true
+
+		return c
+	}()
 
 	// Seed the sorted set with members: m1=5, m2=10, m3=15
 	buf := &bytes.Buffer{}
@@ -112,12 +136,14 @@ func TestBZMPopNonBlocking(t *testing.T) {
 		[]byte("bzmpop_key"), []byte("5"), []byte("m1"), []byte("10"), []byte("m2"), []byte("15"), []byte("m3"),
 	}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != ":3\r\n" {
 		t.Fatalf("ZADD seed got %q, want %q", got, ":3\r\n")
 	}
 
 	// BZMPOP 0 1 bzmpop_key MIN should pop the minimum element (m1 with score 5)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZMPop, Args: [][]byte{
 		[]byte("0"), []byte("1"), []byte("bzmpop_key"), []byte("MIN"),
 	}}
@@ -131,6 +157,7 @@ func TestBZMPopNonBlocking(t *testing.T) {
 
 	// BZMPOP on an empty/non-existent key should return null array
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBZMPop, Args: [][]byte{
 		[]byte("0"), []byte("1"), []byte("bzmpop_empty"), []byte("MIN"),
 	}}

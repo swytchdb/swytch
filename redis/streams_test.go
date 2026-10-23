@@ -38,6 +38,7 @@ func execStreamCmd(h *Handler, conn *shared.Connection, cmdStr string) string {
 	}
 
 	cmdType := shared.ParseCommandType([]byte(parts[0]))
+
 	args := make([][]byte, len(parts)-1)
 	for i := 1; i < len(parts); i++ {
 		args[i-1] = []byte(parts[i])
@@ -47,6 +48,7 @@ func execStreamCmd(h *Handler, conn *shared.Connection, cmdStr string) string {
 	w := shared.NewWriter(buf)
 	cmd := &shared.Command{Type: cmdType, Args: args}
 	h.ExecuteInto(cmd, w, conn)
+
 	return buf.String()
 }
 
@@ -57,10 +59,17 @@ func TestXReadBlock(t *testing.T) {
 	defer h.Close()
 
 	ctx := context.Background()
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
 
-	var wg sync.WaitGroup
-	var result string
+		return c
+	}()
+
+	var (
+		wg     sync.WaitGroup
+		result string
+	)
 
 	wg.Go(func() {
 		result = execStreamCmd(h, conn, "XREAD BLOCK 5000 STREAMS blockstream $")
@@ -70,7 +79,12 @@ func TestXReadBlock(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Add an entry from another goroutine
-	conn2 := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
+	conn2 := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
+
+		return c
+	}()
 	execStreamCmd(h, conn2, "XADD blockstream * field value")
 
 	wg.Wait()
@@ -85,7 +99,12 @@ func TestXReadBlockWithPlus(t *testing.T) {
 	defer h.Close()
 
 	ctx := context.Background()
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
+
+		return c
+	}()
 
 	// Test 1: Blocking with + on non-empty stream should return last entry immediately
 	execStreamCmd(h, conn, "XADD lestream 1-0 k1 v1")
@@ -98,8 +117,10 @@ func TestXReadBlockWithPlus(t *testing.T) {
 	}
 
 	// Test 2: Blocking with + on empty stream should block until entry is added
-	var wg sync.WaitGroup
-	var blockResult string
+	var (
+		wg          sync.WaitGroup
+		blockResult string
+	)
 
 	wg.Go(func() {
 		blockResult = execStreamCmd(h, conn, "XREAD BLOCK 5000 STREAMS emptystream +")
@@ -109,7 +130,12 @@ func TestXReadBlockWithPlus(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Add an entry from another connection
-	conn2 := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
+	conn2 := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
+
+		return c
+	}()
 	execStreamCmd(h, conn2, "XADD emptystream 1-0 k1 v1")
 
 	wg.Wait()
@@ -124,8 +150,18 @@ func TestXReadGroupBlockingUnblockOnGroupDestroy(t *testing.T) {
 	defer h.Close()
 
 	ctx := context.Background()
-	conn1 := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
-	conn2 := func() *shared.Connection { c := newEffectsConn(h); c.Ctx = ctx; return c }()
+	conn1 := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
+
+		return c
+	}()
+	conn2 := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Ctx = ctx
+
+		return c
+	}()
 
 	// Setup: create stream with group
 	execStreamCmd(h, conn1, "DEL mystream")
@@ -152,6 +188,7 @@ func TestXReadGroupBlockingUnblockOnGroupDestroy(t *testing.T) {
 			},
 		}
 		h.ExecuteInto(cmd, w, conn2)
+
 		resultCh <- buf.String()
 	}()
 
@@ -167,6 +204,7 @@ func TestXReadGroupBlockingUnblockOnGroupDestroy(t *testing.T) {
 	select {
 	case result := <-resultCh:
 		t.Logf("XREADGROUP result: %q", result)
+
 		if !strings.Contains(result, "NOGROUP") {
 			t.Errorf("Expected NOGROUP error, got %q", result)
 		}

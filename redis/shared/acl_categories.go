@@ -116,6 +116,7 @@ var categoryToName = map[CommandCategory]string{
 // GetCategoryByName returns a category by name
 func GetCategoryByName(name string) (CommandCategory, bool) {
 	cat, ok := categoryNames[strings.ToLower(name)]
+
 	return cat, ok
 }
 
@@ -124,6 +125,7 @@ func GetCategoryName(cat CommandCategory) string {
 	if name, ok := categoryToName[cat]; ok {
 		return name
 	}
+
 	return unknownName
 }
 
@@ -133,6 +135,7 @@ func GetAllCategoryNames() []string {
 	for name := range categoryNames {
 		names = append(names, name)
 	}
+
 	return names
 }
 
@@ -420,17 +423,20 @@ func GetCommandCategories(cmd CommandType) []CommandCategory {
 	if cats, ok := commandCategories[cmd]; ok {
 		return cats
 	}
+
 	return nil
 }
 
 // GetCommandsInCategory returns all commands in a category
 func GetCommandsInCategory(cat CommandCategory) []CommandType {
 	var cmds []CommandType
+
 	for cmd, cats := range commandCategories {
 		if slices.Contains(cats, cat) {
 			cmds = append(cmds, cmd)
 		}
 	}
+
 	return cmds
 }
 
@@ -441,5 +447,6 @@ func CommandHasCategory(cmd CommandType, cat CommandCategory) bool {
 			return true
 		}
 	}
+
 	return false
 }

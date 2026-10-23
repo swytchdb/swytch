@@ -38,6 +38,7 @@ func TestLiveIndexPropagation(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO t VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')"); err != nil {
 		t.Fatal(err)
@@ -46,10 +47,12 @@ func TestLiveIndexPropagation(t *testing.T) {
 	// Session A: open and pin via SetMaxOpenConns so db.Exec
 	// (session B) opens a separate conn without blocking.
 	db.SetMaxOpenConns(4)
+
 	sessA, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = sessA.Close() }()
 
 	var count int
@@ -57,6 +60,7 @@ func TestLiveIndexPropagation(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("session A first query: %v", err)
 	}
+
 	if count != 3 {
 		t.Fatalf("session A sees %d rows, want 3", count)
 	}
@@ -76,21 +80,27 @@ func TestLiveIndexPropagation(t *testing.T) {
 	defer func() { _ = rows.Close() }()
 
 	var planText strings.Builder
+
 	for rows.Next() {
-		var id, parent, notused int
-		var detail string
+		var (
+			id, parent, notused int
+			detail              string
+		)
 		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		planText.WriteString(detail)
 		planText.WriteString(" | ")
 	}
+
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 
 	plan := planText.String()
 	t.Logf("session A post-CREATE-INDEX plan: %s", plan)
+
 	if !strings.Contains(plan, "idx_name") {
 		t.Errorf("session A's plan should reference idx_name; got %q", plan)
 	}

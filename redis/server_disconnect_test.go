@@ -50,6 +50,7 @@ func TestHandleConnection_SubscribeDisconnect_NoPanic(t *testing.T) {
 		if s.connSem != nil {
 			s.connSem <- struct{}{}
 		}
+
 		s.wg.Add(1)
 		go func() {
 			s.handleConnection(serverConn)
@@ -59,6 +60,7 @@ func TestHandleConnection_SubscribeDisconnect_NoPanic(t *testing.T) {
 		if _, err := io.WriteString(clientConn, subscribeCmd); err != nil {
 			t.Fatalf("WriteString() iteration %d error = %v", i, err)
 		}
+
 		_ = clientConn.Close()
 
 		select {

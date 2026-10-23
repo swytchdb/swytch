@@ -30,12 +30,14 @@ func TestCreateIndexRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	mustExec(t, db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+
 	for i, u := range []struct {
 		id   int
 		name string
 		age  int
 	}{{1, "alice", 30}, {2, "bob", 25}, {3, "carol", 40}, {4, "dave", 30}} {
 		_ = i
+
 		mustExec(t, db, "INSERT INTO users VALUES ($1, $2, $3)", u.id, u.name, u.age)
 	}
 
@@ -61,10 +63,12 @@ func TestCreateIndexRoundTrip(t *testing.T) {
 	for rows.Next() {
 		cols, _ := rows.Columns()
 		vals := make([]any, len(cols))
+
 		ptrs := make([]any, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
+
 		if err := rows.Scan(ptrs...); err != nil {
 			t.Fatal(err)
 		}
@@ -80,14 +84,18 @@ func TestCreateIndexRoundTrip(t *testing.T) {
 			t.Errorf("qrows close: %v", err)
 		}
 	}()
+
 	var got []string
+
 	for qrows.Next() {
 		var n string
 		if err := qrows.Scan(&n); err != nil {
 			t.Fatal(err)
 		}
+
 		got = append(got, n)
 	}
+
 	if len(got) != 2 || got[0] != "alice" || got[1] != "dave" {
 		t.Errorf("got %v, want [alice dave]", got)
 	}
@@ -107,6 +115,7 @@ func TestUniqueIndexRejectsDuplicate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unique violation, got nil")
 	}
+
 	if !strings.Contains(err.Error(), "unique") {
 		t.Errorf("expected 'unique' in error, got: %v", err)
 	}
@@ -142,6 +151,7 @@ func TestUniqueIndexRejectsUpdateCollision(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unique violation on update collision")
 	}
+
 	if !strings.Contains(err.Error(), "unique") {
 		t.Errorf("expected 'unique' in error, got: %v", err)
 	}
@@ -160,6 +170,7 @@ func TestCreateIndexRejectsExistingCollision(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected CREATE UNIQUE INDEX to fail on collision")
 	}
+
 	if !strings.Contains(err.Error(), "unique") {
 		t.Errorf("expected 'unique' in error, got: %v", err)
 	}
@@ -173,9 +184,11 @@ func TestIndexedRangeScan(t *testing.T) {
 	ctx := context.Background()
 
 	mustExec(t, db, "CREATE TABLE nums (id INTEGER PRIMARY KEY, x INTEGER)")
+
 	for i := 1; i <= 10; i++ {
 		mustExec(t, db, "INSERT INTO nums VALUES ($1, $2)", i, i*10)
 	}
+
 	mustExec(t, db, "CREATE INDEX idx_x ON nums(x)")
 
 	// x > 30 AND x <= 70 should return 40, 50, 60, 70.
@@ -189,18 +202,23 @@ func TestIndexedRangeScan(t *testing.T) {
 			t.Errorf("rows close: %v", err)
 		}
 	}()
+
 	var got []int64
+
 	for rows.Next() {
 		var x int64
 		if err := rows.Scan(&x); err != nil {
 			t.Fatal(err)
 		}
+
 		got = append(got, x)
 	}
+
 	want := []int64{40, 50, 60, 70}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d: got %d, want %d", i, got[i], want[i])
@@ -300,6 +318,7 @@ func TestIndexUpdateMovesEntry(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT id FROM t WHERE age = 40").Scan(&id); err != nil {
 		t.Fatalf("find at age=40: %v", err)
 	}
+
 	if id != 1 {
 		t.Errorf("id=%d, want 1", id)
 	}

@@ -89,6 +89,7 @@ func (p *Path) isConcrete() bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -100,51 +101,65 @@ func (p *Path) isConcrete() bool {
 func ParsePath(s string) (*Path, error) {
 	p := &Path{}
 	i := 0
+
 	if len(s) > 0 && s[0] == '$' {
 		p.JSONPath = true
 		i = 1
 	}
+
 	for i < len(s) {
 		switch s[i] {
 		case '.':
 			// Recursive descent: ".." selects the following step at every depth.
 			if i+1 < len(s) && s[i+1] == '.' {
 				p.segs = append(p.segs, segment{kind: segRecursive})
+
 				i += 2
 				if i < len(s) && s[i] == '[' {
 					seg, next, err := parseBracket(s, i+1)
 					if err != nil {
 						return nil, err
 					}
+
 					p.segs = append(p.segs, seg)
 					i = next
+
 					continue
 				}
+
 				seg, next, err := parseName(s, i)
 				if err != nil {
 					return nil, err
 				}
+
 				p.segs = append(p.segs, seg)
 				i = next
+
 				continue
 			}
+
 			i++
 			if i >= len(s) {
 				break // lone/trailing '.' (legacy root indicator) — no segment
 			}
+
 			if s[i] == '[' {
 				seg, next, err := parseBracket(s, i+1)
 				if err != nil {
 					return nil, err
 				}
+
 				p.segs = append(p.segs, seg)
 				i = next
+
 				continue
 			}
+
 			seg, next, err := parseName(s, i)
 			if err != nil {
 				return nil, err
 			}
+
 			p.segs = append(p.segs, seg)
 			i = next
 		case '[':
@@ -152,6 +167,7 @@ func ParsePath(s string) (*Path, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			p.segs = append(p.segs, seg)
 			i = next
 		default:
@@ -160,10 +176,12 @@ func ParsePath(s string) (*Path, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			p.segs = append(p.segs, seg)
 			i = next
 		}
 	}
+
 	return p, nil
 }
 
@@ -175,13 +193,16 @@ func parseName(s string, i int) (segment, int, error) {
 	for i < len(s) && s[i] != '.' && s[i] != '[' {
 		i++
 	}
+
 	if i == start {
 		return segment{}, 0, errBadPath
 	}
+
 	name := s[start:i]
 	if name == "*" {
 		return segment{kind: segWildcard}, i, nil
 	}
+
 	return segment{kind: segKey, key: name}, i, nil
 }
 
@@ -192,17 +213,21 @@ func parseBracket(s string, i int) (segment, int, error) {
 	if i >= len(s) {
 		return segment{}, 0, errBadPath
 	}
+
 	if s[i] == '?' {
 		return parseFilterBracket(s, i)
 	}
+
 	inner, next, err := scanBracketInner(s, i)
 	if err != nil {
 		return segment{}, 0, err
 	}
+
 	seg, err := classifyBracket(inner)
 	if err != nil {
 		return segment{}, 0, err
 	}
+
 	return seg, next, nil
 }
 
@@ -210,24 +235,31 @@ func parseBracket(s string, i int) (segment, int, error) {
 // the matching ']', respecting quotes, and the index just past ']'.
 func scanBracketInner(s string, i int) (string, int, error) {
 	start := i
+
 	var quote byte
+
 	for i < len(s) {
 		c := s[i]
 		if quote != 0 {
 			if c == quote {
 				quote = 0
 			}
+
 			i++
+
 			continue
 		}
+
 		switch c {
 		case '\'', '"':
 			quote = c
 		case ']':
 			return s[start:i], i + 1, nil
 		}
+
 		i++
 	}
+
 	return "", 0, errBadPath
 }
 
@@ -238,33 +270,41 @@ func classifyBracket(inner string) (segment, error) {
 	if t == "*" {
 		return segment{kind: segWildcard}, nil
 	}
+
 	if hasTopLevel(t, ':') {
 		sl, err := parseSlice(t)
 		if err != nil {
 			return segment{}, err
 		}
+
 		return segment{kind: segSlice, slice: sl}, nil
 	}
+
 	if hasTopLevel(t, ',') {
 		u, err := parseUnion(t)
 		if err != nil {
 			return segment{}, err
 		}
+
 		return segment{kind: segUnion, union: u}, nil
 	}
+
 	if k, ok := unquote(t); ok {
 		return segment{kind: segKey, key: k}, nil
 	}
+
 	n, err := strconv.Atoi(t)
 	if err != nil {
 		return segment{}, errBadPath
 	}
+
 	return segment{kind: segIndex, idx: n}, nil
 }
 
 // hasTopLevel reports whether c occurs in t outside of any quotes.
 func hasTopLevel(t string, c byte) bool {
 	var quote byte
+
 	for i := 0; i < len(t); i++ {
 		switch {
 		case quote != 0:
@@ -277,6 +317,7 @@ func hasTopLevel(t string, c byte) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -285,6 +326,7 @@ func unquote(t string) (string, bool) {
 	if len(t) >= 2 && (t[0] == '\'' || t[0] == '"') && t[len(t)-1] == t[0] {
 		return t[1 : len(t)-1], true
 	}
+
 	return "", false
 }
 
@@ -293,58 +335,75 @@ func parseSlice(t string) (sliceSpec, error) {
 	if len(parts) > 3 {
 		return sliceSpec{}, errBadPath
 	}
+
 	var sl sliceSpec
+
 	set := func(raw string, n *int, has *bool) error {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			return nil
 		}
+
 		v, err := strconv.Atoi(raw)
 		if err != nil {
 			return errBadPath
 		}
+
 		*n, *has = v, true
+
 		return nil
 	}
 	if err := set(parts[0], &sl.start, &sl.hasStart); err != nil {
 		return sliceSpec{}, err
 	}
+
 	if len(parts) >= 2 {
 		if err := set(parts[1], &sl.end, &sl.hasEnd); err != nil {
 			return sliceSpec{}, err
 		}
 	}
+
 	if len(parts) == 3 {
 		if err := set(parts[2], &sl.step, &sl.hasStep); err != nil {
 			return sliceSpec{}, err
 		}
 	}
+
 	return sl, nil
 }
 
 func parseUnion(t string) ([]unionSel, error) {
 	parts := splitTopLevel(t, ',')
+
 	sels := make([]unionSel, 0, len(parts))
 	for _, raw := range parts {
 		raw = strings.TrimSpace(raw)
 		if k, ok := unquote(raw); ok {
 			sels = append(sels, unionSel{isKey: true, key: k})
+
 			continue
 		}
+
 		n, err := strconv.Atoi(raw)
 		if err != nil {
 			return nil, errBadPath
 		}
+
 		sels = append(sels, unionSel{idx: n})
 	}
+
 	return sels, nil
 }
 
 // splitTopLevel splits t on c outside of quotes.
 func splitTopLevel(t string, c byte) []string {
-	var out []string
-	var quote byte
+	var (
+		out   []string
+		quote byte
+	)
+
 	start := 0
+
 	for i := 0; i < len(t); i++ {
 		switch {
 		case quote != 0:
@@ -358,6 +417,7 @@ func splitTopLevel(t string, c byte) []string {
 			start = i + 1
 		}
 	}
+
 	return append(out, t[start:])
 }
 
@@ -373,16 +433,22 @@ type match struct {
 // every matched node in document order with its concrete path. A pre-order walk
 // (match-here, then descend in order) reproduces RedisJSON's match ordering.
 func (p *Path) resolveMatches(root *Value) []match {
-	var out []match
-	var rec func(v *Value, concrete, segs []segment)
+	var (
+		out []match
+		rec func(v *Value, concrete, segs []segment)
+	)
+
 	rec = func(v *Value, concrete, segs []segment) {
 		if v == nil {
 			return
 		}
+
 		if len(segs) == 0 {
 			out = append(out, match{val: v, segs: concrete})
+
 			return
 		}
+
 		s, rest := segs[0], segs[1:]
 		switch s.kind {
 		case segKey:
@@ -432,8 +498,10 @@ func (p *Path) resolveMatches(root *Value) []match {
 			}
 		case segRecursive:
 			var walk func(n *Value, c []segment)
+
 			walk = func(n *Value, c []segment) {
 				rec(n, c, rest)
+
 				switch n.Kind {
 				case KindNull, KindBool, KindInt, KindFloat, KindString:
 					// The scalar was visited above and has no descendants.
@@ -468,6 +536,7 @@ func (p *Path) resolveMatches(root *Value) []match {
 		}
 	}
 	rec(root, nil, p.segs)
+
 	return out
 }
 
@@ -475,10 +544,12 @@ func (p *Path) resolveMatches(root *Value) []match {
 // order (the read path; writes use resolveMatches for the concrete paths).
 func (p *Path) resolve(root *Value) []*Value {
 	ms := p.resolveMatches(root)
+
 	vs := make([]*Value, len(ms))
 	for i := range ms {
 		vs[i] = ms[i].val
 	}
+
 	return vs
 }
 
@@ -488,6 +559,7 @@ func appendKey(c []segment, k string) []segment {
 	n := make([]segment, len(c)+1)
 	copy(n, c)
 	n[len(c)] = segment{kind: segKey, key: k}
+
 	return n
 }
 
@@ -495,6 +567,7 @@ func appendIdx(c []segment, idx int) []segment {
 	n := make([]segment, len(c)+1)
 	copy(n, c)
 	n[len(c)] = segment{kind: segIndex, idx: idx}
+
 	return n
 }
 
@@ -503,9 +576,11 @@ func normIndex(idx, n int) (int, bool) {
 	if idx < 0 {
 		idx += n
 	}
+
 	if idx < 0 || idx >= n {
 		return 0, false
 	}
+
 	return idx, true
 }
 
@@ -516,19 +591,25 @@ func sliceIndices(s sliceSpec, n int) []int {
 	if s.hasStep {
 		step = s.step
 	}
+
 	if step == 0 {
 		return nil
 	}
+
 	clamp := func(v, lo, hi int) int {
 		if v < lo {
 			return lo
 		}
+
 		if v > hi {
 			return hi
 		}
+
 		return v
 	}
+
 	var out []int
+
 	if step > 0 {
 		start, end := 0, n
 		if s.hasStart {
@@ -536,18 +617,23 @@ func sliceIndices(s sliceSpec, n int) []int {
 			if start < 0 {
 				start += n
 			}
+
 			start = clamp(start, 0, n)
 		}
+
 		if s.hasEnd {
 			end = s.end
 			if end < 0 {
 				end += n
 			}
+
 			end = clamp(end, 0, n)
 		}
+
 		for i := start; i < end; i += step {
 			out = append(out, i)
 		}
+
 		return out
 	}
 	// Negative step: iterate downward; bounds default to the array ends.
@@ -557,19 +643,24 @@ func sliceIndices(s sliceSpec, n int) []int {
 		if start < 0 {
 			start += n
 		}
+
 		start = clamp(start, -1, n-1)
 	}
+
 	if s.hasEnd {
 		end = s.end
 		if end < 0 {
 			end += n
 		}
+
 		end = clamp(end, -1, n-1)
 	}
+
 	for i := start; i > end; i += step {
 		if i >= 0 && i < n {
 			out = append(out, i)
 		}
 	}
+
 	return out
 }

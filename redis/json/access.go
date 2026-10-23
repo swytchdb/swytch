@@ -36,12 +36,15 @@ func getJSONSnapshot(cmd *shared.Command, key string) (root *pb.ReducedEffect, t
 	if e != nil {
 		return nil, nil, false, false, e
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, t, false, false, nil
 	}
-	if !isJSONNode(snap.TypeTag) {
+
+	if !isJSONNode(snap.GetTypeTag()) {
 		return nil, t, true, true, nil
 	}
+
 	return snap, t, true, false, nil
 }
 
@@ -55,11 +58,14 @@ func writeWrongType(w *shared.Writer) {
 // write batch on the state the handler read) and chains the rest.
 func tipEmitter(cmd *shared.Command, tips []effects.Tip) emitFn {
 	first := true
+
 	return func(e *pb.Effect) error {
 		if first {
 			first = false
+
 			return cmd.Context.Emit(e, tips)
 		}
+
 		return cmd.Context.Emit(e)
 	}
 }
@@ -73,24 +79,33 @@ func jsonReadInt(cmd *shared.Command, w *shared.Writer, key, pathStr, expected s
 	path, err := ParsePath(pathStr)
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
+
 	root, _, exists, wrongType, err := getJSONSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if !exists {
 		w.WriteNullBulkString()
+
 		return
 	}
+
 	if wrongType {
 		writeWrongType(w)
+
 		return
 	}
+
 	matches := path.resolve(assemble(root, ""))
 	if path.JSONPath {
 		w.WriteArray(len(matches))
+
 		for _, m := range matches {
 			if n, ok := fn(m); ok {
 				w.WriteInteger(n)
@@ -98,17 +113,23 @@ func jsonReadInt(cmd *shared.Command, w *shared.Writer, key, pathStr, expected s
 				w.WriteNullBulkString()
 			}
 		}
+
 		return
 	}
+
 	if len(matches) == 0 {
 		w.WriteError("ERR Path '" + pathStr + "' does not exist")
+
 		return
 	}
+
 	n, ok := fn(matches[0])
 	if !ok {
 		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + matches[0].TypeName())
+
 		return
 	}
+
 	w.WriteInteger(n)
 }
 
@@ -128,10 +149,12 @@ func writeTargets(root *pb.ReducedEffect, path *Path) []writeTarget {
 	if !path.JSONPath && len(ms) > 1 {
 		ms = ms[:1]
 	}
+
 	out := make([]writeTarget, len(ms))
 	for i, m := range ms {
 		out[i] = writeTarget{val: m.val, path: &Path{JSONPath: path.JSONPath, segs: m.segs}}
 	}
+
 	return out
 }
 
@@ -144,40 +167,54 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 	path, err := ParsePath(pathStr)
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
+
 	root, tips, exists, wrongType, err := getJSONSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if wrongType {
 		writeWrongType(w)
+
 		return
 	}
+
 	if !exists {
 		w.WriteError("ERR could not perform this operation on a key that doesn't exist")
+
 		return
 	}
+
 	targets := writeTargets(root, path)
 
 	type result struct {
 		reply int64
 		ok    bool
 	}
+
 	results := make([]result, len(targets))
+
 	type pending struct {
 		path *Path
 		repl *Value
 	}
+
 	var writes []pending
+
 	for i, t := range targets {
 		r, n, ok := fn(t.val)
+
 		results[i] = result{n, ok}
 		if ok {
 			writes = append(writes, pending{t.path, r})
 		}
 	}
+
 	if len(writes) > 0 {
 		cmd.Context.BeginTx()
 		// Record the read for this key (Noop carries its tips).
@@ -186,17 +223,22 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); e != nil {
 			w.WriteError(e.Error())
+
 			return
 		}
+
 		plain := func(ef *pb.Effect) error { return cmd.Context.Emit(ef) }
 		for _, pw := range writes {
 			applied, e := setValueAtPath(plain, root, key, pw.path, pw.repl, exists)
 			if e != nil {
 				w.WriteError(e.Error())
+
 				return
 			}
+
 			if !applied {
 				w.WriteError(errPathNotSet.Error())
+
 				return
 			}
 		}
@@ -204,6 +246,7 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 
 	if path.JSONPath {
 		w.WriteArray(len(results))
+
 		for _, r := range results {
 			if r.ok {
 				w.WriteInteger(r.reply)
@@ -211,16 +254,22 @@ func scalarIntWrite(cmd *shared.Command, w *shared.Writer, key, pathStr, expecte
 				w.WriteNullBulkString()
 			}
 		}
+
 		return
 	}
+
 	if len(targets) == 0 {
 		w.WriteError("ERR Path '" + pathStr + "' does not exist")
+
 		return
 	}
+
 	if !results[0].ok {
 		w.WriteError("ERR wrong type of path value - expected " + expected + " but found " + targets[0].val.TypeName())
+
 		return
 	}
+
 	w.WriteInteger(results[0].reply)
 }
 
@@ -238,6 +287,7 @@ func orderedSelfEffect(key, vid string, id []byte, ref elemRef) *pb.Effect {
 		Id: id,
 	}
 	setRefValue(d, ref)
+
 	return &pb.Effect{
 		Key:     []byte(key),
 		Virtual: virtBytes(vid),
@@ -255,6 +305,7 @@ func orderedInsertBeforeEffect(key, vid string, id, refID []byte, ref elemRef) *
 		Id: id, Reference: refID,
 	}
 	setRefValue(d, ref)
+
 	return &pb.Effect{
 		Key:     []byte(key),
 		Virtual: virtBytes(vid),
@@ -276,29 +327,33 @@ func orderedRemoveEffect(key, vid string, id []byte) *pb.Effect {
 // --- partition walk for writes ---
 
 func elementByKey(p *pb.ReducedEffect, key string) *pb.ReducedElement {
-	for _, el := range p.OrderedElements {
+	for _, el := range p.GetOrderedElements() {
 		if string(el.GetData().GetId()) == key {
 			return el
 		}
 	}
+
 	return nil
 }
 
 func elementByIndex(p *pb.ReducedEffect, idx int) *pb.ReducedElement {
-	n := len(p.OrderedElements)
+	n := len(p.GetOrderedElements())
 	if idx < 0 {
 		idx += n
 	}
+
 	if idx < 0 || idx >= n {
 		return nil
 	}
-	return p.OrderedElements[idx]
+
+	return p.GetOrderedElements()[idx]
 }
 
 func containerChildVid(el *pb.ReducedElement) (string, bool) {
 	if child := el.GetData().GetChild(); len(child) > 0 {
 		return string(child), true
 	}
+
 	return "", false
 }
 
@@ -307,36 +362,45 @@ func containerChildVid(el *pb.ReducedElement) (string, bool) {
 // a missing or non-container intermediate (the path cannot be created).
 func walkToParent(root *pb.ReducedEffect, segs []segment) (parentVid string, parent *pb.ReducedEffect, ok bool) {
 	parent = root
+
 	for _, s := range segs {
 		var el *pb.ReducedElement
+
 		switch s.kind {
 		case segKey:
-			if parent.TypeTag != pb.ValueType_TYPE_JSON_OBJECT {
+			if parent.GetTypeTag() != pb.ValueType_TYPE_JSON_OBJECT {
 				return "", nil, false
 			}
+
 			el = elementByKey(parent, s.key)
 		case segIndex:
-			if parent.TypeTag != pb.ValueType_TYPE_JSON_ARRAY {
+			if parent.GetTypeTag() != pb.ValueType_TYPE_JSON_ARRAY {
 				return "", nil, false
 			}
+
 			el = elementByIndex(parent, s.idx)
 		case segWildcard, segSlice, segUnion, segRecursive, segFilter:
 			// Writes must resolve selectors to concrete keys and indexes first.
 			return "", nil, false
 		}
+
 		if el == nil {
 			return "", nil, false
 		}
+
 		childVid, isContainer := containerChildVid(el)
 		if !isContainer {
 			return "", nil, false
 		}
+
 		child := nodeAt(root, childVid)
 		if child == nil {
 			return "", nil, false
 		}
+
 		parentVid, parent = childVid, child
 	}
+
 	return parentVid, parent, true
 }
 
@@ -351,43 +415,54 @@ func setValueAtPath(emit emitFn, root *pb.ReducedEffect, key string, path *Path,
 				return false, err
 			}
 		}
+
 		return true, encodeRoot(emit, key, v)
 	}
+
 	segs := path.segs
+
 	parentVid, parent, ok := walkToParent(root, segs[:len(segs)-1])
 	if !ok {
 		return false, nil
 	}
+
 	last := segs[len(segs)-1]
 	switch last.kind {
 	case segKey:
-		if parent.TypeTag != pb.ValueType_TYPE_JSON_OBJECT {
+		if parent.GetTypeTag() != pb.ValueType_TYPE_JSON_OBJECT {
 			return false, nil
 		}
+
 		ref, err := encodeRef(emit, key, v)
 		if err != nil {
 			return false, err
 		}
+
 		if elementByKey(parent, last.key) != nil {
 			return true, emit(orderedSelfEffect(key, parentVid, []byte(last.key), ref))
 		}
+
 		return true, emit(orderedInsertEffect(key, parentVid, []byte(last.key), ref))
 	case segIndex:
-		if parent.TypeTag != pb.ValueType_TYPE_JSON_ARRAY {
+		if parent.GetTypeTag() != pb.ValueType_TYPE_JSON_ARRAY {
 			return false, nil
 		}
+
 		el := elementByIndex(parent, last.idx)
 		if el == nil {
 			return false, nil // SET on an out-of-range index
 		}
+
 		ref, err := encodeRef(emit, key, v)
 		if err != nil {
 			return false, err
 		}
+
 		return true, emit(orderedSelfEffect(key, parentVid, el.GetData().GetId(), ref))
 	case segWildcard, segSlice, segUnion, segRecursive, segFilter:
 		// A selector cannot identify a single location to create or replace.
 		return false, nil
 	}
+
 	return false, nil
 }

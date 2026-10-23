@@ -35,8 +35,10 @@ import (
 func handleJSONDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("json.debug")
+
 		return
 	}
+
 	switch strings.ToUpper(string(cmd.Args[0])) {
 	case "HELP":
 		valid = true
@@ -45,12 +47,15 @@ func handleJSONDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			w.WriteBulkStringStr("MEMORY <key> [path] - reports memory usage")
 			w.WriteBulkStringStr("HELP                - this message")
 		}
+
 		return
 	case "MEMORY":
 		if len(cmd.Args) < 2 || len(cmd.Args) > 3 {
 			w.WriteWrongNumArguments("json.debug")
+
 			return
 		}
+
 		key := string(cmd.Args[1])
 		keys = []string{key}
 		valid = true
@@ -59,45 +64,61 @@ func handleJSONDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 			if len(cmd.Args) == 3 {
 				pathStr = string(cmd.Args[2])
 			}
+
 			path, err := ParsePath(pathStr)
 			if err != nil {
 				w.WriteError("ERR " + err.Error())
+
 				return
 			}
+
 			root, _, exists, wrongType, err := getJSONSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if wrongType {
 				writeWrongType(w)
+
 				return
 			}
+
 			if !exists {
 				if path.JSONPath {
 					w.WriteArray(0)
 				} else {
 					w.WriteInteger(0)
 				}
+
 				return
 			}
+
 			matches := path.resolve(assemble(root, ""))
 			if path.JSONPath {
 				w.WriteArray(len(matches))
+
 				for _, m := range matches {
 					w.WriteInteger(jsonSizeOf(m))
 				}
+
 				return
 			}
+
 			if len(matches) == 0 {
 				w.WriteError("ERR Path '" + pathStr + "' does not exist")
+
 				return
 			}
+
 			w.WriteInteger(jsonSizeOf(matches[0]))
 		}
+
 		return
 	default:
 		w.WriteError("ERR unknown subcommand - try `JSON.DEBUG HELP`")
+
 		return
 	}
 }
@@ -118,12 +139,14 @@ func jsonSizeOf(v *Value) int64 {
 		for _, e := range v.Arr {
 			size += jsonSizeOf(e)
 		}
+
 		return size
 	case KindObject:
 		size := int64(scalarFootprint)
 		for _, m := range v.Obj {
 			size += scalarFootprint + int64(len(m.Key)) + jsonSizeOf(m.Val)
 		}
+
 		return size
 	case KindNull, KindBool, KindInt, KindFloat:
 		// These scalars have no variable-size payload.

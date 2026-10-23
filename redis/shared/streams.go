@@ -64,6 +64,7 @@ func ParseStreamID(s string) (id StreamID, exclusive bool, isSpecial bool, err e
 	// Check for exclusive prefix
 	if s[0] == '(' {
 		exclusive = true
+
 		s = s[1:]
 		if len(s) == 0 {
 			return StreamID{}, false, false, ErrInvalidStreamID
@@ -86,17 +87,20 @@ func ParseStreamID(s string) (id StreamID, exclusive bool, isSpecial bool, err e
 
 	// Parse ms-seq format
 	parts := strings.SplitN(s, "-", 2)
+
 	ms, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil {
 		return StreamID{}, false, false, ErrInvalidStreamID
 	}
 
 	var seq uint64
+
 	if len(parts) == 2 {
 		if parts[1] == "*" {
 			// Hybrid ID like "1234567890123-*" - auto-generate sequence
 			return StreamID{Ms: ms, Seq: 0}, false, true, nil
 		}
+
 		seq, err = strconv.ParseUint(parts[1], 10, 64)
 		if err != nil {
 			return StreamID{}, false, false, ErrInvalidStreamID
@@ -117,6 +121,7 @@ func ParseStreamIDForRange(s string, isEnd bool) (id StreamID, exclusive bool, e
 	// Check for exclusive prefix
 	if s[0] == '(' {
 		exclusive = true
+
 		s = s[1:]
 		if len(s) == 0 {
 			return StreamID{}, false, ErrInvalidStreamID
@@ -130,17 +135,20 @@ func ParseStreamIDForRange(s string, isEnd bool) (id StreamID, exclusive bool, e
 		if exclusive {
 			return StreamID{}, false, ErrInvalidStreamID
 		}
+
 		return MinStreamID, exclusive, nil
 	case "+":
 		// Exclusive with + is not allowed
 		if exclusive {
 			return StreamID{}, false, ErrInvalidStreamID
 		}
+
 		return MaxStreamID, exclusive, nil
 	}
 
 	// Parse ms-seq format
 	parts := strings.SplitN(s, "-", 2)
+
 	ms, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil {
 		return StreamID{}, false, ErrInvalidStreamID
@@ -187,6 +195,7 @@ func (id StreamID) Key() string {
 	var buf [16]byte
 	binary.BigEndian.PutUint64(buf[0:8], id.Ms)
 	binary.BigEndian.PutUint64(buf[8:16], id.Seq)
+
 	return string(buf[:])
 }
 
@@ -196,15 +205,19 @@ func (id StreamID) Compare(other StreamID) int {
 	if id.Ms < other.Ms {
 		return -1
 	}
+
 	if id.Ms > other.Ms {
 		return 1
 	}
+
 	if id.Seq < other.Seq {
 		return -1
 	}
+
 	if id.Seq > other.Seq {
 		return 1
 	}
+
 	return 0
 }
 
@@ -308,6 +321,7 @@ func entrySize(entry *StreamEntry) int64 {
 	for _, field := range entry.Fields {
 		size += int64(len(field) + 24) // slice header overhead
 	}
+
 	return size
 }
 
@@ -316,10 +330,12 @@ func entrySize(entry *StreamEntry) int64 {
 func entrySerializedSize(idKey string, entry *StreamEntry) int64 {
 	size := int64(4 + len(idKey)) // id string len + id
 	size += 16                    // StreamID (Ms + Seq)
-	size += 4                     // fields count
+
+	size += 4 // fields count
 	for _, field := range entry.Fields {
 		size += int64(4 + len(field)) // field len + field
 	}
+
 	return size
 }
 
@@ -329,6 +345,7 @@ func (s *StreamValue) ForEach(fn func(entry *StreamEntry) bool) {
 	if s.Index.Size() == 0 {
 		return
 	}
+
 	currentKey, found, _ := s.Index.FirstWithPrefix("", false)
 	for found {
 		if entry, ok := s.Entries[currentKey]; ok {
@@ -336,6 +353,7 @@ func (s *StreamValue) ForEach(fn func(entry *StreamEntry) bool) {
 				return
 			}
 		}
+
 		currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
 	}
 }
@@ -394,6 +412,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 				}
 			}
 		}
+
 		return true
 	}
 
@@ -406,6 +425,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 					if c := group.Consumers[pe.Consumer]; c != nil {
 						c.PendingCount--
 					}
+
 					delete(group.Pending, id)
 				}
 			}
@@ -419,23 +439,29 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 	// Trim by MINID first
 	if opts.MinID != nil {
 		minIDKey := opts.MinID.Key()
+
 		currentKey, found, _ := s.Index.FirstWithPrefix("", false)
 		for found && trimCount < limit {
 			// Using lexicographic comparison on big-endian keys
 			if currentKey >= minIDKey {
 				break
 			}
+
 			entry := s.Entries[currentKey]
 			if entry == nil {
 				currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
+
 				continue
 			}
 			// For ACKED mode, skip entries that can't be trimmed instead of breaking
 			if !canTrim(entry.ID) {
 				currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
+
 				continue
 			}
+
 			handleTrim(entry.ID)
+
 			keysToTrim = append(keysToTrim, currentKey)
 			trimCount++
 			currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
@@ -478,14 +504,18 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 			entry := s.Entries[currentKey]
 			if entry == nil {
 				currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
+
 				continue
 			}
 			// For ACKED mode, skip entries that can't be trimmed instead of breaking
 			if !canTrim(entry.ID) {
 				currentKey, found, _ = s.Index.NextWithPrefix("", currentKey, false)
+
 				continue
 			}
+
 			handleTrim(entry.ID)
+
 			keysToTrim = append(keysToTrim, currentKey)
 			trimCount++
 			trimmedHere++
@@ -503,6 +533,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 			s.cachedSize -= entrySize(entry)
 			s.cachedSerializedSize -= entrySerializedSize(key, entry)
 		}
+
 		tips := s.Index.Contains(key)
 		s.Index.Delete(key, tips)
 		delete(s.Entries, key)
@@ -526,6 +557,7 @@ func (s *StreamValue) Trim(opts TrimOptions) int64 {
 func (g *ConsumerGroup) GetOrCreateConsumer(name string) *Consumer {
 	if c, exists := g.Consumers[name]; exists {
 		c.SeenTime = time.Now().UnixMilli()
+
 		return c
 	}
 
@@ -534,5 +566,6 @@ func (g *ConsumerGroup) GetOrCreateConsumer(name string) *Consumer {
 		SeenTime: time.Now().UnixMilli(),
 	}
 	g.Consumers[name] = c
+
 	return c
 }

@@ -174,13 +174,16 @@ func (s *Stats) Reset() {
 	s.latencyMu.Lock()
 	s.getLatIdx = 0
 	s.setLatIdx = 0
+
 	s.cmdLatIdx = 0
 	for i := range s.getLatencies {
 		s.getLatencies[i] = 0
 	}
+
 	for i := range s.setLatencies {
 		s.setLatencies[i] = 0
 	}
+
 	for i := range s.cmdLatencies {
 		s.cmdLatencies[i] = 0
 	}
@@ -189,6 +192,7 @@ func (s *Stats) Reset() {
 	// Clear errorStats by deleting all keys
 	s.errorStats.Range(func(key string, _ *atomic.Uint64) bool {
 		s.errorStats.Delete(key)
+
 		return true
 	})
 
@@ -288,6 +292,7 @@ func (s *Stats) getPercentile(latencies []time.Duration, idx int, percentile int
 	if idx >= count {
 		idx = count - 1
 	}
+
 	return sorted[idx]
 }
 
@@ -300,10 +305,12 @@ func (s *Stats) Uptime() time.Duration {
 func (s *Stats) HitRate() float64 {
 	hits := s.CmdGetHits.Load()
 	misses := s.CmdGetMisses.Load()
+
 	total := hits + misses
 	if total == 0 {
 		return 0
 	}
+
 	return float64(hits) / float64(total)
 }
 
@@ -314,11 +321,13 @@ func (s *Stats) RecordError(prefix string) {
 	// Fast path: counter already exists
 	if counter, ok := s.errorStats.Load(prefix); ok {
 		counter.Add(1)
+
 		return
 	}
 
 	// Slow path: create new counter using LoadOrStore to avoid races
 	newCounter := &atomic.Uint64{}
+
 	actual, loaded := s.errorStats.LoadOrStore(prefix, newCounter)
 	if loaded {
 		// Another goroutine created it first, use theirs
@@ -332,10 +341,13 @@ func (s *Stats) RecordError(prefix string) {
 // GetErrorStats returns a copy of error statistics
 func (s *Stats) GetErrorStats() map[string]uint64 {
 	result := make(map[string]uint64)
+
 	s.errorStats.Range(func(key string, value *atomic.Uint64) bool {
 		result[key] = value.Load()
+
 		return true
 	})
+
 	return result
 }
 
@@ -344,14 +356,17 @@ func (s *Stats) RecordCommand(cmd CommandType, usec uint64, failed bool) {
 	if cmd < 0 || cmd >= CmdMax {
 		return
 	}
+
 	stats := &s.cmdStats[cmd]
 	stats.Calls.Add(1)
 	stats.Usec.Add(usec)
+
 	if failed {
 		stats.FailedCalls.Add(1)
 	}
 
 	d := time.Duration(usec) * time.Microsecond
+
 	s.latencyMu.Lock()
 	s.cmdLatencies[s.cmdLatIdx%latencyHistogramSize] = d
 	s.cmdLatIdx++
@@ -370,12 +385,15 @@ type CommandStatsSnapshot struct {
 // name, for commands that have been called at least once.
 func (s *Stats) GetCommandStats() map[string]CommandStatsSnapshot {
 	result := make(map[string]CommandStatsSnapshot)
+
 	for cmd := range CmdMax {
 		stats := &s.cmdStats[cmd]
+
 		calls := stats.Calls.Load()
 		if calls == 0 {
 			continue
 		}
+
 		result[cmd.String()] = CommandStatsSnapshot{
 			Calls:         calls,
 			Usec:          stats.Usec.Load(),
@@ -383,6 +401,7 @@ func (s *Stats) GetCommandStats() map[string]CommandStatsSnapshot {
 			FailedCalls:   stats.FailedCalls.Load(),
 		}
 	}
+
 	return result
 }
 

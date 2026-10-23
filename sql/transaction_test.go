@@ -51,6 +51,7 @@ func TestBeginCommitRoundTrip(t *testing.T) {
 	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count during tx: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("in-tx count=%d, want 2", count)
 	}
@@ -61,6 +62,7 @@ func TestBeginCommitRoundTrip(t *testing.T) {
 	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count after commit: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("post-commit count=%d, want 2", count)
 	}
@@ -73,6 +75,7 @@ func TestBeginCommitRoundTrip(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count new session: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("new-session count=%d, want 2", count)
 	}
@@ -82,6 +85,7 @@ func TestBeginCommitRoundTrip(t *testing.T) {
 func TestBeginRollbackDiscards(t *testing.T) {
 	_, db := startTestServer(t)
 	ctx := context.Background()
+
 	db.SetMaxOpenConns(1)
 
 	conn, err := db.Conn(ctx)
@@ -104,6 +108,7 @@ func TestBeginRollbackDiscards(t *testing.T) {
 	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
+
 	if count != 0 {
 		t.Errorf("post-rollback count=%d, want 0", count)
 	}
@@ -114,6 +119,7 @@ func TestBeginRollbackDiscards(t *testing.T) {
 func TestMultiStatementTxObservesOwnWrites(t *testing.T) {
 	_, db := startTestServer(t)
 	ctx := context.Background()
+
 	db.SetMaxOpenConns(1)
 
 	conn, err := db.Conn(ctx)
@@ -136,6 +142,7 @@ func TestMultiStatementTxObservesOwnWrites(t *testing.T) {
 		"SELECT v FROM t WHERE id = 1").Scan(&v); err != nil {
 		t.Fatalf("in-tx select: %v", err)
 	}
+
 	if v != "ALICE" {
 		t.Errorf("in-tx v=%q, want ALICE", v)
 	}
@@ -147,6 +154,7 @@ func TestMultiStatementTxObservesOwnWrites(t *testing.T) {
 	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
+
 	if count != 0 {
 		t.Errorf("post-rollback count=%d, want 0", count)
 	}
@@ -161,6 +169,7 @@ func TestCommitOutsideTransactionIsNoop(t *testing.T) {
 	if _, err := db.Exec("COMMIT"); err != nil {
 		t.Errorf("COMMIT with no tx should succeed, got: %v", err)
 	}
+
 	if _, err := db.Exec("ROLLBACK"); err != nil {
 		t.Errorf("ROLLBACK with no tx should succeed, got: %v", err)
 	}
@@ -171,6 +180,7 @@ func TestCommitOutsideTransactionIsNoop(t *testing.T) {
 func TestNestedBeginRejected(t *testing.T) {
 	_, db := startTestServer(t)
 	ctx := context.Background()
+
 	db.SetMaxOpenConns(1)
 
 	conn, err := db.Conn(ctx)
@@ -186,9 +196,11 @@ func TestNestedBeginRejected(t *testing.T) {
 	}()
 
 	mustExecCtx(t, conn, ctx, "BEGIN")
+
 	if _, err := conn.ExecContext(ctx, "BEGIN"); err == nil {
 		t.Error("nested BEGIN must return an error")
 	}
+
 	mustExecCtx(t, conn, ctx, "ROLLBACK")
 }
 
@@ -198,6 +210,7 @@ func TestNestedBeginRejected(t *testing.T) {
 func TestTxSurvivesCrossSession(t *testing.T) {
 	_, db := startTestServer(t)
 	ctx := context.Background()
+
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(0)
 
@@ -231,21 +244,25 @@ func TestTxSurvivesCrossSession(t *testing.T) {
 			t.Logf("connB close: %v", err)
 		}
 	}()
+
 	var v string
 	if err := connB.QueryRowContext(ctx,
 		"SELECT v FROM t WHERE id = 1").Scan(&v); err != nil {
 		t.Fatalf("connB select: %v", err)
 	}
+
 	if v != "initial" {
 		t.Errorf("connB sees %q pre-commit, want initial", v)
 	}
 
 	// Commit on A; B now sees the staged value.
 	mustExecCtx(t, connA, ctx, "COMMIT")
+
 	if err := connB.QueryRowContext(ctx,
 		"SELECT v FROM t WHERE id = 1").Scan(&v); err != nil {
 		t.Fatalf("connB select post-commit: %v", err)
 	}
+
 	if v != "staged" {
 		t.Errorf("connB sees %q post-commit, want staged", v)
 	}
@@ -255,6 +272,7 @@ func TestTxSurvivesCrossSession(t *testing.T) {
 // that need to pin operations to a single session.
 func mustExecCtx(t *testing.T, conn *sql.Conn, ctx context.Context, query string) {
 	t.Helper()
+
 	if _, err := conn.ExecContext(ctx, query); err != nil {
 		t.Fatalf("%s: %v", query, err)
 	}

@@ -42,6 +42,7 @@ import (
 // "not a DDL we handle — fall through to the SQLite path".
 func (s *Server) maybeInterceptDDL(sess *session, query string) (*wire.PreparedStatement, bool, error) {
 	trimmed := strings.TrimSpace(stripLeadingComments(query))
+
 	upper := strings.ToUpper(trimmed)
 	switch {
 	case strings.HasPrefix(upper, "CREATE TABLE"),
@@ -65,6 +66,7 @@ func (s *Server) maybeInterceptDDL(sess *session, query string) (*wire.PreparedS
 	case strings.HasPrefix(upper, "DROP VIEW"):
 		return s.handleDropView(sess, trimmed)
 	}
+
 	return nil, false, nil
 }
 
@@ -86,6 +88,7 @@ func (s *Server) handleAlterTable(sess *session, ddl string) (*wire.PreparedStat
 	if err != nil {
 		return nil, true, err
 	}
+
 	switch strings.ToUpper(subcmd) {
 	case "ADD":
 		return s.handleAlterAddColumn(sess, name, rest)
@@ -94,13 +97,16 @@ func (s *Server) handleAlterTable(sess *session, ddl string) (*wire.PreparedStat
 		if err != nil {
 			return nil, true, err
 		}
+
 		if form == renameFormTable {
 			return s.handleAlterRenameTableInner(sess, name, a)
 		}
+
 		return s.handleAlterRenameColumn(sess, name, a, b)
 	case "DROP":
 		return s.handleAlterDropColumn(sess, name, rest)
 	}
+
 	return nil, true, fmt.Errorf("ALTER TABLE: unsupported action %q", subcmd)
 }
 
@@ -121,21 +127,25 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 		fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 			return w.Complete("ALTER TABLE")
 		}
+
 		return wire.NewStatement(fn), true, nil
 	}
 
 	var rowsRewritten int
+
 	if err := runRMW(s.engine, "alter rename column", func(ectx *effects.Context) error {
 		_, schemaTips, err := ectx.GetSnapshot(schemaKey(tableName))
 		if err != nil {
 			return fmt.Errorf("read schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(tableName)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, schemaTips); err != nil {
 			return fmt.Errorf("pin schema dep: %w", err)
 		}
+
 		tbl, err := loadSchema(ectx, tableName)
 		if err != nil {
 			return fmt.Errorf("ALTER TABLE RENAME COLUMN %s: %w", tableName, err)
@@ -143,6 +153,7 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 
 		// Locate the target column and verify the new name is free.
 		colIdx := -1
+
 		for i, c := range tbl.Columns {
 			if strings.EqualFold(c.Name, oldCol) {
 				colIdx = i
@@ -150,9 +161,11 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 				return fmt.Errorf("column %q already exists", newCol)
 			}
 		}
+
 		if colIdx < 0 {
 			return fmt.Errorf("no such column: %s", oldCol)
 		}
+
 		canonicalOld := tbl.Columns[colIdx].Name
 
 		// Walk rows, re-emit each stored value under the new name.
@@ -161,28 +174,34 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 		// the declared PK name, so we still rewrite it for
 		// consistency.
 		var rowKeys []string
+
 		s.engine.ScanKeys("", rowKeyPattern(tbl.TableID), func(key string) bool {
 			rowKeys = append(rowKeys, key)
+
 			return true
 		})
+
 		for _, rk := range rowKeys {
 			snap, _, err := ectx.GetSnapshot(rk)
 			if err != nil {
 				return fmt.Errorf("read row %x: %w", rk, err)
 			}
+
 			if snap == nil {
 				continue
 			}
-			el, ok := snap.NetAdds[canonicalOld]
-			if !ok || el.Data == nil {
+
+			el, ok := snap.GetNetAdds()[canonicalOld]
+			if !ok || el.GetData() == nil {
 				continue
 			}
+
 			newEff := &pb.DataEffect{
 				Op:         pb.EffectOp_INSERT_OP,
 				Merge:      pb.MergeRule_LAST_WRITE_WINS,
 				Collection: pb.CollectionKind_KEYED,
 				Id:         []byte(newCol),
-				Value:      el.Data.Value,
+				Value:      el.GetData().GetValue(),
 			}
 			if err := ectx.Emit(&pb.Effect{
 				Key:  []byte(rk),
@@ -190,9 +209,11 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 			}); err != nil {
 				return fmt.Errorf("emit renamed field insert: %w", err)
 			}
+
 			if err := emitKeyedRemove(ectx, rk, canonicalOld); err != nil {
 				return fmt.Errorf("emit old-field remove: %w", err)
 			}
+
 			rowsRewritten++
 		}
 
@@ -206,6 +227,7 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 				}
 			}
 		}
+
 		if err := emitSchema(ectx, tbl); err != nil {
 			return err
 		}
@@ -218,18 +240,23 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 			if !mustRewrite {
 				continue
 			}
+
 			colsBytes := []byte{}
+
 			for i, c := range idx.Columns {
 				if i > 0 {
 					colsBytes = append(colsBytes, 0)
 				}
+
 				colsBytes = append(colsBytes, []byte(c)...)
 			}
+
 			if err := emitRawField(ectx, indexMetaKey(idx.Name),
 				indexFieldColumns, colsBytes); err != nil {
 				return fmt.Errorf("rewrite index %s.cols: %w", idx.Name, err)
 			}
 		}
+
 		return nil
 	}); err != nil {
 		return nil, true, err
@@ -252,6 +279,7 @@ func (s *Server) handleAlterRenameColumn(sess *session, tableName, oldCol, newCo
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ALTER TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -281,17 +309,20 @@ func (s *Server) handleAlterDropColumn(sess *session, tableName, rest string) (*
 		rowsTouched    int
 		indicesDropped []string
 	)
+
 	if err := runRMW(s.engine, "alter drop column", func(ectx *effects.Context) error {
 		_, schemaTips, err := ectx.GetSnapshot(schemaKey(tableName))
 		if err != nil {
 			return fmt.Errorf("read schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(tableName)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, schemaTips); err != nil {
 			return fmt.Errorf("pin schema dep: %w", err)
 		}
+
 		tbl, err := loadSchema(ectx, tableName)
 		if err != nil {
 			return fmt.Errorf("ALTER TABLE DROP COLUMN %s: %w", tableName, err)
@@ -299,53 +330,70 @@ func (s *Server) handleAlterDropColumn(sess *session, tableName, rest string) (*
 
 		// Resolve the column + PK invariant.
 		colIdx := -1
+
 		for i, c := range tbl.Columns {
 			if strings.EqualFold(c.Name, colName) {
 				colIdx = i
+
 				break
 			}
 		}
+
 		if colIdx < 0 {
 			return fmt.Errorf("no such column: %s", colName)
 		}
+
 		if slices.Contains(tbl.PKColumns, colIdx) {
 			return fmt.Errorf("cannot drop primary key column %q", colName)
 		}
+
 		canonicalName := tbl.Columns[colIdx].Name
 
 		// Walk rows once, emitting REMOVE for the field on each.
 		var rowKeys []string
+
 		s.engine.ScanKeys("", rowKeyPattern(tbl.TableID), func(key string) bool {
 			rowKeys = append(rowKeys, key)
+
 			return true
 		})
+
 		for _, rk := range rowKeys {
 			if err := emitKeyedRemove(ectx, rk, canonicalName); err != nil {
 				return fmt.Errorf("remove %s from row %x: %w", canonicalName, rk, err)
 			}
 		}
+
 		rowsTouched = len(rowKeys)
 
 		// Cascade indices that reference the dropped column.
 		var surviving []indexSchema
+
 		for _, idx := range tbl.Indexes {
 			cascade := false
+
 			for _, c := range idx.Columns {
 				if strings.EqualFold(c, canonicalName) {
 					cascade = true
+
 					break
 				}
 			}
+
 			if !cascade {
 				surviving = append(surviving, idx)
+
 				continue
 			}
+
 			if err := dropIndexEntries(s.engine, ectx, idx.IndexID); err != nil {
 				return fmt.Errorf("cascade drop index %s entries: %w", idx.Name, err)
 			}
+
 			if err := emitIndexMetadataRemove(ectx, idx.Name); err != nil {
 				return fmt.Errorf("cascade drop index %s meta: %w", idx.Name, err)
 			}
+
 			indicesDropped = append(indicesDropped, idx.Name)
 		}
 
@@ -362,7 +410,9 @@ func (s *Server) handleAlterDropColumn(sess *session, tableName, rest string) (*
 				tbl.PKColumns[i]--
 			}
 		}
+
 		tbl.Indexes = surviving
+
 		return emitSchema(ectx, tbl)
 	}); err != nil {
 		return nil, true, err
@@ -388,6 +438,7 @@ func (s *Server) handleAlterDropColumn(sess *session, tableName, rest string) (*
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ALTER TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -398,17 +449,21 @@ func parseDropColumnSpec(rest string) (string, error) {
 	if len(tokens) == 0 {
 		return "", fmt.Errorf("ALTER TABLE DROP: missing column name")
 	}
+
 	i := 0
 	if strings.EqualFold(tokens[i], "COLUMN") {
 		i++
 	}
+
 	if i >= len(tokens) {
 		return "", fmt.Errorf("ALTER TABLE DROP: missing column name")
 	}
+
 	name := trimIdent(strings.TrimRight(tokens[i], ";"))
 	if name == "" {
 		return "", fmt.Errorf("ALTER TABLE DROP: empty column name")
 	}
+
 	return name, nil
 }
 
@@ -432,11 +487,13 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 	if err != nil {
 		return nil, true, err
 	}
+
 	if strings.EqualFold(oldName, newName) {
 		// pg accepts rename-to-self as a no-op; we do too.
 		fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 			return w.Complete("ALTER TABLE")
 		}
+
 		return wire.NewStatement(fn), true, nil
 	}
 
@@ -447,21 +504,25 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 		if err != nil {
 			return fmt.Errorf("read old schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(oldName)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, schemaTips); err != nil {
 			return fmt.Errorf("pin old schema dep: %w", err)
 		}
+
 		listSnap, listTips, err := ectx.GetSnapshot(tableListKey)
 		if err != nil {
 			return fmt.Errorf("read table list: %w", err)
 		}
+
 		if listSnap != nil {
-			if _, exists := listSnap.NetAdds[newName]; exists {
+			if _, exists := listSnap.GetNetAdds()[newName]; exists {
 				return fmt.Errorf("%w: %s", ErrTableExists, newName)
 			}
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(tableListKey),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -483,6 +544,7 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 		if err := emitSchema(ectx, tbl); err != nil {
 			return fmt.Errorf("emit new schema: %w", err)
 		}
+
 		oldFields := []string{
 			schemaFieldTableID, schemaFieldColumns,
 			schemaFieldPK, schemaFieldIndexes,
@@ -492,6 +554,7 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 				return fmt.Errorf("remove old schema field %s: %w", f, err)
 			}
 		}
+
 		if err := emitKeyedRemove(ectx, tableListKey, oldName); err != nil {
 			return fmt.Errorf("remove table-list entry for %s: %w", oldName, err)
 		}
@@ -506,6 +569,7 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 				return fmt.Errorf("rewrite index %s.table: %w", idx.Name, err)
 			}
 		}
+
 		return nil
 	}); err != nil {
 		return nil, true, err
@@ -517,10 +581,12 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 	if err := execSimple(sess.conn, "DROP TABLE "+quoteIdent(oldName)); err != nil {
 		return nil, true, fmt.Errorf("drop old vtab on session: %w", err)
 	}
+
 	newSchema, err := loadSchema(s.engine.NewContext(), newName)
 	if err != nil {
 		return nil, true, fmt.Errorf("reload schema post-rename: %w", err)
 	}
+
 	if err := registerVTable(sess.conn, newSchema); err != nil {
 		return nil, true, fmt.Errorf("register renamed vtab on session: %w", err)
 	}
@@ -531,6 +597,7 @@ func (s *Server) handleAlterRenameTable(sess *session, oldName, rest string) (*w
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ALTER TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -559,32 +626,41 @@ func parseRenameSpec(rest string) (form renameForm, a, b string, err error) {
 		if len(tokens) < 2 {
 			return 0, "", "", fmt.Errorf("RENAME TO: missing new name")
 		}
+
 		name := trimIdent(strings.TrimRight(tokens[1], ";"))
 		if name == "" {
 			return 0, "", "", fmt.Errorf("RENAME TO: empty new name")
 		}
+
 		return renameFormTable, name, "", nil
 	}
+
 	i := 0
 	if strings.EqualFold(tokens[i], "COLUMN") {
 		i++
 	}
+
 	if i >= len(tokens) {
 		return 0, "", "", fmt.Errorf("RENAME COLUMN: missing old name")
 	}
+
 	oldCol := trimIdent(tokens[i])
+
 	i++
 	if i >= len(tokens) || !strings.EqualFold(tokens[i], "TO") {
 		return 0, "", "", fmt.Errorf("RENAME COLUMN: expected TO after old name")
 	}
+
 	i++
 	if i >= len(tokens) {
 		return 0, "", "", fmt.Errorf("RENAME COLUMN: missing new name")
 	}
+
 	newCol := trimIdent(strings.TrimRight(tokens[i], ";"))
 	if oldCol == "" || newCol == "" {
 		return 0, "", "", fmt.Errorf("RENAME COLUMN: empty name")
 	}
+
 	return renameFormColumn, oldCol, newCol, nil
 }
 
@@ -596,9 +672,11 @@ func parseRenameToSpec(rest string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if form != renameFormTable {
 		return "", fmt.Errorf("RENAME: expected TO <newname>")
 	}
+
 	return a, nil
 }
 
@@ -611,18 +689,23 @@ func parseAlterTableHead(ddl string) (name, subcmd, rest string, err error) {
 	if len(tokens) < 4 {
 		return "", "", "", fmt.Errorf("malformed ALTER TABLE: %q", ddl)
 	}
+
 	if !strings.EqualFold(tokens[0], "ALTER") || !strings.EqualFold(tokens[1], "TABLE") {
 		return "", "", "", fmt.Errorf("malformed ALTER TABLE: %q", ddl)
 	}
+
 	name = trimIdent(tokens[2])
 	if name == "" {
 		return "", "", "", fmt.Errorf("ALTER TABLE missing name: %q", ddl)
 	}
+
 	subcmd = tokens[3]
 	if len(tokens) > 4 {
 		rest = strings.Join(tokens[4:], " ")
 	}
+
 	rest = strings.TrimRight(rest, ";")
+
 	return name, subcmd, rest, nil
 }
 
@@ -636,6 +719,7 @@ func (s *Server) handleAlterAddColumn(sess *session, name, rest string) (*wire.P
 	if err != nil {
 		return nil, true, err
 	}
+
 	if notNull && def == nil {
 		// NOT NULL without a DEFAULT would invalidate every
 		// pre-existing row the moment the ALTER lands. SQLite
@@ -643,6 +727,7 @@ func (s *Server) handleAlterAddColumn(sess *session, name, rest string) (*wire.P
 		return nil, true, fmt.Errorf(
 			"ALTER TABLE ADD COLUMN %s NOT NULL requires a DEFAULT", colName)
 	}
+
 	if notNull && def != nil && def.Kind == defaultKindNull {
 		return nil, true, fmt.Errorf(
 			"ALTER TABLE ADD COLUMN %s NOT NULL with DEFAULT NULL is contradictory", colName)
@@ -663,22 +748,27 @@ func (s *Server) handleAlterAddColumn(sess *session, name, rest string) (*wire.P
 		if err != nil {
 			return fmt.Errorf("read schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, schemaTips); err != nil {
 			return fmt.Errorf("pin schema dep: %w", err)
 		}
+
 		tbl, err := loadSchema(ectx, name)
 		if err != nil {
 			return fmt.Errorf("ALTER TABLE %s: %w", name, err)
 		}
+
 		for _, c := range tbl.Columns {
 			if strings.EqualFold(c.Name, colName) {
 				return fmt.Errorf("duplicate column name: %s", colName)
 			}
 		}
+
 		tbl.Columns = append(tbl.Columns, newCol)
+
 		return emitSchema(ectx, tbl)
 	}); err != nil {
 		return nil, true, err
@@ -700,6 +790,7 @@ func (s *Server) handleAlterAddColumn(sess *session, name, rest string) (*wire.P
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ALTER TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -722,14 +813,18 @@ func parseAddColumnSpec(rest string) (name, declType string, notNull bool, def *
 	if len(tokens) == 0 {
 		return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: missing column spec")
 	}
+
 	i := 0
 	if strings.EqualFold(tokens[i], "COLUMN") {
 		i++
 	}
+
 	if i >= len(tokens) {
 		return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: missing column name")
 	}
+
 	name = trimIdent(tokens[i])
+
 	i++
 	for i < len(tokens) {
 		u := strings.ToUpper(tokens[i])
@@ -738,22 +833,28 @@ func parseAddColumnSpec(rest string) (name, declType string, notNull bool, def *
 			if i+1 >= len(tokens) || !strings.EqualFold(tokens[i+1], "NULL") {
 				return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: expected NULL after NOT")
 			}
+
 			notNull = true
 			i += 2
+
 			continue
 		case "NULL":
 			i++
+
 			continue
 		case "DEFAULT":
 			if i+1 >= len(tokens) {
 				return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: DEFAULT requires a value")
 			}
+
 			parsed, consumed, perr := parseDefaultLiteral(tokens[i+1:])
 			if perr != nil {
 				return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: %w", perr)
 			}
+
 			def = parsed
 			i += 1 + consumed
+
 			continue
 		case "PRIMARY", "UNIQUE", "CHECK", "COLLATE", "REFERENCES", "GENERATED":
 			return "", "", false, nil,
@@ -766,11 +867,14 @@ func parseAddColumnSpec(rest string) (name, declType string, notNull bool, def *
 		} else {
 			declType += " " + tokens[i]
 		}
+
 		i++
 	}
+
 	if name == "" {
 		return "", "", false, nil, fmt.Errorf("ALTER TABLE ADD: empty column name")
 	}
+
 	return name, declType, notNull, def, nil
 }
 
@@ -784,7 +888,9 @@ func parseDefaultLiteral(tokens []string) (*defaultValue, int, error) {
 	if len(tokens) == 0 {
 		return nil, 0, fmt.Errorf("DEFAULT: missing literal")
 	}
+
 	first := strings.TrimRight(tokens[0], ",)")
+
 	upper := strings.ToUpper(first)
 	switch upper {
 	case "NULL":
@@ -798,6 +904,7 @@ func parseDefaultLiteral(tokens []string) (*defaultValue, int, error) {
 	if n, err := strconv.ParseInt(first, 10, 64); err == nil {
 		return &defaultValue{Kind: defaultKindInt, Int: n}, 1, nil
 	}
+
 	if f, err := strconv.ParseFloat(first, 64); err == nil {
 		return &defaultValue{Kind: defaultKindFloat, Float: f}, 1, nil
 	}
@@ -812,19 +919,23 @@ func parseDefaultLiteral(tokens []string) (*defaultValue, int, error) {
 		}
 		// Re-join subsequent tokens until we find the closing quote.
 		joined := tokens[0]
+
 		consumed := 1
 		for consumed < len(tokens) && !strings.HasSuffix(joined, "'") {
 			joined = joined + " " + tokens[consumed]
 			consumed++
 		}
+
 		if !strings.HasSuffix(joined, "'") {
 			return nil, 0, fmt.Errorf("DEFAULT: unterminated string literal")
 		}
+
 		return &defaultValue{
 			Kind: defaultKindText,
 			Text: unescapeSQL(joined[1 : len(joined)-1]),
 		}, consumed, nil
 	}
+
 	return nil, 0, fmt.Errorf("DEFAULT: unsupported literal %q (only NULL, numbers, 'text', TRUE/FALSE in this phase)", first)
 }
 
@@ -842,10 +953,12 @@ func redeclareVTable(conn *sqlite.Conn, name string, loader func() (*tableSchema
 	if err := execSimple(conn, "DROP TABLE "+quoteIdent(name)); err != nil {
 		return fmt.Errorf("drop vtab: %w", err)
 	}
+
 	schema, err := loader()
 	if err != nil {
 		return fmt.Errorf("reload schema: %w", err)
 	}
+
 	return registerVTable(conn, schema)
 }
 
@@ -871,6 +984,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 	// for the common case). Inside the RMW body we pin the read on
 	// the schema key so concurrent DROPs of the same table abort.
 	preflight := s.engine.NewContext()
+
 	schema, err := loadSchema(preflight, name)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchTable) {
@@ -878,14 +992,18 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 				fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 					return writer.Complete("DROP TABLE")
 				}
+
 				return wire.NewStatement(fn), true, nil
 			}
+
 			return nil, true, fmt.Errorf("%w: %s", ErrNoSuchTable, name)
 		}
+
 		return nil, true, err
 	}
 
 	var rowCount int
+
 	if err := runRMW(s.engine, "drop table", func(ectx *effects.Context) error {
 		// Pin the read dep on the schema key so concurrent DROPs of
 		// the same table cause one of us to abort rather than both
@@ -894,6 +1012,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 		if err != nil {
 			return fmt.Errorf("read schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -904,11 +1023,15 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 		// Enumerate every live row key for this table and REMOVE
 		// its column fields (including the PK presence marker).
 		rowCount = 0
+
 		var rowKeys []string
+
 		s.engine.ScanKeys("", rowKeyPattern(schema.TableID), func(key string) bool {
 			rowKeys = append(rowKeys, key)
+
 			return true
 		})
+
 		for _, key := range rowKeys {
 			for _, col := range schema.Columns {
 				if err := emitKeyedRemove(ectx, key, col.Name); err != nil {
@@ -916,6 +1039,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 				}
 			}
 		}
+
 		rowCount = len(rowKeys)
 
 		// Cascade: drop every index owned by this table in the same
@@ -925,6 +1049,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 			if err := dropIndexEntries(s.engine, ectx, idx.IndexID); err != nil {
 				return fmt.Errorf("cascade drop index %s: %w", idx.Name, err)
 			}
+
 			if err := emitIndexMetadataRemove(ectx, idx.Name); err != nil {
 				return fmt.Errorf("cascade drop index %s metadata: %w", idx.Name, err)
 			}
@@ -936,9 +1061,11 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 				return fmt.Errorf("emit schema-remove %s.%s: %w", name, field, err)
 			}
 		}
+
 		if err := emitKeyedRemove(ectx, tableListKey, name); err != nil {
 			return fmt.Errorf("emit table-list remove %s: %w", name, err)
 		}
+
 		return nil
 	}); err != nil {
 		return nil, true, err
@@ -950,6 +1077,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 	if err := execSimple(sess.conn, "DROP TABLE "+quoteIdent(name)); err != nil {
 		return nil, true, fmt.Errorf("drop vtab on session: %w", err)
 	}
+
 	s.bumpSchemaEpoch(sess)
 
 	sess.log.Info("sql table dropped",
@@ -960,6 +1088,7 @@ func (s *Server) handleDropTable(sess *session, ddl string) (*wire.PreparedState
 	fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 		return writer.Complete("DROP TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -976,6 +1105,7 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 	// Preflight the schema read outside the tx so we can produce a
 	// clean "no such table" error without burning a retry.
 	preflight := s.engine.NewContext()
+
 	tbl, err := loadSchema(preflight, table)
 	if err != nil {
 		return nil, true, fmt.Errorf("CREATE INDEX %s: %w", name, err)
@@ -984,24 +1114,30 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 	// duplicates early — SQLite itself allows duplicate columns in an
 	// index but it's a foot-gun.
 	colOrdinals := make([]int, len(columns))
+
 	colAffinities := make([]string, len(columns))
 	for ci, colName := range columns {
 		ord := -1
+
 		for i, c := range tbl.Columns {
 			if c.Name == colName {
 				ord = i
 				colAffinities[ci] = c.Affinity
+
 				break
 			}
 		}
+
 		if ord < 0 {
 			return nil, true, fmt.Errorf("CREATE INDEX %s: column %q not found on table %s", name, colName, table)
 		}
+
 		for j := range ci {
 			if colOrdinals[j] == ord {
 				return nil, true, fmt.Errorf("CREATE INDEX %s: duplicate column %q", name, colName)
 			}
 		}
+
 		colOrdinals[ci] = ord
 	}
 	// Duplicate index name?
@@ -1027,6 +1163,7 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 		if err != nil {
 			return fmt.Errorf("read table schema: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(table)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1046,20 +1183,26 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 		if unique {
 			seen = make(map[string]string)
 		}
+
 		var rowKeys []string
+
 		s.engine.ScanKeys("", rowKeyPattern(tbl.TableID), func(key string) bool {
 			rowKeys = append(rowKeys, key)
+
 			return true
 		})
+
 		for _, rk := range rowKeys {
 			pk, ok := parseRowKey(rk, tbl.TableID)
 			if !ok {
 				continue
 			}
+
 			rowSnap, _, err := ectx.GetSnapshot(rk)
 			if err != nil {
 				return fmt.Errorf("read row %s: %w", rk, err)
 			}
+
 			if rowSnap == nil {
 				continue
 			}
@@ -1069,29 +1212,37 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 			// via the index (NULL ≠ NULL in comparisons).
 			vals := make([]sqlite.Value, len(columns))
 			anyNull := false
+
 			for ci, cName := range columns {
-				el, ok := rowSnap.NetAdds[cName]
-				if !ok || el.Data == nil {
+				el, ok := rowSnap.GetNetAdds()[cName]
+				if !ok || el.GetData() == nil {
 					anyNull = true
+
 					break
 				}
-				vals[ci] = decodeValue(el.Data, colAffinities[ci])
+
+				vals[ci] = decodeValue(el.GetData(), colAffinities[ci])
 				if vals[ci].Type() == sqlite.TypeNull {
 					anyNull = true
+
 					break
 				}
 			}
+
 			if anyNull {
 				continue
 			}
+
 			encoded := encodeIndexKeyTuple(vals, colAffinities)
 			if unique {
 				if otherPK, dup := seen[string(encoded)]; dup {
 					return fmt.Errorf("%w: CREATE UNIQUE INDEX %s would collide on (%s, %s)",
 						ErrUniqueViolation, name, otherPK, pk)
 				}
+
 				seen[string(encoded)] = pk
 			}
+
 			if err := emitIndexEntryInsert(ectx, idx.IndexID, encoded, pk); err != nil {
 				return fmt.Errorf("emit index entry: %w", err)
 			}
@@ -1099,6 +1250,7 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 
 		// Update the table schema to include this index.
 		tbl.Indexes = append(tbl.Indexes, idx)
+
 		return emitSchema(ectx, tbl)
 	}); err != nil {
 		return nil, true, err
@@ -1115,6 +1267,7 @@ func (s *Server) handleCreateIndex(sess *session, ddl string) (*wire.PreparedSta
 	fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 		return writer.Complete("CREATE INDEX")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -1128,6 +1281,7 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 	}
 
 	preflight := s.engine.NewContext()
+
 	meta, err := loadIndexSchema(preflight, name)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchIndex) {
@@ -1135,10 +1289,13 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 				fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 					return writer.Complete("DROP INDEX")
 				}
+
 				return wire.NewStatement(fn), true, nil
 			}
+
 			return nil, true, fmt.Errorf("%w: %s", ErrNoSuchIndex, name)
 		}
+
 		return nil, true, err
 	}
 
@@ -1147,6 +1304,7 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 		if err != nil {
 			return fmt.Errorf("read index meta: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(indexMetaKey(name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1157,6 +1315,7 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 		if err := dropIndexEntries(s.engine, ectx, meta.IndexID); err != nil {
 			return err
 		}
+
 		if err := emitIndexMetadataRemove(ectx, name); err != nil {
 			return err
 		}
@@ -1166,13 +1325,16 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 		if err != nil {
 			return fmt.Errorf("reload parent table %s: %w", meta.Table, err)
 		}
+
 		filtered := tbl.Indexes[:0]
 		for _, existing := range tbl.Indexes {
 			if existing.Name != name {
 				filtered = append(filtered, existing)
 			}
 		}
+
 		tbl.Indexes = filtered
+
 		return emitSchema(ectx, tbl)
 	}); err != nil {
 		return nil, true, err
@@ -1184,6 +1346,7 @@ func (s *Server) handleDropIndex(sess *session, ddl string) (*wire.PreparedState
 	fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 		return writer.Complete("DROP INDEX")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -1218,12 +1381,15 @@ func (s *Server) handleCreateView(sess *session, ddl string) (*wire.PreparedStat
 			fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 				return w.Complete("CREATE VIEW")
 			}
+
 			return wire.NewStatement(fn), true, nil
 		}
+
 		return nil, true, fmt.Errorf("%w: %s", ErrViewExists, name)
 	} else if !errors.Is(lerr, ErrNoSuchView) {
 		return nil, true, lerr
 	}
+
 	if _, lerr := loadSchema(preflight, name); lerr == nil {
 		return nil, true, fmt.Errorf("%w: %s (name already in use by a table)", ErrTableExists, name)
 	}
@@ -1238,15 +1404,19 @@ func (s *Server) handleCreateView(sess *session, ddl string) (*wire.PreparedStat
 		if err != nil {
 			return fmt.Errorf("read view list: %w", err)
 		}
+
 		if viewSnap != nil {
-			if _, present := viewSnap.NetAdds[name]; present {
+			if _, present := viewSnap.GetNetAdds()[name]; present {
 				if ifNotExists {
 					createdInTx = false
+
 					return nil
 				}
+
 				return fmt.Errorf("%w: %s", ErrViewExists, name)
 			}
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(viewListKey),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1260,18 +1430,22 @@ func (s *Server) handleCreateView(sess *session, ddl string) (*wire.PreparedStat
 		if err != nil {
 			return fmt.Errorf("read table list: %w", err)
 		}
+
 		if tableSnap != nil {
-			if _, present := tableSnap.NetAdds[name]; present {
+			if _, present := tableSnap.GetNetAdds()[name]; present {
 				return fmt.Errorf("%w: %s (name already in use by a table)", ErrTableExists, name)
 			}
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(tableListKey),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tableTips); err != nil {
 			return fmt.Errorf("pin table-list dep: %w", err)
 		}
+
 		createdInTx = true
+
 		return emitView(ectx, v)
 	}); err != nil {
 		return nil, true, err
@@ -1285,6 +1459,7 @@ func (s *Server) handleCreateView(sess *session, ddl string) (*wire.PreparedStat
 		if err := registerView(sess.conn, v); err != nil {
 			return nil, true, fmt.Errorf("register view on session: %w", err)
 		}
+
 		s.bumpSchemaEpoch(sess)
 		sess.log.Info("sql view created", "view", name)
 	}
@@ -1292,6 +1467,7 @@ func (s *Server) handleCreateView(sess *session, ddl string) (*wire.PreparedStat
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("CREATE VIEW")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -1312,10 +1488,13 @@ func (s *Server) handleDropView(sess *session, ddl string) (*wire.PreparedStatem
 				fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 					return w.Complete("DROP VIEW")
 				}
+
 				return wire.NewStatement(fn), true, nil
 			}
+
 			return nil, true, fmt.Errorf("%w: %s", ErrNoSuchView, name)
 		}
+
 		return nil, true, err
 	}
 
@@ -1324,12 +1503,14 @@ func (s *Server) handleDropView(sess *session, ddl string) (*wire.PreparedStatem
 		if err != nil {
 			return fmt.Errorf("read view meta: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(viewMetaKey(name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, metaTips); err != nil {
 			return fmt.Errorf("pin view-meta dep: %w", err)
 		}
+
 		return emitViewRemove(ectx, name)
 	}); err != nil {
 		return nil, true, err
@@ -1338,12 +1519,14 @@ func (s *Server) handleDropView(sess *session, ddl string) (*wire.PreparedStatem
 	if err := execSimple(sess.conn, "DROP VIEW "+quoteIdent(name)); err != nil {
 		return nil, true, fmt.Errorf("drop view on session: %w", err)
 	}
+
 	s.bumpSchemaEpoch(sess)
 	sess.log.Info("sql view dropped", "view", name)
 
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("DROP VIEW")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -1355,65 +1538,82 @@ func (s *Server) handleDropView(sess *session, ddl string) (*wire.PreparedStatem
 // strings.Fields) preserves embedded string literals with spaces.
 func parseCreateView(ddl string) (name string, ifNotExists bool, body string, err error) {
 	s := strings.TrimLeft(ddl, " \t\r\n")
+
 	var ok bool
+
 	s, ok = eatKeyword(s, "CREATE")
 	if !ok {
 		return "", false, "", fmt.Errorf("malformed CREATE VIEW: %q", ddl)
 	}
+
 	s, ok = eatKeyword(s, "VIEW")
 	if !ok {
 		return "", false, "", fmt.Errorf("malformed CREATE VIEW: expected VIEW: %q", ddl)
 	}
+
 	if rest, had := eatKeyword(s, "IF"); had {
 		ifNotExists = true
 		s = rest
+
 		s, ok = eatKeyword(s, "NOT")
 		if !ok {
 			return "", false, "", fmt.Errorf("CREATE VIEW IF: expected NOT: %q", ddl)
 		}
+
 		s, ok = eatKeyword(s, "EXISTS")
 		if !ok {
 			return "", false, "", fmt.Errorf("CREATE VIEW IF NOT: expected EXISTS: %q", ddl)
 		}
 	}
+
 	name, s, err = consumeIdent(s)
 	if err != nil {
 		return "", false, "", fmt.Errorf("CREATE VIEW: %w", err)
 	}
+
 	body = strings.TrimSpace(strings.TrimRight(strings.TrimSpace(s), ";"))
 	if body == "" {
 		return "", false, "", fmt.Errorf("CREATE VIEW %s: missing body", name)
 	}
+
 	return name, ifNotExists, body, nil
 }
 
 // parseDropView extracts the view name plus the IF EXISTS flag.
 func parseDropView(ddl string) (name string, ifExists bool, err error) {
 	s := strings.TrimLeft(ddl, " \t\r\n")
+
 	var ok bool
+
 	s, ok = eatKeyword(s, "DROP")
 	if !ok {
 		return "", false, fmt.Errorf("malformed DROP VIEW: %q", ddl)
 	}
+
 	s, ok = eatKeyword(s, "VIEW")
 	if !ok {
 		return "", false, fmt.Errorf("malformed DROP VIEW: expected VIEW: %q", ddl)
 	}
+
 	if rest, had := eatKeyword(s, "IF"); had {
 		s, ok = eatKeyword(rest, "EXISTS")
 		if !ok {
 			return "", false, fmt.Errorf("DROP VIEW IF: expected EXISTS: %q", ddl)
 		}
+
 		ifExists = true
 	}
+
 	name, s, err = consumeIdent(s)
 	if err != nil {
 		return "", false, fmt.Errorf("DROP VIEW: %w", err)
 	}
+
 	tail := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(s), ";"))
 	if tail != "" {
 		return "", false, fmt.Errorf("DROP VIEW: unexpected trailing text %q", tail)
 	}
+
 	return name, ifExists, nil
 }
 
@@ -1426,9 +1626,11 @@ func eatKeyword(s, keyword string) (string, bool) {
 	if len(s) < len(keyword) {
 		return s, false
 	}
+
 	if !strings.EqualFold(s[:len(keyword)], keyword) {
 		return s, false
 	}
+
 	if len(s) > len(keyword) {
 		c := s[len(keyword)]
 		if (c >= 'a' && c <= 'z') ||
@@ -1438,6 +1640,7 @@ func eatKeyword(s, keyword string) (string, bool) {
 			return s, false
 		}
 	}
+
 	return strings.TrimLeft(s[len(keyword):], " \t\r\n"), true
 }
 
@@ -1450,6 +1653,7 @@ func consumeIdent(s string) (name, rest string, err error) {
 	if s == "" {
 		return "", "", fmt.Errorf("expected identifier")
 	}
+
 	switch s[0] {
 	case '"':
 		end := 1
@@ -1457,27 +1661,35 @@ func consumeIdent(s string) (name, rest string, err error) {
 			if s[end] == '"' {
 				if end+1 < len(s) && s[end+1] == '"' {
 					end += 2
+
 					continue
 				}
+
 				n := strings.ReplaceAll(s[1:end], `""`, `"`)
+
 				return n, strings.TrimLeft(s[end+1:], " \t\r\n"), nil
 			}
+
 			end++
 		}
+
 		return "", "", fmt.Errorf("unterminated double-quoted identifier")
 	case '`':
 		idx := strings.IndexByte(s[1:], '`')
 		if idx < 0 {
 			return "", "", fmt.Errorf("unterminated backtick identifier")
 		}
+
 		return s[1 : 1+idx], strings.TrimLeft(s[1+idx+1:], " \t\r\n"), nil
 	case '[':
 		idx := strings.IndexByte(s[1:], ']')
 		if idx < 0 {
 			return "", "", fmt.Errorf("unterminated bracket identifier")
 		}
+
 		return s[1 : 1+idx], strings.TrimLeft(s[1+idx+1:], " \t\r\n"), nil
 	}
+
 	end := 0
 	for end < len(s) {
 		c := s[end]
@@ -1486,13 +1698,17 @@ func consumeIdent(s string) (name, rest string, err error) {
 			(c >= 'A' && c <= 'Z') ||
 			(c >= '0' && c <= '9') {
 			end++
+
 			continue
 		}
+
 		break
 	}
+
 	if end == 0 {
 		return "", "", fmt.Errorf("expected identifier")
 	}
+
 	return s[:end], strings.TrimLeft(s[end:], " \t\r\n"), nil
 }
 
@@ -1500,24 +1716,30 @@ func consumeIdent(s string) (name, rest string, err error) {
 // REMOVEs each field; caller is responsible for transaction framing.
 func dropIndexEntries(eng *effects.Engine, ectx *effects.Context, indexID []byte) error {
 	var entryKeys []string
+
 	eng.ScanKeys("", indexKeyPattern(indexID), func(key string) bool {
 		entryKeys = append(entryKeys, key)
+
 		return true
 	})
+
 	for _, ek := range entryKeys {
 		snap, _, err := ectx.GetSnapshot(ek)
 		if err != nil {
 			return fmt.Errorf("read index entry %s: %w", ek, err)
 		}
+
 		if snap == nil {
 			continue
 		}
-		for field := range snap.NetAdds {
+
+		for field := range snap.GetNetAdds() {
 			if err := emitKeyedRemove(ectx, ek, field); err != nil {
 				return fmt.Errorf("remove index entry %s.%s: %w", ek, field, err)
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -1532,51 +1754,64 @@ func parseCreateIndex(ddl string) (name, table string, columns []string, unique 
 	if len(tokens) < 5 {
 		return "", "", nil, false, fmt.Errorf("malformed CREATE INDEX: %q", ddl)
 	}
+
 	i := 1 // skip "CREATE"
 	if strings.EqualFold(tokens[i], "UNIQUE") {
 		unique = true
 		i++
 	}
+
 	if !strings.EqualFold(tokens[i], "INDEX") {
 		return "", "", nil, false, fmt.Errorf("malformed CREATE INDEX (expected INDEX): %q", ddl)
 	}
+
 	i++
 	if strings.EqualFold(tokens[i], "IF") {
 		// CREATE INDEX IF NOT EXISTS — swallow the three keywords.
 		if len(tokens) < i+3 || !strings.EqualFold(tokens[i+1], "NOT") || !strings.EqualFold(tokens[i+2], "EXISTS") {
 			return "", "", nil, false, fmt.Errorf("malformed CREATE INDEX IF clause: %q", ddl)
 		}
+
 		i += 3
 	}
 	// Next tokens: <name> ON <table>(<col>, …)
 	name = trimIdent(tokens[i])
+
 	i++
 	if i >= len(tokens) || !strings.EqualFold(tokens[i], "ON") {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX missing ON: %q", ddl)
 	}
+
 	i++
 	tail := strings.Join(tokens[i:], " ")
 	tail = strings.TrimRight(tail, ";")
 	openParen := strings.Index(tail, "(")
+
 	closeParen := strings.LastIndex(tail, ")")
 	if openParen < 0 || closeParen < 0 || closeParen < openParen {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX missing (col): %q", ddl)
 	}
+
 	table = trimIdent(strings.TrimSpace(tail[:openParen]))
+
 	inside := strings.TrimSpace(tail[openParen+1 : closeParen])
 	if inside == "" {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty column list: %q", ddl)
 	}
+
 	for part := range strings.SplitSeq(inside, ",") {
 		col := trimIdent(strings.TrimSpace(part))
 		if col == "" {
 			return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty column in list: %q", ddl)
 		}
+
 		columns = append(columns, col)
 	}
+
 	if name == "" || table == "" || len(columns) == 0 {
 		return "", "", nil, false, fmt.Errorf("CREATE INDEX: empty name/table/columns: %q", ddl)
 	}
+
 	return name, table, columns, unique, nil
 }
 
@@ -1586,19 +1821,24 @@ func parseDropIndex(ddl string) (name string, ifExists bool, err error) {
 	if len(tokens) < 3 {
 		return "", false, fmt.Errorf("malformed DROP INDEX: %q", ddl)
 	}
+
 	i := 2
 	if strings.EqualFold(tokens[i], "IF") {
 		if len(tokens) < i+3 || !strings.EqualFold(tokens[i+1], "EXISTS") {
 			return "", false, fmt.Errorf("malformed DROP INDEX IF clause: %q", ddl)
 		}
+
 		ifExists = true
 		i += 2
 	}
+
 	raw := strings.TrimRight(tokens[i], ";")
+
 	name = trimIdent(raw)
 	if name == "" {
 		return "", false, fmt.Errorf("DROP INDEX missing name: %q", ddl)
 	}
+
 	return name, ifExists, nil
 }
 
@@ -1610,13 +1850,16 @@ func trimIdent(s string) string {
 		if s[0] == '"' && s[len(s)-1] == '"' {
 			return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
 		}
+
 		if s[0] == '`' && s[len(s)-1] == '`' {
 			return s[1 : len(s)-1]
 		}
+
 		if s[0] == '[' && s[len(s)-1] == ']' {
 			return s[1 : len(s)-1]
 		}
 	}
+
 	return s
 }
 
@@ -1632,19 +1875,24 @@ func parseDropTable(ddl string) (name string, ifExists bool, err error) {
 	if len(tokens) < 3 {
 		return "", false, fmt.Errorf("malformed DROP TABLE: %q", ddl)
 	}
+
 	i := 2 // DROP TABLE …
 	if strings.EqualFold(tokens[i], "IF") {
 		if len(tokens) < 5 || !strings.EqualFold(tokens[i+1], "EXISTS") {
 			return "", false, fmt.Errorf("malformed DROP TABLE IF clause: %q", ddl)
 		}
+
 		ifExists = true
 		i += 2
 	}
+
 	raw := strings.TrimRight(tokens[i], ";")
+
 	raw = strings.Trim(raw, `"`)
 	if raw == "" {
 		return "", false, fmt.Errorf("missing table name in DROP TABLE: %q", ddl)
 	}
+
 	return raw, ifExists, nil
 }
 
@@ -1668,8 +1916,9 @@ func (s *Server) handleCreateTable(sess *session, ddl string) (*wire.PreparedSta
 		if err != nil {
 			return fmt.Errorf("read table list: %w", err)
 		}
+
 		if listSnap != nil {
-			if _, present := listSnap.NetAdds[schema.Name]; present {
+			if _, present := listSnap.GetNetAdds()[schema.Name]; present {
 				return fmt.Errorf("%w: %s", ErrTableExists, schema.Name)
 			}
 		}
@@ -1681,6 +1930,7 @@ func (s *Server) handleCreateTable(sess *session, ddl string) (*wire.PreparedSta
 		}, listTips); err != nil {
 			return fmt.Errorf("pin table-list dep: %w", err)
 		}
+
 		return emitSchema(ectx, schema)
 	}); err != nil {
 		return nil, true, err
@@ -1692,6 +1942,7 @@ func (s *Server) handleCreateTable(sess *session, ddl string) (*wire.PreparedSta
 	if err := registerVTable(sess.conn, schema); err != nil {
 		return nil, true, fmt.Errorf("register vtab on session: %w", err)
 	}
+
 	s.bumpSchemaEpoch(sess)
 
 	sess.log.Info("sql table created",
@@ -1703,6 +1954,7 @@ func (s *Server) handleCreateTable(sess *session, ddl string) (*wire.PreparedSta
 	fn := func(_ context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 		return writer.Complete("CREATE TABLE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -1724,15 +1976,18 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 	// Find the table name. SQLite stores it in sqlite_master; we
 	// fetch the most-recently-created table (which must be ours).
 	var tableName string
+
 	err := iterateRows(s.parserConn,
 		"SELECT name FROM sqlite_master WHERE type='table' ORDER BY rowid DESC LIMIT 1",
 		func(stmt *sqlite.Stmt) error {
 			tableName = stmt.ColumnText(0)
+
 			return nil
 		})
 	if err != nil {
 		return nil, fmt.Errorf("sqlite_master: %w", err)
 	}
+
 	if tableName == "" {
 		return nil, fmt.Errorf("unable to determine table name from DDL")
 	}
@@ -1742,8 +1997,11 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 	// first PK column, pk=2 for the second, etc. For composite
 	// PRIMARY KEY (a, b) we collect [ord(a), ord(b)] in pk order.
 	var cols []columnSchema
+
 	type pkEntry struct{ pkOrder, cid int }
+
 	var pkEntries []pkEntry
+
 	err = iterateRows(s.parserConn,
 		"SELECT cid, name, type, \"notnull\", pk FROM pragma_table_info('"+tableName+"')",
 		func(stmt *sqlite.Stmt) error {
@@ -1759,10 +2017,12 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 				NotNull:  notNull,
 				IsPK:     pk > 0,
 			}
+
 			cols = append(cols, col)
 			if pk > 0 {
 				pkEntries = append(pkEntries, pkEntry{pkOrder: pk, cid: cid})
 			}
+
 			return nil
 		})
 	if err != nil {
@@ -1775,6 +2035,7 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 				fmt.Errorf("parser cleanup: %w", dropErr),
 			)
 		}
+
 		return nil, fmt.Errorf("pragma_table_info: %w", err)
 	}
 
@@ -1805,6 +2066,7 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 	sort.Slice(pkEntries, func(i, j int) bool {
 		return pkEntries[i].pkOrder < pkEntries[j].pkOrder
 	})
+
 	pkColumns := make([]int, len(pkEntries))
 	for i, e := range pkEntries {
 		pkColumns[i] = e.cid
@@ -1825,23 +2087,28 @@ func (s *Server) parseCreateTable(ddl string) (*tableSchema, error) {
 // b)` constraint — SQLite rejects multiple column-level PK clauses.
 func registerVTable(conn *sqlite.Conn, schema *tableSchema) error {
 	composite := len(schema.PKColumns) > 1
+
 	parts := make([]string, 0, len(schema.Columns)+1)
 	for i, c := range schema.Columns {
 		parts = append(parts, buildColumnDef(&c, composite && schema.isPKColumn(i)))
 	}
+
 	if composite {
 		quoted := make([]string, len(schema.PKColumns))
 		for i, ord := range schema.PKColumns {
 			quoted[i] = quoteIdent(schema.Columns[ord].Name)
 		}
+
 		parts = append(parts, "PRIMARY KEY ("+strings.Join(quoted, ", ")+")")
 	}
+
 	ddl := fmt.Sprintf(
 		"CREATE VIRTUAL TABLE %s USING %s(%s)",
 		quoteIdent(schema.Name),
 		moduleName,
 		strings.Join(parts, ", "),
 	)
+
 	return execSimple(conn, ddl)
 }
 
@@ -1854,16 +2121,20 @@ func registerVTable(conn *sqlite.Conn, schema *tableSchema) error {
 func buildColumnDef(c *columnSchema, suppressInlinePK bool) string {
 	var b strings.Builder
 	b.WriteString(quoteIdent(c.Name))
+
 	if c.DeclType != "" {
 		b.WriteByte(' ')
 		b.WriteString(c.DeclType)
 	}
+
 	if c.IsPK && !suppressInlinePK {
 		b.WriteString(" PRIMARY KEY")
 	}
+
 	if c.NotNull {
 		b.WriteString(" NOT NULL")
 	}
+
 	return b.String()
 }
 
@@ -1882,8 +2153,10 @@ func stripLeadingComments(query string) string {
 		if nl < 0 {
 			return ""
 		}
+
 		s = strings.TrimLeft(s[nl+1:], " \t\r\n")
 	}
+
 	return s
 }
 
@@ -1905,11 +2178,13 @@ func execSimple(conn *sqlite.Conn, query string) (retErr error) {
 			}
 		}
 	}()
+
 	for {
 		has, err := stmt.Step()
 		if err != nil {
 			return err
 		}
+
 		if !has {
 			return nil
 		}
@@ -1933,14 +2208,17 @@ func iterateRows(conn *sqlite.Conn, query string, fn func(*sqlite.Stmt) error) (
 			}
 		}
 	}()
+
 	for {
 		has, err := stmt.Step()
 		if err != nil {
 			return err
 		}
+
 		if !has {
 			return nil
 		}
+
 		if err := fn(stmt); err != nil {
 			return err
 		}

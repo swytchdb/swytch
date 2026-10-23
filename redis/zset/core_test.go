@@ -37,11 +37,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -51,11 +54,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -66,6 +72,7 @@ func TestHandleZAdd(t *testing.T) {
 	ctx := eng.NewContext()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("1.0"), []byte("a"), []byte("2.0"), []byte("b"), []byte("3.0"), []byte("c")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":3\r\n" {
 		t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -73,6 +80,7 @@ func TestHandleZAdd(t *testing.T) {
 
 	// Add duplicate + new
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("1.5"), []byte("a"), []byte("4.0"), []byte("d")}}
+
 	resp = runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":1\r\n" {
 		t.Fatalf("expected :1\\r\\n (only d is new), got %q", resp)
@@ -90,6 +98,7 @@ func TestHandleZAdd_NX(t *testing.T) {
 
 	// NX: should not update existing, should add new
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("NX"), []byte("2.0"), []byte("a"), []byte("3.0"), []byte("b")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":1\r\n" {
 		t.Fatalf("expected :1\\r\\n (only b added), got %q", resp)
@@ -97,6 +106,7 @@ func TestHandleZAdd_NX(t *testing.T) {
 
 	// Verify a still has score 1.0
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZScore, cmd)
 	if !strings.Contains(resp, "1") {
 		t.Fatalf("expected score 1 for member a, got %q", resp)
@@ -109,6 +119,7 @@ func TestHandleZAdd_XX(t *testing.T) {
 
 	// XX on non-existing key returns 0
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("XX"), []byte("1.0"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n, got %q", resp)
@@ -121,6 +132,7 @@ func TestHandleZAdd_XX(t *testing.T) {
 
 	// XX: should update existing but not add new
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("XX"), []byte("2.0"), []byte("a"), []byte("3.0"), []byte("b")}}
+
 	resp = runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n (no new members), got %q", resp)
@@ -137,6 +149,7 @@ func TestHandleZAdd_GT(t *testing.T) {
 
 	// GT: score 3 < 5, should not update
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("GT"), []byte("3.0"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n, got %q", resp)
@@ -144,6 +157,7 @@ func TestHandleZAdd_GT(t *testing.T) {
 
 	// GT: score 10 > 5, should update
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("GT"), []byte("10.0"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n (updated not added), got %q", resp)
@@ -160,6 +174,7 @@ func TestHandleZAdd_LT(t *testing.T) {
 
 	// LT: score 10 > 5, should not update
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("LT"), []byte("10.0"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n, got %q", resp)
@@ -167,6 +182,7 @@ func TestHandleZAdd_LT(t *testing.T) {
 
 	// LT: score 1 < 5, should update
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("LT"), []byte("1.0"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n (updated not added), got %q", resp)
@@ -183,6 +199,7 @@ func TestHandleZAdd_CH(t *testing.T) {
 
 	// CH: count changed + added
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("CH"), []byte("2.0"), []byte("a"), []byte("3.0"), []byte("b")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if resp != ":2\r\n" {
 		t.Fatalf("expected :2\\r\\n (1 changed + 1 added), got %q", resp)
@@ -195,6 +212,7 @@ func TestHandleZAdd_INCR(t *testing.T) {
 
 	// INCR on new member
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("INCR"), []byte("5.0"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if !strings.Contains(resp, "5") {
 		t.Fatalf("expected score 5 for new member, got %q", resp)
@@ -202,6 +220,7 @@ func TestHandleZAdd_INCR(t *testing.T) {
 
 	// INCR on existing member
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("INCR"), []byte("3.0"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if !strings.Contains(resp, "8") {
 		t.Fatalf("expected score 8 after increment, got %q", resp)
@@ -232,6 +251,7 @@ func TestHandleZAdd_WrongType(t *testing.T) {
 	_ = ctx.Flush()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("mykey"), []byte("1.0"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZAdd, cmd)
 	if !strings.Contains(resp, "WRONGTYPE") {
 		t.Fatalf("expected WRONGTYPE error, got %q", resp)
@@ -246,6 +266,7 @@ func TestHandleZIncrBy(t *testing.T) {
 
 	// Increment on new key/member
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("5"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZIncrBy, cmd)
 	if !strings.Contains(resp, "5") {
 		t.Fatalf("expected score 5, got %q", resp)
@@ -253,6 +274,7 @@ func TestHandleZIncrBy(t *testing.T) {
 
 	// Increment existing
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("3"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZIncrBy, cmd)
 	if !strings.Contains(resp, "8") {
 		t.Fatalf("expected score 8, got %q", resp)
@@ -267,6 +289,7 @@ func TestHandleZScore(t *testing.T) {
 
 	// Non-existent key
 	cmd := &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZScore, cmd)
 	if resp != "$-1\r\n" {
 		t.Fatalf("expected null bulk string, got %q", resp)
@@ -278,6 +301,7 @@ func TestHandleZScore(t *testing.T) {
 	})
 
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("a")}}
+
 	resp = runHandlerWith(eng, ctx, handleZScore, cmd)
 	if !strings.Contains(resp, "3.14") {
 		t.Fatalf("expected 3.14, got %q", resp)
@@ -285,6 +309,7 @@ func TestHandleZScore(t *testing.T) {
 
 	// Non-existent member
 	cmd = &shared.Command{Args: [][]byte{[]byte("myzset"), []byte("b")}}
+
 	resp = runHandlerWith(eng, ctx, handleZScore, cmd)
 	if resp != "$-1\r\n" {
 		t.Fatalf("expected null bulk string for missing member, got %q", resp)
@@ -486,6 +511,7 @@ func TestHandleZScore_WrongType(t *testing.T) {
 	_ = ctx.Flush()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("mykey"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleZScore, cmd)
 	if !strings.Contains(resp, "WRONGTYPE") {
 		t.Fatalf("expected WRONGTYPE error, got %q", resp)

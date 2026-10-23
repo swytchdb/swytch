@@ -59,10 +59,12 @@ func (a *MetricsAdapter) TotalConnections() uint64 {
 // CommandCounts returns command execution counts by command name.
 func (a *MetricsAdapter) CommandCounts() map[string]uint64 {
 	cmdStats := a.stats.GetCommandStats()
+
 	result := make(map[string]uint64, len(cmdStats))
 	for cmd, stats := range cmdStats {
 		result[cmd] = stats.Calls
 	}
+
 	return result
 }
 
@@ -182,11 +184,13 @@ func (a *MetricsAdapter) BlockedClients() int64 {
 func (a *MetricsAdapter) CommandErrors() map[string]uint64 {
 	cmdStats := a.stats.GetCommandStats()
 	result := make(map[string]uint64)
+
 	for cmd, stats := range cmdStats {
 		if stats.FailedCalls > 0 {
 			result[cmd] = stats.FailedCalls
 		}
 	}
+
 	return result
 }
 

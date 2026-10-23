@@ -49,14 +49,18 @@ func TestParseScore(t *testing.T) {
 		score, exclusive, ok := ParseScore([]byte(tt.input))
 		if ok != tt.ok {
 			t.Errorf("ParseScore(%q): expected ok=%v, got %v", tt.input, tt.ok, ok)
+
 			continue
 		}
+
 		if !ok {
 			continue
 		}
+
 		if exclusive != tt.exclusive {
 			t.Errorf("ParseScore(%q): expected exclusive=%v, got %v", tt.input, tt.exclusive, exclusive)
 		}
+
 		if math.IsInf(tt.score, 1) {
 			if !math.IsInf(score, 1) {
 				t.Errorf("ParseScore(%q): expected +Inf, got %v", tt.input, score)

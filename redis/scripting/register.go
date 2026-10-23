@@ -27,8 +27,10 @@ func getEngine(w *shared.Writer) shared.ScriptingEngine {
 	e := shared.GetScriptingEngine()
 	if e == nil {
 		w.WriteError("ERR scripting engine not initialized")
+
 		return nil
 	}
+
 	return e
 }
 
@@ -43,6 +45,7 @@ func init() {
 				if e == nil {
 					return true, nil, func() {}
 				}
+
 				return true, nil, func() { e.HandleFunction(cmd, w) }
 			},
 		}},
@@ -52,6 +55,7 @@ func init() {
 				if e == nil {
 					return true, nil, func() {}
 				}
+
 				return true, nil, func() { e.HandleScript(cmd, w) }
 			},
 		}},

@@ -52,6 +52,7 @@ func GetScriptingEngine() ScriptingEngine {
 	if h == nil || h.engine == nil {
 		return nil
 	}
+
 	return h.engine
 }
 

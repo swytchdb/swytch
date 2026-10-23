@@ -35,12 +35,14 @@ func reusePortListenConfig() net.ListenConfig {
 	return net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
+
 			err := c.Control(func(fd uintptr) {
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 			})
 			if err != nil {
 				return err
 			}
+
 			return opErr
 		},
 	}

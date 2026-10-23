@@ -96,6 +96,7 @@ func indexKey(indexID []byte, encoded []byte) string {
 	buf := make([]byte, len(header)+len(encoded))
 	copy(buf, header)
 	copy(buf[len(header):], encoded)
+
 	return string(buf)
 }
 
@@ -149,6 +150,7 @@ func encodeIDHeader(prefix string, id []byte) []byte {
 	buf[0] = prefix[0]
 	binary.BigEndian.PutUint32(buf[1:5], uint32(len(id)))
 	copy(buf[5:], id)
+
 	return buf
 }
 
@@ -159,6 +161,7 @@ func rowKey(tableID []byte, pk string) string {
 	buf := make([]byte, len(header)+len(pk))
 	copy(buf, header)
 	copy(buf[len(header):], pk)
+
 	return string(buf)
 }
 
@@ -183,9 +186,11 @@ func parseRowKey(key string, tableID []byte) (string, bool) {
 	if len(key) < len(header) {
 		return "", false
 	}
+
 	if key[:len(header)] != header {
 		return "", false
 	}
+
 	return key[len(header):], true
 }
 
@@ -202,6 +207,7 @@ func escapeGlob(s string) string {
 			out = append(out, c)
 		}
 	}
+
 	return string(out)
 }
 

@@ -68,6 +68,7 @@ func (s *Server) maybeInterceptTransaction(sess *session, query string) (*wire.P
 		strings.HasPrefix(upper, "RELEASE "):
 		return s.handleReleaseSavepoint(sess, trimmed)
 	}
+
 	return nil, false, nil
 }
 
@@ -85,21 +86,27 @@ func parseSavepointName(stmt string) (string, error) {
 		u := strings.ToUpper(tokens[i])
 		if u == "SAVEPOINT" || u == "RELEASE" || u == "ROLLBACK" || u == "TO" {
 			i++
+
 			continue
 		}
+
 		break
 	}
+
 	if i >= len(tokens) {
 		return "", errors.New("savepoint statement missing name")
 	}
+
 	name := strings.TrimRight(tokens[i], ";")
 	// Strip double-quote delimiters on quoted identifiers.
 	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
 		name = strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
 	}
+
 	if name == "" {
 		return "", errors.New("savepoint statement missing name")
 	}
+
 	return name, nil
 }
 
@@ -109,15 +116,19 @@ func (s *Server) handleSavepoint(sess *session, stmt string) (*wire.PreparedStat
 	if sess.txContext == nil {
 		return nil, true, errors.New("SAVEPOINT: no transaction in progress")
 	}
+
 	name, err := parseSavepointName(stmt)
 	if err != nil {
 		return nil, true, err
 	}
+
 	sess.pushSavepoint(name)
 	sess.log.Debug("sql savepoint", "name", name)
+
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("SAVEPOINT")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -128,17 +139,22 @@ func (s *Server) handleReleaseSavepoint(sess *session, stmt string) (*wire.Prepa
 	if sess.txContext == nil {
 		return nil, true, errors.New("RELEASE: no transaction in progress")
 	}
+
 	name, err := parseSavepointName(stmt)
 	if err != nil {
 		return nil, true, err
 	}
+
 	if !sess.releaseSavepoint(name) {
 		return nil, true, fmt.Errorf("savepoint %q does not exist", name)
 	}
+
 	sess.log.Debug("sql release savepoint", "name", name)
+
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("RELEASE")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -149,17 +165,22 @@ func (s *Server) handleRollbackTo(sess *session, stmt string) (*wire.PreparedSta
 	if sess.txContext == nil {
 		return nil, true, errors.New("ROLLBACK TO: no transaction in progress")
 	}
+
 	name, err := parseSavepointName(stmt)
 	if err != nil {
 		return nil, true, err
 	}
+
 	if !sess.rollbackToSavepoint(name) {
 		return nil, true, fmt.Errorf("savepoint %q does not exist", name)
 	}
+
 	sess.log.Debug("sql rollback to savepoint", "name", name)
+
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ROLLBACK")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -175,6 +196,7 @@ func (s *Server) handleBegin(sess *session) (*wire.PreparedStatement, bool, erro
 	if sess.txContext != nil {
 		return nil, true, errors.New("BEGIN: transaction already in progress")
 	}
+
 	ectx := s.engine.NewContext()
 	ectx.BeginTx()
 	sess.txContext = ectx
@@ -184,6 +206,7 @@ func (s *Server) handleBegin(sess *session) (*wire.PreparedStatement, bool, erro
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("BEGIN")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -204,6 +227,7 @@ func (s *Server) handleCommit(sess *session) (*wire.PreparedStatement, bool, err
 		fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 			return w.Complete("COMMIT")
 		}
+
 		return wire.NewStatement(fn), true, nil
 	}
 
@@ -220,19 +244,25 @@ func (s *Server) handleCommit(sess *session) (*wire.PreparedStatement, bool, err
 	// runner + Flush in its handler.
 	unlock := lockEngineKeys(s.engine, ectx.PendingKeys())
 	err := ectx.Flush()
+
 	unlock()
+
 	if err != nil {
 		if errors.Is(err, effects.ErrTxnAborted) {
 			sess.log.Debug("sql tx commit aborted by fork-choice")
+
 			return nil, true, fmt.Errorf("serialization failure: %w", err)
 		}
+
 		return nil, true, fmt.Errorf("commit flush: %w", err)
 	}
+
 	sess.log.Debug("sql tx commit")
 
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("COMMIT")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }
 
@@ -247,8 +277,10 @@ func (s *Server) handleRollback(sess *session) (*wire.PreparedStatement, bool, e
 		fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 			return w.Complete("ROLLBACK")
 		}
+
 		return wire.NewStatement(fn), true, nil
 	}
+
 	sess.txContext.Abort()
 	sess.clearTxState()
 	sess.log.Debug("sql tx rollback")
@@ -256,5 +288,6 @@ func (s *Server) handleRollback(sess *session) (*wire.PreparedStatement, bool, e
 	fn := func(_ context.Context, w wire.DataWriter, _ []wire.Parameter) error {
 		return w.Complete("ROLLBACK")
 	}
+
 	return wire.NewStatement(fn), true, nil
 }

@@ -42,6 +42,7 @@ func NewLuaVMPool(maxSize int) *LuaVMPool {
 	if maxSize <= 0 {
 		maxSize = DefaultVMPoolSize
 	}
+
 	return &LuaVMPool{
 		pool:    make(chan *lua.LState, maxSize),
 		maxSize: maxSize,
@@ -82,6 +83,7 @@ func (p *LuaVMPool) Close() {
 	defer p.mu.Unlock()
 
 	close(p.pool)
+
 	for L := range p.pool {
 		L.Close()
 	}
@@ -150,6 +152,7 @@ func removeUnsafeOsFunctions(L *lua.LState) {
 	if osTable == lua.LNil {
 		return
 	}
+
 	osTbl, ok := osTable.(*lua.LTable)
 	if !ok {
 		return
@@ -170,11 +173,14 @@ func removeUnsafeOsFunctions(L *lua.LState) {
 	mt := L.NewTable()
 	mt.RawSetString("__index", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckAny(2)
+
 		keyStr := ""
 		if s, ok := key.(lua.LString); ok {
 			keyStr = string(s)
 		}
+
 		L.RaiseError("attempt to call field '%s' (a nil value)", keyStr)
+
 		return 0
 	}))
 	L.SetMetatable(osTbl, mt)
@@ -207,6 +213,7 @@ func setupGlobalsProtection(L *lua.LState) {
 	// __index: raise error when reading undeclared globals
 	mt.RawSetString("__index", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckAny(2)
+
 		keyStr := ""
 		if s, ok := key.(lua.LString); ok {
 			keyStr = string(s)
@@ -214,9 +221,12 @@ func setupGlobalsProtection(L *lua.LState) {
 		// Allow internal names starting with __
 		if len(keyStr) >= 2 && keyStr[:2] == "__" {
 			L.Push(lua.LNil)
+
 			return 1
 		}
+
 		L.RaiseError("Script attempted to access nonexistent global variable '%s'", keyStr)
+
 		return 0
 	}))
 
@@ -224,6 +234,7 @@ func setupGlobalsProtection(L *lua.LState) {
 	mt.RawSetString("__newindex", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckAny(2)
 		value := L.CheckAny(3)
+
 		keyStr := ""
 		if s, ok := key.(lua.LString); ok {
 			keyStr = string(s)
@@ -231,14 +242,18 @@ func setupGlobalsProtection(L *lua.LState) {
 		// Allow internal names starting with __ (for function storage)
 		if len(keyStr) >= 2 && keyStr[:2] == "__" {
 			globals.RawSet(key, value)
+
 			return 0
 		}
 		// Allow setting declared globals (redis, KEYS, ARGV)
 		if declared.RawGet(key) != lua.LNil {
 			globals.RawSet(key, value)
+
 			return 0
 		}
+
 		L.RaiseError("Attempt to modify a readonly table script: %s", keyStr)
+
 		return 0
 	}))
 
@@ -250,6 +265,7 @@ func (p *LuaVMPool) PrewarmPool(count int) {
 	if count > p.maxSize {
 		count = p.maxSize
 	}
+
 	for range count {
 		select {
 		case p.pool <- p.newVM():

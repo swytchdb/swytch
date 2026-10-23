@@ -42,11 +42,14 @@ func TestParseLexBound(t *testing.T) {
 		bound, ok := ParseLexBound([]byte(tt.input))
 		if ok != tt.ok {
 			t.Errorf("ParseLexBound(%q): ok = %v, want %v", tt.input, ok, tt.ok)
+
 			continue
 		}
+
 		if !ok {
 			continue
 		}
+
 		if bound != tt.want {
 			t.Errorf("ParseLexBound(%q) = %+v, want %+v", tt.input, bound, tt.want)
 		}

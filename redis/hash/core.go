@@ -35,15 +35,19 @@ func getHashSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, t
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_KEYED {
+
+	if snap.GetCollection() == pb.CollectionKind_KEYED {
 		return snap, tips, true, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && snap.TypeTag == pb.ValueType_TYPE_HASH {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && snap.GetTypeTag() == pb.ValueType_TYPE_HASH {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -119,7 +123,7 @@ func emitHashFieldPersist(cmd *shared.Command, key string, field string) error {
 }
 
 func elementValueBytes(data *pb.DataEffect) []byte {
-	switch v := data.Value.(type) {
+	switch v := data.GetValue().(type) {
 	case *pb.DataEffect_Raw:
 		return v.Raw
 	case *pb.DataEffect_IntVal:
@@ -127,6 +131,7 @@ func elementValueBytes(data *pb.DataEffect) []byte {
 	case *pb.DataEffect_FloatVal:
 		return []byte(strconv.FormatFloat(v.FloatVal, 'f', -1, 64))
 	}
+
 	return nil
 }
 
@@ -134,30 +139,36 @@ func hashFieldValue(snap *pb.ReducedEffect, field string) ([]byte, bool) {
 	if snap == nil || snap.NetAdds == nil {
 		return nil, false
 	}
-	elem, ok := snap.NetAdds[field]
+
+	elem, ok := snap.GetNetAdds()[field]
 	if !ok {
 		return nil, false
 	}
-	return elementValueBytes(elem.Data), true
+
+	return elementValueBytes(elem.GetData()), true
 }
 
 func hashFieldExpiresAt(snap *pb.ReducedEffect, field string) (time.Time, bool) {
 	if snap == nil || snap.NetAdds == nil {
 		return time.Time{}, false
 	}
-	elem, ok := snap.NetAdds[field]
+
+	elem, ok := snap.GetNetAdds()[field]
 	if !ok {
 		return time.Time{}, false
 	}
-	if elem.ExpiresAt == nil {
+
+	if elem.GetExpiresAt() == nil {
 		return time.Time{}, true
 	}
-	return elem.ExpiresAt.AsTime(), true
+
+	return elem.GetExpiresAt().AsTime(), true
 }
 
 func handleHGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("hget")
+
 		return
 	}
 
@@ -170,31 +181,39 @@ func handleHGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		fieldVal, ok := hashFieldValue(snap, field)
 		if !ok {
 			w.WriteNullBulkString()
+
 			return
 		}
 
 		w.WriteBulkString(fieldVal)
 	}
+
 	return
 }
 
 func handleHSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 || len(cmd.Args)%2 == 0 {
 		w.WriteWrongNumArguments("hset")
+
 		return
 	}
 
@@ -207,14 +226,18 @@ func handleHSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		added := 0
+
 		for i := 0; i < len(fieldValues); i += 2 {
 			field := fieldValues[i]
 			value := fieldValues[i+1]
@@ -222,12 +245,13 @@ func handleHSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			// Count new fields (not already in snap)
 			if snap == nil || snap.NetAdds == nil {
 				added++
-			} else if _, has := snap.NetAdds[string(field)]; !has {
+			} else if _, has := snap.GetNetAdds()[string(field)]; !has {
 				added++
 			}
 
 			if err := emitHashInsert(cmd, key, field, value); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -235,18 +259,21 @@ func handleHSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		if !exists {
 			if err := emitHashTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(int64(added))
 	}
+
 	return
 }
 
 func handleHSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("hsetnx")
+
 		return
 	}
 
@@ -260,41 +287,49 @@ func handleHSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// If field already exists, return 0
 		if snap != nil && snap.NetAdds != nil {
-			if _, has := snap.NetAdds[field]; has {
+			if _, has := snap.GetNetAdds()[field]; has {
 				w.WriteZero()
+
 				return
 			}
 		}
 
 		if err := emitHashInsert(cmd, key, []byte(field), value); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if !exists {
 			if err := emitHashTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteOne()
 	}
+
 	return
 }
 
 func handleHDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("hdel")
+
 		return
 	}
 
@@ -306,24 +341,32 @@ func handleHDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		deleted := 0
+
 		for _, f := range cmd.Args[1:] {
 			if snap.NetAdds != nil {
-				if _, has := snap.NetAdds[string(f)]; has {
+				if _, has := snap.GetNetAdds()[string(f)]; has {
 					deleted++
+
 					if err := emitHashRemove(cmd, key, f); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -332,12 +375,14 @@ func handleHDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		w.WriteInteger(int64(deleted))
 	}
+
 	return
 }
 
 func handleHExists(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("hexists")
+
 		return
 	}
 
@@ -350,31 +395,40 @@ func handleHExists(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if snap.NetAdds != nil {
-			if _, has := snap.NetAdds[field]; has {
+			if _, has := snap.GetNetAdds()[field]; has {
 				w.WriteOne()
+
 				return
 			}
 		}
+
 		w.WriteZero()
 	}
+
 	return
 }
 
 func handleHGetAll(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("hgetall")
+
 		return
 	}
 
@@ -386,34 +440,43 @@ func handleHGetAll(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteMap(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if snap.NetAdds == nil {
 			w.WriteMap(0)
+
 			return
 		}
 
-		w.WriteMap(len(snap.NetAdds))
-		for field, elem := range snap.NetAdds {
+		w.WriteMap(len(snap.GetNetAdds()))
+
+		for field, elem := range snap.GetNetAdds() {
 			w.WriteBulkStringStr(field)
-			w.WriteBulkString(elementValueBytes(elem.Data))
+			w.WriteBulkString(elementValueBytes(elem.GetData()))
 		}
 	}
+
 	return
 }
 
 func handleHKeys(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("hkeys")
+
 		return
 	}
 
@@ -425,33 +488,42 @@ func handleHKeys(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if snap.NetAdds == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
-		w.WriteArray(len(snap.NetAdds))
-		for field := range snap.NetAdds {
+		w.WriteArray(len(snap.GetNetAdds()))
+
+		for field := range snap.GetNetAdds() {
 			w.WriteBulkStringStr(field)
 		}
 	}
+
 	return
 }
 
 func handleHVals(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("hvals")
+
 		return
 	}
 
@@ -463,33 +535,42 @@ func handleHVals(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if snap.NetAdds == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
-		w.WriteArray(len(snap.NetAdds))
-		for _, elem := range snap.NetAdds {
-			w.WriteBulkString(elementValueBytes(elem.Data))
+		w.WriteArray(len(snap.GetNetAdds()))
+
+		for _, elem := range snap.GetNetAdds() {
+			w.WriteBulkString(elementValueBytes(elem.GetData()))
 		}
 	}
+
 	return
 }
 
 func handleHLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("hlen")
+
 		return
 	}
 
@@ -501,30 +582,38 @@ func handleHLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if snap.NetAdds == nil {
 			w.WriteZero()
+
 			return
 		}
 
-		w.WriteInteger(int64(len(snap.NetAdds)))
+		w.WriteInteger(int64(len(snap.GetNetAdds())))
 	}
+
 	return
 }
 
 func handleHMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("hmget")
+
 		return
 	}
 
@@ -537,10 +626,13 @@ func handleHMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -550,11 +642,13 @@ func handleHMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			for range fields {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
 		for _, fieldBytes := range fields {
 			field := string(fieldBytes)
+
 			fieldVal, ok := hashFieldValue(snap, field)
 			if ok {
 				w.WriteBulkString(fieldVal)
@@ -563,12 +657,14 @@ func handleHMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			}
 		}
 	}
+
 	return
 }
 
 func handleHMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 || len(cmd.Args)%2 == 0 {
 		w.WriteWrongNumArguments("hmset")
+
 		return
 	}
 
@@ -581,10 +677,13 @@ func handleHMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		_, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -594,6 +693,7 @@ func handleHMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 			if err := emitHashInsert(cmd, key, field, value); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -601,26 +701,31 @@ func handleHMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		if !exists {
 			if err := emitHashTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("hincrby")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	field := string(cmd.Args[1])
+
 	increment, ok := shared.ParseInt64(cmd.Args[2])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -631,18 +736,22 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Read current value from snapshot to validate and compute return value
 		var current int64
+
 		if snap != nil && snap.NetAdds != nil {
-			if elem, has := snap.NetAdds[field]; has {
-				switch v := elem.Data.GetValue().(type) {
+			if elem, has := snap.GetNetAdds()[field]; has {
+				switch v := elem.GetData().GetValue().(type) {
 				case *pb.DataEffect_IntVal:
 					// Additive (HINCRBY-produced) value reads directly.
 					current = v.IntVal
@@ -650,9 +759,10 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 					// Byte-shaped (LWW) value must parse. Decompress returns
 					// nil for a corrupt compressed value — that parses as
 					// not-an-integer rather than silently reading as zero.
-					current, ok = shared.ParseInt64(elem.Data.Decompress())
+					current, ok = shared.ParseInt64(elem.GetData().Decompress())
 					if !ok {
 						w.WriteNotInteger()
+
 						return
 					}
 				}
@@ -662,6 +772,7 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		// Check for overflow before adding
 		if checkAdditionOverflow(current, increment) {
 			w.WriteError("ERR increment or decrement would overflow")
+
 			return
 		}
 
@@ -669,39 +780,46 @@ func handleHIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 		if err := emitHashIncrInt(cmd, key, []byte(field), increment); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if !exists {
 			if err := emitHashTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(newValue)
 	}
+
 	return
 }
 
 func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("hincrbyfloat")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	field := string(cmd.Args[1])
 	incrementStr := string(cmd.Args[2])
+
 	increment, err := strconv.ParseFloat(incrementStr, 64)
 	if err != nil {
 		w.WriteError("ERR value is not a valid float")
+
 		return
 	}
 
 	// Check if increment is NaN or Infinity
 	if math.IsNaN(increment) || math.IsInf(increment, 0) {
 		w.WriteError("ERR value is NaN or Infinity")
+
 		return
 	}
 
@@ -712,18 +830,22 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Read current value from snapshot to validate and compute return value
 		var current float64
+
 		if snap != nil && snap.NetAdds != nil {
-			if elem, has := snap.NetAdds[field]; has {
-				switch v := elem.Data.GetValue().(type) {
+			if elem, has := snap.GetNetAdds()[field]; has {
+				switch v := elem.GetData().GetValue().(type) {
 				case *pb.DataEffect_FloatVal:
 					// Additive (HINCRBYFLOAT-produced) value reads directly.
 					current = v.FloatVal
@@ -735,9 +857,11 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 					// nil for a corrupt compressed value — that parses as
 					// not-a-float rather than silently reading as zero.
 					var parseErr error
-					current, parseErr = strconv.ParseFloat(string(elem.Data.Decompress()), 64)
+
+					current, parseErr = strconv.ParseFloat(string(elem.GetData().Decompress()), 64)
 					if parseErr != nil {
 						w.WriteError("ERR hash value is not a float")
+
 						return
 					}
 				}
@@ -749,17 +873,20 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		// Check if result is NaN or Infinity
 		if math.IsNaN(newValue) || math.IsInf(newValue, 0) {
 			w.WriteError("ERR increment would produce NaN or Infinity")
+
 			return
 		}
 
 		if err := emitHashIncrFloat(cmd, key, []byte(field), increment); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if !exists {
 			if err := emitHashTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -767,12 +894,14 @@ func handleHIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databa
 		newStr := strconv.FormatFloat(newValue, 'f', -1, 64)
 		w.WriteBulkString([]byte(newStr))
 	}
+
 	return
 }
 
 func handleHStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("hstrlen")
+
 		return
 	}
 
@@ -785,25 +914,32 @@ func handleHStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		fieldVal, ok := hashFieldValue(snap, field)
 		if !ok {
 			w.WriteZero()
+
 			return
 		}
 
 		w.WriteInteger(int64(len(fieldVal)))
 	}
+
 	return
 }
 
@@ -812,8 +948,10 @@ func checkAdditionOverflow(a, b int64) bool {
 	if b > 0 && a > math.MaxInt64-b {
 		return true // positive overflow
 	}
+
 	if b < 0 && a < math.MinInt64-b {
 		return true // negative overflow
 	}
+
 	return false
 }

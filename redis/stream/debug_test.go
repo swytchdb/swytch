@@ -37,20 +37,24 @@ func TestDebugGroupCreate(t *testing.T) {
 	// Verify stream exists
 	snap, tips, err := env.ctx.GetSnapshot("mystream")
 	t.Logf("After XADD: snap=%v tips=%v err=%v", snap != nil, tips, err)
+
 	if snap != nil {
 		t.Logf("  Collection=%v TypeTag=%v OrderedElements=%d NetAdds=%d",
-			snap.Collection, snap.TypeTag, len(snap.OrderedElements), len(snap.NetAdds))
+			snap.GetCollection(), snap.GetTypeTag(), len(snap.GetOrderedElements()), len(snap.GetNetAdds()))
 	}
 
 	// Step 2: First XGROUP CREATE
 	cmd := makeCmd(env, "CREATE", "mystream", "mygroup", "0")
 	valid, _, runner := handleXGroup(cmd, env.w, nil)
 	t.Logf("XGROUP CREATE valid=%v", valid)
+
 	if runner != nil {
 		runner()
+
 		flushErr := env.ctx.Flush()
 		t.Logf("XGROUP CREATE flush err=%v", flushErr)
 	}
+
 	result1 := env.buf.String()
 	t.Logf("XGROUP CREATE result: %q", result1)
 	env.buf.Reset()
@@ -58,18 +62,20 @@ func TestDebugGroupCreate(t *testing.T) {
 	// Verify stream still exists
 	snap2, tips2, err2 := env.ctx.GetSnapshot("mystream")
 	t.Logf("After XGROUP CREATE: snap=%v tips=%v err=%v", snap2 != nil, tips2, err2)
+
 	if snap2 != nil {
 		t.Logf("  Collection=%v TypeTag=%v OrderedElements=%d NetAdds=%d Op=%v",
-			snap2.Collection, snap2.TypeTag, len(snap2.OrderedElements), len(snap2.NetAdds), snap2.Op)
+			snap2.GetCollection(), snap2.GetTypeTag(), len(snap2.GetOrderedElements()), len(snap2.GetNetAdds()), snap2.GetOp())
 	}
 
 	// Check what getStreamSnapshot returns
 	cmd2 := makeCmd(env, "dummy")
 	snapX, _, exists, wrongType, errX := getStreamSnapshot(cmd2, "mystream")
 	t.Logf("getStreamSnapshot: snap=%v exists=%v wrongType=%v err=%v", snapX != nil, exists, wrongType, errX)
+
 	if snapX != nil {
 		t.Logf("  Collection=%v TypeTag=%v OrderedElements=%d NetAdds=%d Op=%v",
-			snapX.Collection, snapX.TypeTag, len(snapX.OrderedElements), len(snapX.NetAdds), snapX.Op)
+			snapX.GetCollection(), snapX.GetTypeTag(), len(snapX.GetOrderedElements()), len(snapX.GetNetAdds()), snapX.GetOp())
 	}
 }
 
@@ -78,6 +84,7 @@ func makeCmd(env *testEnv, args ...string) *shared.Command {
 	for i, a := range args {
 		byteArgs[i] = []byte(a)
 	}
+
 	return &shared.Command{Args: byteArgs, Runtime: env.eng, Context: env.ctx}
 }
 

@@ -35,6 +35,7 @@ import (
 func newHandlerWithEffects() *Handler {
 	cfg := DefaultHandlerConfig()
 	cfg.Engine = effects.NewTestEngine()
+
 	return NewHandler(cfg)
 }
 
@@ -44,6 +45,7 @@ func newEffectsConn(h *Handler) *shared.Connection {
 	if h.engine != nil {
 		conn.EffectsCtx = h.engine.NewContext()
 	}
+
 	return conn
 }
 
@@ -65,6 +67,7 @@ func TestBLPopImmediateReturn(t *testing.T) {
 
 	// Now BLPOP should return immediately
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("mylist"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -87,6 +90,7 @@ func TestBLPopTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("nonexistent"), []byte("0.1")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	// Should return null array after timeout
@@ -107,9 +111,11 @@ func TestBLPopBlockingWithPush(t *testing.T) {
 
 	conn := newEffectsConn(h)
 
-	var wg sync.WaitGroup
-	var result string
-	var blpopDone time.Time
+	var (
+		wg        sync.WaitGroup
+		result    string
+		blpopDone time.Time
+	)
 
 	// Start BLPOP in goroutine
 	wg.Go(func() {
@@ -117,12 +123,14 @@ func TestBLPopBlockingWithPush(t *testing.T) {
 		w := shared.NewWriter(buf)
 		cmd := &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("blocklist"), []byte("5")}}
 		h.ExecuteInto(cmd, w, conn)
+
 		result = buf.String()
 		blpopDone = time.Now()
 	})
 
 	// Wait a bit then push data (use separate conn to avoid race on shared context)
 	time.Sleep(50 * time.Millisecond)
+
 	pushTime := time.Now()
 
 	conn2 := newEffectsConn(h)
@@ -159,6 +167,7 @@ func TestBLPopMultipleKeys(t *testing.T) {
 
 	// BLPOP on multiple keys - should get from list2 since list1 is empty
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("list1"), []byte("list2"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -184,6 +193,7 @@ func TestBLPopKeyOrder(t *testing.T) {
 
 	// BLPOP should return from first key in order
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("first"), []byte("second"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -207,6 +217,7 @@ func TestBRPopImmediateReturn(t *testing.T) {
 
 	// BRPOP should return the last element (right pop)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBRPop, Args: [][]byte{[]byte("mylist"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -224,8 +235,10 @@ func TestBLPopContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	conn.Ctx = ctx
 
-	var wg sync.WaitGroup
-	var result string
+	var (
+		wg     sync.WaitGroup
+		result string
+	)
 
 	// Start BLPOP in goroutine
 	wg.Go(func() {
@@ -233,6 +246,7 @@ func TestBLPopContextCancellation(t *testing.T) {
 		w := shared.NewWriter(buf)
 		cmd := &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("neverexists"), []byte("10")}}
 		h.ExecuteInto(cmd, w, conn)
+
 		result = buf.String()
 	})
 
@@ -267,6 +281,7 @@ func TestBLPopWrongNumArgs(t *testing.T) {
 
 	// BLPOP with only one arg (just timeout, no key)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -293,6 +308,7 @@ func TestBLPopInvalidTimeout(t *testing.T) {
 
 	// BLPOP with negative timeout
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("key"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -317,6 +333,7 @@ func TestLMPopBasic(t *testing.T) {
 
 	// LMPOP from left
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMPop, Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -341,6 +358,7 @@ func TestLMPopRight(t *testing.T) {
 
 	// LMPOP from right
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMPop, Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("RIGHT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -365,6 +383,7 @@ func TestLMPopWithCount(t *testing.T) {
 
 	// LMPOP with COUNT 2
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMPop, Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("LEFT"), []byte("COUNT"), []byte("2")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -389,6 +408,7 @@ func TestLMPopMultipleKeys(t *testing.T) {
 
 	// LMPOP from multiple keys - should get from list2
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMPop, Args: [][]byte{[]byte("2"), []byte("list1"), []byte("list2"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -430,6 +450,7 @@ func TestLMPopCountExceedsLength(t *testing.T) {
 
 	// LMPOP with COUNT 10 (more than list length)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMPop, Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("LEFT"), []byte("COUNT"), []byte("10")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -456,6 +477,7 @@ func TestBLMPopImmediateReturn(t *testing.T) {
 
 	// BLMPOP should return immediately
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLMPop, Args: [][]byte{[]byte("1"), []byte("1"), []byte("mylist"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -479,6 +501,7 @@ func TestBLMPopWithCount(t *testing.T) {
 
 	// BLMPOP with COUNT 2
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLMPop, Args: [][]byte{[]byte("1"), []byte("1"), []byte("mylist"), []byte("RIGHT"), []byte("COUNT"), []byte("2")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -500,6 +523,7 @@ func TestBLMPopTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBLMPop, Args: [][]byte{[]byte("0.1"), []byte("1"), []byte("nonexistent"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "*-1\r\n"
@@ -524,6 +548,7 @@ func TestBLMPopVerySmallTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBLMPop, Args: [][]byte{[]byte("0.001"), []byte("1"), []byte("nonexistent"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "*-1\r\n"
@@ -549,6 +574,7 @@ func TestBLPopVerySmallTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("nonexistent"), []byte("0.001")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "*-1\r\n"
@@ -574,6 +600,7 @@ func TestBRPopVerySmallTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBRPop, Args: [][]byte{[]byte("nonexistent"), []byte("0.001")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "*-1\r\n"
@@ -594,12 +621,14 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 	// Run 10 concurrent BLPOP commands with 0.001 timeout
 	// All should complete within a reasonable time
 	var wg sync.WaitGroup
+
 	errors := make(chan string, 10)
 
 	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+
 			ctx := context.Background()
 			conn := &shared.Connection{User: testUser, Ctx: ctx}
 
@@ -608,11 +637,13 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 			start := time.Now()
 			cmd := &shared.Command{Type: shared.CmdBLPop, Args: [][]byte{[]byte("nonexistent"), []byte("0.001")}}
 			h.ExecuteInto(cmd, w, conn)
+
 			elapsed := time.Since(start)
 
 			if elapsed > 100*time.Millisecond {
 				errors <- "goroutine took too long"
 			}
+
 			if buf.String() != "*-1\r\n" {
 				errors <- "unexpected response: " + buf.String()
 			}
@@ -620,6 +651,7 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+
 	go func() {
 		wg.Wait()
 		close(done)
@@ -633,6 +665,7 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 	}
 
 	close(errors)
+
 	for err := range errors {
 		t.Error(err)
 	}
@@ -644,8 +677,10 @@ func TestBLMPopBlockingWithPush(t *testing.T) {
 
 	conn := newEffectsConn(h)
 
-	var wg sync.WaitGroup
-	var result string
+	var (
+		wg     sync.WaitGroup
+		result string
+	)
 
 	// Start BLMPOP in goroutine
 	wg.Go(func() {
@@ -653,6 +688,7 @@ func TestBLMPopBlockingWithPush(t *testing.T) {
 		w := shared.NewWriter(buf)
 		cmd := &shared.Command{Type: shared.CmdBLMPop, Args: [][]byte{[]byte("5"), []byte("1"), []byte("blocklist"), []byte("LEFT"), []byte("COUNT"), []byte("2")}}
 		h.ExecuteInto(cmd, w, conn)
+
 		result = buf.String()
 	})
 
@@ -722,6 +758,7 @@ func TestLMoveBasic(t *testing.T) {
 
 	// LMOVE from right of src to left of dst
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMove, Args: [][]byte{[]byte("src"), []byte("dst"), []byte("RIGHT"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -733,6 +770,7 @@ func TestLMoveBasic(t *testing.T) {
 
 	// Verify dst has the element
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("dst"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -743,6 +781,7 @@ func TestLMoveBasic(t *testing.T) {
 
 	// Verify src has remaining elements
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("src"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -766,6 +805,7 @@ func TestLMoveLeftLeft(t *testing.T) {
 
 	// LMOVE LEFT LEFT
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMove, Args: [][]byte{[]byte("src"), []byte("dst"), []byte("LEFT"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -789,6 +829,7 @@ func TestLMoveSameKey(t *testing.T) {
 
 	// LMOVE same key - rotate: pop from right, push to left
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLMove, Args: [][]byte{[]byte("mylist"), []byte("mylist"), []byte("RIGHT"), []byte("LEFT")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -799,6 +840,7 @@ func TestLMoveSameKey(t *testing.T) {
 
 	// Verify order: should be [c, a, b]
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -874,6 +916,7 @@ func TestBLMoveImmediateReturn(t *testing.T) {
 
 	// BLMOVE should return immediately
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBLMove, Args: [][]byte{[]byte("src"), []byte("dst"), []byte("RIGHT"), []byte("LEFT"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -895,6 +938,7 @@ func TestBLMoveTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBLMove, Args: [][]byte{[]byte("nonexistent"), []byte("dst"), []byte("LEFT"), []byte("LEFT"), []byte("0.1")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "$-1\r\n"
@@ -913,8 +957,10 @@ func TestBLMoveBlockingWithPush(t *testing.T) {
 
 	conn := newEffectsConn(h)
 
-	var wg sync.WaitGroup
-	var result string
+	var (
+		wg     sync.WaitGroup
+		result string
+	)
 
 	// Start BLMOVE in goroutine
 	wg.Go(func() {
@@ -922,6 +968,7 @@ func TestBLMoveBlockingWithPush(t *testing.T) {
 		w := shared.NewWriter(buf)
 		cmd := &shared.Command{Type: shared.CmdBLMove, Args: [][]byte{[]byte("blocksrc"), []byte("blockdst"), []byte("LEFT"), []byte("RIGHT"), []byte("5")}}
 		h.ExecuteInto(cmd, w, conn)
+
 		result = buf.String()
 	})
 
@@ -943,6 +990,7 @@ func TestBLMoveBlockingWithPush(t *testing.T) {
 
 	// Verify dst has the element
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("blockdst"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -968,6 +1016,7 @@ func TestRPopLPush(t *testing.T) {
 
 	// RPOPLPUSH = LMOVE src dst RIGHT LEFT
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdRPopLPush, Args: [][]byte{[]byte("src"), []byte("dst")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -978,6 +1027,7 @@ func TestRPopLPush(t *testing.T) {
 
 	// Verify dst
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("dst"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -1001,6 +1051,7 @@ func TestRPopLPushSameKey(t *testing.T) {
 
 	// RPOPLPUSH same key - rotate
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdRPopLPush, Args: [][]byte{[]byte("mylist"), []byte("mylist")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -1011,6 +1062,7 @@ func TestRPopLPushSameKey(t *testing.T) {
 
 	// Verify order: [c, a, b]
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -1054,6 +1106,7 @@ func TestBRPopLPushImmediateReturn(t *testing.T) {
 
 	// BRPOPLPUSH should return immediately
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdBRPopLPush, Args: [][]byte{[]byte("src"), []byte("dst"), []byte("1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -1075,6 +1128,7 @@ func TestBRPopLPushTimeout(t *testing.T) {
 	start := time.Now()
 	cmd := &shared.Command{Type: shared.CmdBRPopLPush, Args: [][]byte{[]byte("nonexistent"), []byte("dst"), []byte("0.1")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	elapsed := time.Since(start)
 
 	expected := "$-1\r\n"
@@ -1093,8 +1147,10 @@ func TestBRPopLPushBlockingWithPush(t *testing.T) {
 
 	conn := newEffectsConn(h)
 
-	var wg sync.WaitGroup
-	var result string
+	var (
+		wg     sync.WaitGroup
+		result string
+	)
 
 	// Start BRPOPLPUSH in goroutine
 	wg.Go(func() {
@@ -1102,6 +1158,7 @@ func TestBRPopLPushBlockingWithPush(t *testing.T) {
 		w := shared.NewWriter(buf)
 		cmd := &shared.Command{Type: shared.CmdBRPopLPush, Args: [][]byte{[]byte("blocksrc2"), []byte("blockdst2"), []byte("5")}}
 		h.ExecuteInto(cmd, w, conn)
+
 		result = buf.String()
 	})
 

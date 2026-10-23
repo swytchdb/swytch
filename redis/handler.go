@@ -122,6 +122,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 				// In practice, bcrypt failures are extremely rare (only on entropy exhaustion)
 				panic(fmt.Sprintf("failed to hash password for default user: %v", err))
 			}
+
 			defaultUser.NoPass = false
 			defaultUser.PasswordHashes = [][]byte{hash}
 		}
@@ -155,6 +156,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 
 	// Wire effects engine notification callbacks for blocking command wake-up
 	subs := dbManager.Subscriptions
+
 	if cfg.Engine != nil {
 		cfg.Engine.OnKeyDataAdded = func(key string) {
 			subs.Notify([]byte(key))
@@ -201,7 +203,9 @@ func (h *Handler) GetAdaptiveStats() []cache.AdaptiveStats {
 	if h.engine == nil {
 		return nil
 	}
+
 	s := h.engine.EvictStats()
+
 	return []cache.AdaptiveStats{{
 		ShardID:            0,
 		K:                  s.K,
@@ -221,6 +225,7 @@ func (h *Handler) GetCacheBytes() int64 {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.EffectCache().Bytes()
 }
 
@@ -231,6 +236,7 @@ func (h *Handler) GetItemCount() int {
 	if h.engine == nil {
 		return 0
 	}
+
 	return int(h.engine.KeyCount())
 }
 
@@ -240,6 +246,7 @@ func (h *Handler) GetArenaBytes() int64 {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.ArenaBytes()
 }
 
@@ -248,6 +255,7 @@ func (h *Handler) GetVertexCount() int {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.VertexCount()
 }
 
@@ -257,6 +265,7 @@ func (h *Handler) GetReleaseQueueDepth() int {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.ReleaseQueueDepth()
 }
 
@@ -266,6 +275,7 @@ func (h *Handler) GetCacheEvictions() uint64 {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.EffectCache().ColdEvictions()
 }
 
@@ -275,6 +285,7 @@ func (h *Handler) GetVerticesReclaimed() uint64 {
 	if h.engine == nil {
 		return 0
 	}
+
 	return h.engine.EffectCache().Reclaimed()
 }
 
@@ -291,6 +302,7 @@ func (h *Handler) DebugEnabled() bool {
 // ExecuteInto processes a command and writes the response to the writer
 func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	ctx := conn.Ctx
+
 	if tracing.Enabled() {
 		spanAttrs := []trace.SpanStartOption{
 			trace.WithAttributes(attribute.String("redis.command", cmd.Type.String())),
@@ -298,13 +310,17 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		if len(cmd.Args) > 0 {
 			spanAttrs = append(spanAttrs, trace.WithAttributes(attribute.String("redis.key", string(cmd.Args[0]))))
 		}
+
 		var span trace.Span
+
 		ctx, span = tracing.Tracer().Start(conn.Ctx, "redis.command", spanAttrs...)
 		defer span.End()
 	}
+
 	if conn.EffectsCtx != nil {
 		conn.EffectsCtx.SetTraceCtx(ctx)
 	}
+
 	if conn.ReadOnlyCtx != nil {
 		conn.ReadOnlyCtx.SetTraceCtx(ctx)
 	}
@@ -320,6 +336,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	// notifications (e.g. Circular BRPOPLPUSH).
 	origBuf := w.Buffer()
 	tmpBuf := w.Scratch()
+
 	w.Reset(tmpBuf)
 	defer func() {
 		origBuf.Write(tmpBuf.Bytes())
@@ -328,7 +345,9 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 
 	// Track command stats
 	cmdStart := time.Now()
+
 	w.ResetErrorFlag()
+
 	defer func() {
 		if h.stats != nil && cmd.Type != shared.CmdUnknown {
 			usec := uint64(time.Since(cmdStart).Microseconds())
@@ -347,6 +366,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 				conn.Username = defaultUser.Name
 			} else {
 				w.WriteNoAuth()
+
 				return
 			}
 		}
@@ -357,6 +377,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		if err := h.aclManager.CheckCommand(conn.User, cmd.Type); err != nil {
 			h.aclManager.LogDenied("command", "toplevel", cmd.Type.String(), conn.Username, conn.RemoteAddr)
 			w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to run the '%s' command", cmd.Type.String()))
+
 			return
 		}
 	}
@@ -366,6 +387,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		allowed := entry != nil && entry.Flags&shared.FlagPubSub != 0
 		if !allowed {
 			w.WriteError("ERR only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT are allowed in this context")
+
 			return
 		}
 	}
@@ -388,9 +410,11 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 
 		if !allowed {
 			w.WriteError("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")
+
 			if conn.InTransaction {
 				conn.TxnAborted = true
 			}
+
 			return
 		}
 	}
@@ -418,14 +442,18 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 			if cmd.Type == shared.CmdUnknown {
 				conn.TxnAborted = true
 				h.logger.LogUnknownCommand(cmd, conn.RemoteAddr)
+
 				if len(cmd.Args) > 0 {
 					w.WriteUnknownCommand(cmd.Type.String(), cmd.Args)
 				} else {
 					w.WriteError("ERR unknown command")
 				}
+
 				return
 			}
+
 			h.queueCommand(cmd, w, conn, db)
+
 			return
 		}
 	}
@@ -433,11 +461,13 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	// Dispatch via registry
 	if entry == nil {
 		h.logger.LogUnknownCommand(cmd, conn.RemoteAddr)
+
 		if len(cmd.Args) > 0 {
 			w.WriteUnknownCommand(cmd.Type.String(), cmd.Args)
 		} else {
 			w.WriteError("ERR unknown command")
 		}
+
 		return
 	}
 
@@ -450,14 +480,18 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 				if err := h.aclManager.CheckKey(conn.User, key, isWrite); err != nil {
 					h.aclManager.LogDenied("key", key, cmd.Type.String(), conn.Username, conn.RemoteAddr)
 					w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to access key '%s'", key))
+
 					return
 				}
 			}
 		}
+
 		const maxTxnRetries = 10
+
 		for attempt := 0; ; attempt++ {
 			savedLen := w.Buffer().Len()
 			entry.ConnHandler(cmd, w, db, conn)
+
 			if cmd.Context != nil && !conn.InTransaction {
 				err := cmd.Context.Flush()
 				if errors.Is(err, effects.ErrTxnAborted) && attempt < maxTxnRetries {
@@ -467,19 +501,25 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 					if cmd.Type == shared.CmdExec {
 						w.Buffer().Truncate(savedLen)
 						w.WriteNullArray() // abort: client sees nil (same as WATCH conflict)
+
 						break
 					}
+
 					w.Buffer().Truncate(savedLen)
+
 					continue
 				}
+
 				if err != nil {
 					slog.Error("effects flush failed", "error", err)
 					w.Buffer().Truncate(savedLen)
 					w.WriteError("TRYAGAIN " + err.Error())
 				}
 			}
+
 			break
 		}
+
 		return
 	}
 
@@ -489,14 +529,18 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		trackStart = time.Now()
 	}
 
-	var valid bool
-	var keys []string
-	var runner shared.CommandRunner
+	var (
+		valid  bool
+		keys   []string
+		runner shared.CommandRunner
+	)
+
 	func() {
 		if tracing.Enabled() {
 			_, prepSpan := tracing.Tracer().Start(ctx, "handler.prepare")
 			defer prepSpan.End()
 		}
+
 		valid, keys, runner = entry.Handler(cmd, w, db)
 	}()
 
@@ -507,6 +551,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 			if err := h.aclManager.CheckKey(conn.User, key, isWrite); err != nil {
 				h.aclManager.LogDenied("key", key, cmd.Type.String(), conn.Username, conn.RemoteAddr)
 				w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to access key '%s'", key))
+
 				return
 			}
 		}
@@ -518,6 +563,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		for _, key := range keys {
 			if strings.HasPrefix(key, "__swytch:") {
 				w.WriteError("ERR cannot write to internal key '" + key + "'")
+
 				return
 			}
 		}
@@ -529,16 +575,20 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		if tracing.Enabled() {
 			_, fwdSpan = tracing.Tracer().Start(ctx, "handler.forward_check")
 		}
+
 		fwdKeys := entry.Keys(cmd)
 		if len(fwdKeys) > 0 {
 			if result := cmd.Runtime.Forward(cmd.Type.String(), cmd.Args, fwdKeys, conn.Username); result != nil {
 				w.WriteRaw(result)
+
 				if fwdSpan != nil {
 					fwdSpan.End()
 				}
+
 				return
 			}
 		}
+
 		if fwdSpan != nil {
 			fwdSpan.End()
 		}
@@ -548,11 +598,13 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		// Per-key striped lock to serialize local access and prevent
 		// transaction abort storms on hot keys.
 		var keyLock *sync.Mutex
+
 		if cmd.Runtime != nil && entry.Keys != nil && !conn.InTransaction {
 			if tracing.Enabled() {
 				_, lockSpan := tracing.Tracer().Start(ctx, "handler.key_lock")
 				defer lockSpan.End()
 			}
+
 			if fwdKeys := entry.Keys(cmd); len(fwdKeys) > 0 {
 				keyLock = cmd.Runtime.GetLock(fwdKeys[0])
 				keyLock.Lock()
@@ -563,24 +615,32 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		if tracing.Enabled() {
 			_, runSpan = tracing.Tracer().Start(ctx, "handler.run")
 		}
+
 		const maxTxnRetries = 10
+
 		for attempt := 0; ; attempt++ {
 			savedLen := w.Buffer().Len()
+
 			runner()
+
 			if cmd.Context != nil && !conn.InTransaction {
 				err := cmd.Context.Flush()
 				if errors.Is(err, effects.ErrTxnAborted) && attempt < maxTxnRetries {
 					w.Buffer().Truncate(savedLen)
+
 					continue
 				}
+
 				if err != nil {
 					slog.Error("effects flush failed", "error", err)
 					w.Buffer().Truncate(savedLen)
 					w.WriteError("TRYAGAIN " + err.Error())
 				}
 			}
+
 			break
 		}
+
 		if runSpan != nil {
 			runSpan.End()
 		}
@@ -594,6 +654,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	if entry.Flags&shared.FlagTrackGet != 0 && h.stats != nil {
 		h.stats.RecordGetLatency(time.Since(trackStart))
 	}
+
 	if entry.Flags&shared.FlagTrackSet != 0 && h.stats != nil {
 		h.stats.RecordSetLatency(time.Since(trackStart))
 	}
@@ -628,6 +689,7 @@ func (h *Handler) handlePingPubSub(cmd *shared.Command, w *shared.Writer, conn *
 		// RESP2 pub/sub: returns ["pong", <argument>] array
 		w.WriteArray(2)
 		w.WriteBulkStringStr("pong")
+
 		if len(cmd.Args) > 0 {
 			w.WriteBulkString(cmd.Args[0])
 		} else {
@@ -639,8 +701,10 @@ func (h *Handler) handlePingPubSub(cmd *shared.Command, w *shared.Writer, conn *
 func (h *Handler) handleEcho(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("echo")
+
 		return
 	}
+
 	w.WriteBulkString(cmd.Args[0])
 }
 
@@ -658,6 +722,7 @@ func (h *Handler) handleAuth(cmd *shared.Command, w *shared.Writer, conn *shared
 		password = string(cmd.Args[1])
 	default:
 		w.WriteWrongNumArguments("auth")
+
 		return
 	}
 
@@ -667,17 +732,20 @@ func (h *Handler) handleAuth(cmd *shared.Command, w *shared.Writer, conn *shared
 		conn.Username = ""
 		h.aclManager.LogDenied("auth", "toplevel", "", username, conn.RemoteAddr)
 		w.WriteError("WRONGPASS invalid username-password pair or user is disabled")
+
 		return
 	}
 
 	conn.User = user
 	conn.Username = user.Name
+
 	w.WriteOK()
 }
 
 func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("select")
+
 		return
 	}
 
@@ -685,6 +753,7 @@ func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer) {
 	index, ok := shared.ParseInt64(cmd.Args[0])
 	if !ok || index != 0 {
 		w.WriteError("ERR DB index is out of range")
+
 		return
 	}
 
@@ -693,17 +762,19 @@ func (h *Handler) handleSelect(cmd *shared.Command, w *shared.Writer) {
 
 func (h *Handler) handleHello(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	// HELLO [protover [AUTH username password] [SETNAME clientname]]
-
 	requestedVersion := shared.ProtocolVersion(2) // Default to RESP2
 
 	// Parse arguments
 	i := 0
+
 	if len(cmd.Args) > 0 {
 		ver, ok := shared.ParseInt64(cmd.Args[0])
 		if !ok || (ver != 2 && ver != 3) {
 			w.WriteError("NOPROTO unsupported protocol version")
+
 			return
 		}
+
 		requestedVersion = shared.ProtocolVersion(ver)
 		i = 1
 	}
@@ -715,27 +786,33 @@ func (h *Handler) handleHello(cmd *shared.Command, w *shared.Writer, conn *share
 		case "AUTH":
 			if i+2 >= len(cmd.Args) {
 				w.WriteWrongNumArguments("hello")
+
 				return
 			}
 			// AUTH username password
 			username := string(cmd.Args[i+1])
 			password := string(cmd.Args[i+2])
+
 			user, err := h.aclManager.Authenticate(username, password)
 			if err != nil {
 				conn.User = nil
 				conn.Username = ""
 				h.aclManager.LogDenied("auth", "toplevel", "", username, conn.RemoteAddr)
 				w.WriteError("WRONGPASS invalid username-password pair or user is disabled")
+
 				return
 			}
+
 			conn.User = user
 			conn.Username = user.Name
 			i += 3
 		case "SETNAME":
 			if i+1 >= len(cmd.Args) {
 				w.WriteWrongNumArguments("hello")
+
 				return
 			}
+
 			conn.ClientName = string(cmd.Args[i+1])
 			i += 2
 		default:
@@ -787,7 +864,9 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 	entry := h.cmds.Lookup(cmd.Type)
 	if entry == nil {
 		w.WriteError("ERR unknown command '" + cmd.Type.String() + "'")
+
 		conn.TxnAborted = true
+
 		return
 	}
 
@@ -809,9 +888,11 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 
 	// Use TxnPrepare if available (blocking->non-blocking fallbacks, conn-needing commands),
 	// otherwise fall back to Handler.
-	var valid bool
-	var keys []string
-	var runner shared.CommandRunner
+	var (
+		valid  bool
+		keys   []string
+		runner shared.CommandRunner
+	)
 
 	if entry.TxnPrepare != nil {
 		valid, keys, runner = entry.TxnPrepare(cmdCopy, w, db, conn)
@@ -820,12 +901,15 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 	} else {
 		// ConnHandler-only commands without TxnPrepare cannot be queued
 		w.WriteError("ERR command '" + cmd.Type.String() + "' cannot be used inside a transaction")
+
 		conn.TxnAborted = true
+
 		return
 	}
 
 	if !valid {
 		conn.TxnAborted = true
+
 		return
 	}
 
@@ -843,16 +927,19 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 func (h *Handler) handleMulti(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("multi")
+
 		return
 	}
 
 	if conn.InTransaction {
 		w.WriteError("ERR MULTI calls can not be nested")
+
 		return
 	}
 
 	conn.InTransaction = true
 	conn.TxnAborted = false
+
 	w.WriteOK()
 }
 
@@ -860,11 +947,13 @@ func (h *Handler) handleMulti(cmd *shared.Command, w *shared.Writer, conn *share
 func (h *Handler) handleDiscard(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("discard")
+
 		return
 	}
 
 	if !conn.InTransaction {
 		w.WriteError("ERR DISCARD without MULTI")
+
 		return
 	}
 
@@ -877,11 +966,13 @@ func (h *Handler) handleDiscard(cmd *shared.Command, w *shared.Writer, conn *sha
 func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) == 0 {
 		w.WriteWrongNumArguments("watch")
+
 		return
 	}
 
 	if conn.InTransaction {
 		w.WriteError("ERR WATCH inside MULTI is not allowed")
+
 		return
 	}
 
@@ -892,6 +983,7 @@ func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *share
 			// A half-watched key set is unusable for EXEC's verdict.
 			cmd.Context.ClearWatches()
 			w.WriteError(err.Error())
+
 			return
 		}
 	}
@@ -903,6 +995,7 @@ func (h *Handler) handleWatch(cmd *shared.Command, w *shared.Writer, conn *share
 func (h *Handler) handleUnwatch(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("unwatch")
+
 		return
 	}
 
@@ -914,11 +1007,13 @@ func (h *Handler) handleUnwatch(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("exec")
+
 		return
 	}
 
 	if !conn.InTransaction {
 		w.WriteError("ERR EXEC without MULTI")
+
 		return
 	}
 
@@ -932,6 +1027,7 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 		} else {
 			w.WriteError("EXECABORT Transaction discarded because of previous errors.")
 		}
+
 		return
 	}
 
@@ -940,6 +1036,7 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 		conn.ResetTransaction()
 		cmd.Context.ClearWatches()
 		w.WriteError("EXECABORT Transaction discarded because of: BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")
+
 		return
 	}
 
@@ -954,14 +1051,17 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 				Keys: qcmd.Keys,
 			}
 		}
+
 		var watchKeys []string
 		for _, wk := range conn.WatchedKeys {
 			watchKeys = append(watchKeys, wk.Key)
 		}
+
 		if result := cmd.Runtime.ForwardExec(fwdCmds, watchKeys, conn.Username); result != nil {
 			conn.ResetTransaction()
 			cmd.Context.ClearWatches()
 			w.WriteRaw(result)
+
 			return
 		}
 	}
@@ -970,9 +1070,11 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 	// WATCH observations. CheckWatches must be called after BeginTx so
 	// the transactional NOOPs get IsTransactional=true in the Bind.
 	cmd.Context.BeginTx()
+
 	if !cmd.Context.CheckWatches() {
 		conn.ResetTransaction()
 		w.WriteNullArray()
+
 		return
 	}
 
@@ -1094,7 +1196,7 @@ func (h *Handler) registerTransactionCommands() {
 // HandleForwardedTransaction implements cluster.ForwardHandler.
 // Executes forwarded commands locally and returns raw RESP bytes.
 func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.ForwardedResponse {
-	if len(tx.Commands) == 0 {
+	if len(tx.GetCommands()) == 0 {
 		return &pb.ForwardedResponse{Error: true, ErrorMessage: "empty transaction"}
 	}
 
@@ -1114,26 +1216,30 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 	if username == "" {
 		username = defaultUsername
 	}
+
 	user := h.aclManager.GetUser(username)
 	if user == nil {
 		return &pb.ForwardedResponse{Error: true, ErrorMessage: "NOPERM unknown user '" + username + "'"}
 	}
+
 	if !user.Enabled {
 		return &pb.ForwardedResponse{Error: true, ErrorMessage: "NOPERM user '" + username + "' is disabled"}
 	}
+
 	conn.User = user
 	conn.Username = username
 
 	var respBuf bytes.Buffer
+
 	w := shared.NewWriter(&respBuf)
 
-	if len(tx.Commands) == 1 {
+	if len(tx.GetCommands()) == 1 {
 		// Single command: execute directly via ExecuteInto
-		fc := tx.Commands[0]
-		cmdType := shared.ParseCommandType(fc.CommandName)
+		fc := tx.GetCommands()[0]
+		cmdType := shared.ParseCommandType(fc.GetCommandName())
 		cmd := &shared.Command{
 			Type: cmdType,
-			Args: fc.Args,
+			Args: fc.GetArgs(),
 		}
 		h.ExecuteInto(cmd, w, conn)
 	} else {
@@ -1141,11 +1247,12 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 		conn.InTransaction = true
 
 		// Queue each command
-		for _, fc := range tx.Commands {
-			cmdType := shared.ParseCommandType(fc.CommandName)
+		for _, fc := range tx.GetCommands() {
+			cmdType := shared.ParseCommandType(fc.GetCommandName())
+
 			cmd := &shared.Command{
 				Type: cmdType,
-				Args: fc.Args,
+				Args: fc.GetArgs(),
 			}
 			if h.engine != nil && conn.EffectsCtx != nil {
 				cmd.Runtime = h.engine
@@ -1154,18 +1261,20 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 
 			// Use a discard writer for queuing (QUEUED responses are not forwarded)
 			var discardBuf bytes.Buffer
+
 			discardW := shared.NewWriter(&discardBuf)
 			h.queueCommand(cmd, discardW, conn, db)
 		}
 
 		// Set up WATCH keys if present
 		if conn.EffectsCtx != nil {
-			for _, wk := range tx.WatchedKeys {
+			for _, wk := range tx.GetWatchedKeys() {
 				if err := conn.EffectsCtx.Watch(string(wk)); err != nil {
 					// A half-watched key set is unusable for EXEC's verdict —
 					// fail the forwarded transaction back to the origin node.
 					conn.ResetTransaction()
 					conn.EffectsCtx.ClearWatches()
+
 					return &pb.ForwardedResponse{Error: true, ErrorMessage: err.Error()}
 				}
 			}
@@ -1177,6 +1286,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 			execCmd.Runtime = h.engine
 			execCmd.Context = conn.EffectsCtx
 		}
+
 		h.handleExec(execCmd, w, conn)
 
 		// Flush effects

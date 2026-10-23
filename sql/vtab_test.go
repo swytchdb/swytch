@@ -39,12 +39,16 @@ import (
 // would have produced so reads find the row.
 func seedRow(t *testing.T, eng *effects.Engine, table string, pkAffinity string, pkValue any, fields map[string]any) {
 	t.Helper()
+
 	ectx := eng.NewContext()
+
 	schema, err := loadSchema(ectx, table)
 	if err != nil {
 		t.Fatalf("seedRow loadSchema %q: %v", table, err)
 	}
+
 	var pkEncoded string
+
 	switch v := pkValue.(type) {
 	case int:
 		pkEncoded = string(encodeIndexValue(sqlite.IntegerValue(int64(v)), pkAffinity))
@@ -61,6 +65,7 @@ func seedRow(t *testing.T, eng *effects.Engine, table string, pkAffinity string,
 	default:
 		t.Fatalf("seedRow: unsupported pk type %T", pkValue)
 	}
+
 	for field, val := range fields {
 		eff := &pb.DataEffect{
 			Op:         pb.EffectOp_INSERT_OP,
@@ -68,6 +73,7 @@ func seedRow(t *testing.T, eng *effects.Engine, table string, pkAffinity string,
 			Collection: pb.CollectionKind_KEYED,
 			Id:         []byte(field),
 		}
+
 		switch v := val.(type) {
 		case int:
 			eff.Value = &pb.DataEffect_IntVal{IntVal: int64(v)}
@@ -82,6 +88,7 @@ func seedRow(t *testing.T, eng *effects.Engine, table string, pkAffinity string,
 		default:
 			t.Fatalf("seedRow: unsupported value type %T", val)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(rowKey(schema.TableID, pkEncoded)),
 			Kind: &pb.Effect_Data{Data: eff},
@@ -89,6 +96,7 @@ func seedRow(t *testing.T, eng *effects.Engine, table string, pkAffinity string,
 			t.Fatalf("seedRow emit: %v", err)
 		}
 	}
+
 	if err := ectx.Flush(); err != nil {
 		t.Fatalf("seedRow flush: %v", err)
 	}
@@ -123,14 +131,18 @@ func TestVTabFullScan(t *testing.T) {
 		Name string
 		Age  int64
 	}
+
 	var got []user
+
 	for rows.Next() {
 		var u user
 		if err := rows.Scan(&u.ID, &u.Name, &u.Age); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+
 		got = append(got, u)
 	}
+
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows err: %v", err)
 	}
@@ -139,6 +151,7 @@ func TestVTabFullScan(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("got %d rows, want %d: %v", len(got), len(want), got)
 	}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d: got %+v want %+v", i, got[i], want[i])
@@ -154,6 +167,7 @@ func TestVTabPKEqualityLookup(t *testing.T) {
 		"CREATE TABLE widgets (id INTEGER PRIMARY KEY, label TEXT)"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
+
 	for i := 1; i <= 5; i++ {
 		seedRow(t, srv.Engine(), "widgets", affinityInteger, i, map[string]any{
 			"label": "w" + strconv.Itoa(i),
@@ -161,16 +175,19 @@ func TestVTabPKEqualityLookup(t *testing.T) {
 	}
 
 	var label string
+
 	err := db.QueryRowContext(ctx, "SELECT label FROM widgets WHERE id = 3").Scan(&label)
 	if err != nil {
 		t.Fatalf("pk lookup: %v", err)
 	}
+
 	if label != "w3" {
 		t.Errorf("label = %q, want w3", label)
 	}
 
 	// Missing row — no error, just no rows.
 	var nothing sql.NullString
+
 	err = db.QueryRowContext(ctx, "SELECT label FROM widgets WHERE id = 999").Scan(&nothing)
 	if err != sql.ErrNoRows {
 		t.Errorf("missing row: err=%v, want sql.ErrNoRows", err)
@@ -186,23 +203,29 @@ func TestVTabPKEqualityLookup(t *testing.T) {
 			t.Errorf("rows.Close: %v", err)
 		}
 	}()
+
 	found := false
+
 	for rows.Next() {
 		cols, _ := rows.Columns()
 		vals := make([]any, len(cols))
+
 		ptrs := make([]any, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
+
 		if err := rows.Scan(ptrs...); err != nil {
 			t.Fatalf("scan plan: %v", err)
 		}
+
 		for _, v := range vals {
 			if s, ok := v.(string); ok && containsCaseInsensitive(s, "widgets") {
 				found = true
 			}
 		}
 	}
+
 	if !found {
 		t.Error("EXPLAIN QUERY PLAN did not reference widgets")
 	}
@@ -226,6 +249,7 @@ func TestVTabEmptyTable(t *testing.T) {
 			t.Errorf("rows.Close: %v", err)
 		}
 	}()
+
 	if rows.Next() {
 		t.Error("expected empty result")
 	}
@@ -247,6 +271,7 @@ func TestVTabTextPK(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT qty FROM items WHERE sku = 'B2'").Scan(&qty); err != nil {
 		t.Fatalf("pk lookup: %v", err)
 	}
+
 	if qty != 10 {
 		t.Errorf("qty = %d, want 10", qty)
 	}
@@ -256,22 +281,28 @@ func containsCaseInsensitive(s, sub string) bool {
 	ss, subs := []byte(s), []byte(sub)
 	for i := 0; i+len(subs) <= len(ss); i++ {
 		match := true
+
 		for j := range subs {
 			a, b := ss[i+j], subs[j]
 			if a >= 'A' && a <= 'Z' {
 				a += 'a' - 'A'
 			}
+
 			if b >= 'A' && b <= 'Z' {
 				b += 'a' - 'A'
 			}
+
 			if a != b {
 				match = false
+
 				break
 			}
 		}
+
 		if match {
 			return true
 		}
 	}
+
 	return false
 }

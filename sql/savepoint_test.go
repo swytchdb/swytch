@@ -32,11 +32,14 @@ func TestSavepointRollbackDiscardsInnerWrites(t *testing.T) {
 	// directly with a clean error path.
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(1)
+
 	ctx := context.Background()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn close: %v", err)
@@ -55,6 +58,7 @@ func TestSavepointRollbackDiscardsInnerWrites(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count pre-rollback: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("pre-rollback count=%d, want 2", count)
 	}
@@ -67,14 +71,17 @@ func TestSavepointRollbackDiscardsInnerWrites(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count post-rollback: %v", err)
 	}
+
 	if count != 1 {
 		t.Errorf("post-rollback count=%d, want 1", count)
 	}
+
 	var v string
 	if err := conn.QueryRowContext(ctx,
 		"SELECT v FROM t WHERE id = 1").Scan(&v); err != nil {
 		t.Fatalf("select outer: %v", err)
 	}
+
 	if v != "outer" {
 		t.Errorf("outer v=%q, want outer", v)
 	}
@@ -86,6 +93,7 @@ func TestSavepointRollbackDiscardsInnerWrites(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count after commit: %v", err)
 	}
+
 	if count != 1 {
 		t.Errorf("after-commit count=%d, want 1", count)
 	}
@@ -96,11 +104,14 @@ func TestSavepointRollbackDiscardsInnerWrites(t *testing.T) {
 func TestSavepointReleaseKeepsInnerWrites(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(1)
+
 	ctx := context.Background()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn close: %v", err)
@@ -120,6 +131,7 @@ func TestSavepointReleaseKeepsInnerWrites(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("count=%d, want 2", count)
 	}
@@ -130,11 +142,14 @@ func TestSavepointReleaseKeepsInnerWrites(t *testing.T) {
 func TestNestedSavepoints(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(1)
+
 	ctx := context.Background()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn close: %v", err)
@@ -161,6 +176,7 @@ func TestNestedSavepoints(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
+
 	if count != 1 {
 		t.Errorf("count after outer rollback=%d, want 1", count)
 	}
@@ -176,11 +192,14 @@ func TestNestedSavepoints(t *testing.T) {
 func TestRollbackToRepeatedly(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(1)
+
 	ctx := context.Background()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn close: %v", err)
@@ -204,6 +223,7 @@ func TestRollbackToRepeatedly(t *testing.T) {
 		"SELECT COUNT(*) FROM t").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
+
 	if count != 1 {
 		t.Errorf("count=%d, want 1", count)
 	}
@@ -221,8 +241,10 @@ func TestSavepointOutsideTransaction(t *testing.T) {
 		_, err := db.Exec(stmt)
 		if err == nil {
 			t.Errorf("%q: expected error outside tx", stmt)
+
 			continue
 		}
+
 		if !strings.Contains(err.Error(), "transaction") {
 			t.Errorf("%q: err=%v, want mention of transaction", stmt, err)
 		}
@@ -234,11 +256,14 @@ func TestSavepointOutsideTransaction(t *testing.T) {
 func TestRollbackToUnknownSavepoint(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(1)
+
 	ctx := context.Background()
+
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn close: %v", err)
@@ -246,8 +271,10 @@ func TestRollbackToUnknownSavepoint(t *testing.T) {
 	}()
 
 	mustExecCtx(t, conn, ctx, "BEGIN")
+
 	if _, err := conn.ExecContext(ctx, "ROLLBACK TO SAVEPOINT nope"); err == nil {
 		t.Error("expected error for unknown savepoint")
 	}
+
 	mustExecCtx(t, conn, ctx, "ROLLBACK")
 }

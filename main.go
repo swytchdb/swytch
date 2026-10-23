@@ -83,11 +83,13 @@ func main() {
 func runGenPassphrase(args []string) error {
 	fs := flag.NewFlagSet("gen-passphrase", flag.ContinueOnError)
 	cloud := fs.Bool("cloud", false, "generate a cloud connection secret and its derived cloud secret")
+
 	asJSON := fs.Bool("json", false, "with --cloud, emit the secrets as a JSON object")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil // -h/--help: usage already printed, a successful invocation
 		}
+
 		return err
 	}
 
@@ -95,11 +97,14 @@ func runGenPassphrase(args []string) error {
 		if *asJSON {
 			return fmt.Errorf("--json requires --cloud")
 		}
+
 		pass, err := cluster.GeneratePassphrase()
 		if err != nil {
 			return err
 		}
+
 		fmt.Println(pass)
+
 		return nil
 	}
 
@@ -107,6 +112,7 @@ func runGenPassphrase(args []string) error {
 	if err != nil {
 		return err
 	}
+
 	cloudSecret := cluster.DeriveCloudSecret(connectionSecret)
 
 	if *asJSON {
@@ -117,12 +123,15 @@ func runGenPassphrase(args []string) error {
 		if err != nil {
 			return err
 		}
+
 		fmt.Println(string(out))
+
 		return nil
 	}
 
 	fmt.Printf("Cloud secret (enter during onboarding): %s\n", cloudSecret)
 	fmt.Printf("Connection secret (start with --cloud): %s\n", connectionSecret)
+
 	return nil
 }
 

@@ -33,12 +33,14 @@ import (
 func TestAlterAddColumn(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO users VALUES (1, 'alice'), (2, 'bob')"); err != nil {
 		t.Fatal(err)
@@ -59,15 +61,19 @@ func TestAlterAddColumn(t *testing.T) {
 	}
 
 	// Existing rows should read NULL for the new column.
-	var name string
-	var age sql.NullInt64
+	var (
+		name string
+		age  sql.NullInt64
+	)
 	if err := conn.QueryRowContext(ctx,
 		"SELECT name, age FROM users WHERE id = 1").Scan(&name, &age); err != nil {
 		t.Fatalf("select post-alter: %v", err)
 	}
+
 	if name != "alice" {
 		t.Errorf("name=%q, want alice", name)
 	}
+
 	if age.Valid {
 		t.Errorf("age on pre-existing row should be NULL, got %d", age.Int64)
 	}
@@ -77,11 +83,13 @@ func TestAlterAddColumn(t *testing.T) {
 		"INSERT INTO users VALUES (3, 'carol', 42)"); err != nil {
 		t.Fatalf("insert with new column: %v", err)
 	}
+
 	var ageC sql.NullInt64
 	if err := conn.QueryRowContext(ctx,
 		"SELECT age FROM users WHERE id = 3").Scan(&ageC); err != nil {
 		t.Fatalf("select age: %v", err)
 	}
+
 	if !ageC.Valid || ageC.Int64 != 42 {
 		t.Errorf("carol.age = %v, want 42", ageC)
 	}
@@ -91,11 +99,13 @@ func TestAlterAddColumn(t *testing.T) {
 		"UPDATE users SET age = 30 WHERE id = 1"); err != nil {
 		t.Fatalf("update new column: %v", err)
 	}
+
 	var ageA sql.NullInt64
 	if err := conn.QueryRowContext(ctx,
 		"SELECT age FROM users WHERE id = 1").Scan(&ageA); err != nil {
 		t.Fatalf("select updated age: %v", err)
 	}
+
 	if !ageA.Valid || ageA.Int64 != 30 {
 		t.Errorf("alice.age post-update = %v, want 30", ageA)
 	}
@@ -109,6 +119,7 @@ func TestAlterAddColumnNotNullRejected(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t ADD COLUMN v TEXT NOT NULL")
 	if err == nil {
 		t.Errorf("expected error for ADD COLUMN NOT NULL without DEFAULT")
@@ -125,6 +136,7 @@ func TestAlterAddColumnDuplicate(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t ADD COLUMN v INTEGER")
 	if err == nil {
 		t.Errorf("expected duplicate column error")
@@ -138,10 +150,12 @@ func TestAlterAddColumnDuplicate(t *testing.T) {
 func TestAlterAddColumnOptionalKeyword(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	if _, err := db.Exec(
 		"CREATE TABLE t (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("ALTER TABLE t ADD v TEXT"); err != nil {
 		t.Fatalf("ADD (no COLUMN keyword): %v", err)
 	}
@@ -153,12 +167,14 @@ func TestAlterAddColumnOptionalKeyword(t *testing.T) {
 func TestAlterAddColumnDefault(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE u (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("INSERT INTO u VALUES (1, 'alice')"); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +196,7 @@ func TestAlterAddColumnDefault(t *testing.T) {
 		"SELECT status FROM u WHERE id = 1").Scan(&status); err != nil {
 		t.Fatalf("select default: %v", err)
 	}
+
 	if status != "active" {
 		t.Errorf("pre-existing row status = %q, want 'active'", status)
 	}
@@ -189,10 +206,12 @@ func TestAlterAddColumnDefault(t *testing.T) {
 		"INSERT INTO u VALUES (2, 'bob', 'pending')"); err != nil {
 		t.Fatalf("insert with status: %v", err)
 	}
+
 	if err := conn.QueryRowContext(ctx,
 		"SELECT status FROM u WHERE id = 2").Scan(&status); err != nil {
 		t.Fatalf("select bob: %v", err)
 	}
+
 	if status != "pending" {
 		t.Errorf("bob status = %q, want 'pending'", status)
 	}
@@ -205,12 +224,14 @@ func TestAlterAddColumnDefault(t *testing.T) {
 func TestAlterAddColumnNotNullWithDefault(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("INSERT INTO t VALUES (1, 'alice')"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +252,7 @@ func TestAlterAddColumnNotNullWithDefault(t *testing.T) {
 		"SELECT ver FROM t WHERE id = 1").Scan(&ver); err != nil {
 		t.Fatalf("select ver: %v", err)
 	}
+
 	if ver != 0 {
 		t.Errorf("pre-existing ver = %d, want 0", ver)
 	}
@@ -243,6 +265,7 @@ func TestAlterAddColumnNotNullNoDefault(t *testing.T) {
 	if _, err := db.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t ADD COLUMN v INTEGER NOT NULL")
 	if err == nil {
 		t.Errorf("expected error for NOT NULL without DEFAULT")
@@ -256,12 +279,14 @@ func TestAlterAddColumnNotNullNoDefault(t *testing.T) {
 func TestAlterDropColumn(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, note TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO t VALUES (1, 'alice', 'first'), (2, 'bob', 'second')"); err != nil {
 		t.Fatal(err)
@@ -273,6 +298,7 @@ func TestAlterDropColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = sessB.Close() }()
+
 	var pre string
 	if err := sessB.QueryRowContext(ctx,
 		"SELECT note FROM t WHERE id = 1").Scan(&pre); err != nil {
@@ -293,6 +319,7 @@ func TestAlterDropColumn(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT name FROM t WHERE id = 1").Scan(&name); err != nil {
 		t.Fatalf("select name: %v", err)
 	}
+
 	if name != "alice" {
 		t.Errorf("alice.name = %q after drop, want 'alice'", name)
 	}
@@ -301,10 +328,12 @@ func TestAlterDropColumn(t *testing.T) {
 	if _, err := sessB.ExecContext(ctx, "SELECT note FROM t"); err == nil {
 		t.Errorf("session B SELECT note should error after DROP COLUMN")
 	}
+
 	if err := sessB.QueryRowContext(ctx,
 		"SELECT name FROM t WHERE id = 2").Scan(&name); err != nil {
 		t.Fatalf("session B post-drop select: %v", err)
 	}
+
 	if name != "bob" {
 		t.Errorf("session B id=2 name = %q, want 'bob'", name)
 	}
@@ -314,11 +343,13 @@ func TestAlterDropColumn(t *testing.T) {
 		"ALTER TABLE t ADD COLUMN note TEXT"); err != nil {
 		t.Fatalf("re-ADD COLUMN: %v", err)
 	}
+
 	var note sql.NullString
 	if err := db.QueryRowContext(ctx,
 		"SELECT note FROM t WHERE id = 1").Scan(&note); err != nil {
 		t.Fatalf("select re-added note: %v", err)
 	}
+
 	if note.Valid {
 		t.Errorf("re-added note should be NULL, got %q — dropped field not fully removed", note.String)
 	}
@@ -334,10 +365,12 @@ func TestAlterDropColumnCascadesIndex(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO t VALUES (1, 'alice'), (2, 'bob')"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("CREATE INDEX idx_name ON t(name)"); err != nil {
 		t.Fatal(err)
 	}
@@ -357,6 +390,7 @@ func TestAlterDropColumnCascadesIndex(t *testing.T) {
 		"ALTER TABLE t ADD COLUMN label TEXT"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("CREATE INDEX idx_name ON t(label)"); err != nil {
 		t.Errorf("recreate index with cascaded name: %v", err)
 	}
@@ -370,6 +404,7 @@ func TestAlterDropColumnRejectsPK(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t DROP COLUMN id")
 	if err == nil {
 		t.Errorf("expected error dropping PK column")
@@ -385,6 +420,7 @@ func TestAlterDropColumnMissing(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t DROP COLUMN nope")
 	if err == nil {
 		t.Errorf("expected error dropping missing column")
@@ -398,16 +434,19 @@ func TestAlterDropColumnMissing(t *testing.T) {
 func TestAlterRenameTable(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO users VALUES (1, 'alice'), (2, 'bob')"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"CREATE INDEX idx_users_name ON users(name)"); err != nil {
 		t.Fatal(err)
@@ -436,11 +475,13 @@ func TestAlterRenameTable(t *testing.T) {
 	if _, err := db.Exec("SELECT * FROM users"); err == nil {
 		t.Errorf("SELECT on old name should error after RENAME")
 	}
+
 	var count int
 	if err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM members").Scan(&count); err != nil {
 		t.Fatalf("select new name: %v", err)
 	}
+
 	if count != 2 {
 		t.Errorf("members row count = %d, want 2", count)
 	}
@@ -450,6 +491,7 @@ func TestAlterRenameTable(t *testing.T) {
 		"SELECT name FROM members WHERE id = 2").Scan(&name); err != nil {
 		t.Fatalf("session B post-rename: %v", err)
 	}
+
 	if name != "bob" {
 		t.Errorf("session B sees id=2 as %q, want 'bob'", name)
 	}
@@ -461,15 +503,21 @@ func TestAlterRenameTable(t *testing.T) {
 		t.Fatalf("explain post-rename: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
+
 	var detail strings.Builder
+
 	for rows.Next() {
-		var id, parent, notused int
-		var d string
+		var (
+			id, parent, notused int
+			d                   string
+		)
 		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
 			t.Fatal(err)
 		}
+
 		detail.WriteString(d + " | ")
 	}
+
 	if !strings.Contains(detail.String(), "idx_users_name") {
 		t.Errorf("index not used post-rename: plan = %q", detail.String())
 	}
@@ -489,10 +537,12 @@ func TestAlterRenameTableToExisting(t *testing.T) {
 		"CREATE TABLE a (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"CREATE TABLE b (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE a RENAME TO b")
 	if err == nil {
 		t.Errorf("expected error renaming to existing table name")
@@ -505,16 +555,19 @@ func TestAlterRenameTableToExisting(t *testing.T) {
 func TestAlterRenameColumn(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, note TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec(
 		"INSERT INTO t VALUES (1, 'alice', 'hello'), (2, 'bob', 'world')"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("CREATE INDEX idx_name ON t(name)"); err != nil {
 		t.Fatal(err)
 	}
@@ -525,6 +578,7 @@ func TestAlterRenameColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = sessB.Close() }()
+
 	var scratch string
 	if err := sessB.QueryRowContext(ctx,
 		"SELECT name FROM t WHERE id = 1").Scan(&scratch); err != nil {
@@ -546,6 +600,7 @@ func TestAlterRenameColumn(t *testing.T) {
 		"SELECT full_name FROM t WHERE id = 1").Scan(&name); err != nil {
 		t.Fatalf("select new name: %v", err)
 	}
+
 	if name != "alice" {
 		t.Errorf("full_name = %q, want 'alice'", name)
 	}
@@ -555,6 +610,7 @@ func TestAlterRenameColumn(t *testing.T) {
 		"SELECT full_name FROM t WHERE id = 2").Scan(&name); err != nil {
 		t.Fatalf("session B post-rename select: %v", err)
 	}
+
 	if name != "bob" {
 		t.Errorf("session B id=2 full_name = %q, want 'bob'", name)
 	}
@@ -566,15 +622,21 @@ func TestAlterRenameColumn(t *testing.T) {
 		t.Fatalf("explain: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
+
 	var plan strings.Builder
+
 	for rows.Next() {
-		var id, parent, notused int
-		var d string
+		var (
+			id, parent, notused int
+			d                   string
+		)
 		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
 			t.Fatal(err)
 		}
+
 		plan.WriteString(d + " | ")
 	}
+
 	if !strings.Contains(plan.String(), "idx_name") {
 		t.Errorf("index should still be used post-rename: plan = %q", plan.String())
 	}
@@ -585,6 +647,7 @@ func TestAlterRenameColumn(t *testing.T) {
 		"SELECT note FROM t WHERE id = 1").Scan(&note); err != nil {
 		t.Fatalf("select note: %v", err)
 	}
+
 	if note != "hello" {
 		t.Errorf("note = %q, want 'hello'", note)
 	}
@@ -598,6 +661,7 @@ func TestAlterRenameColumnMissing(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t RENAME COLUMN nope TO other")
 	if err == nil {
 		t.Errorf("expected error renaming missing column")
@@ -612,6 +676,7 @@ func TestAlterRenameColumnCollision(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := db.Exec("ALTER TABLE t RENAME COLUMN a TO b")
 	if err == nil {
 		t.Errorf("expected error renaming to existing column name")
@@ -624,12 +689,14 @@ func TestAlterRenameColumnCollision(t *testing.T) {
 func TestAlterAddColumnCrossSessionVisible(t *testing.T) {
 	_, db := startTestServer(t)
 	db.SetMaxOpenConns(4)
+
 	ctx := context.Background()
 
 	if _, err := db.Exec(
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("INSERT INTO t VALUES (1, 'alice')"); err != nil {
 		t.Fatal(err)
 	}
@@ -663,6 +730,7 @@ func TestAlterAddColumnCrossSessionVisible(t *testing.T) {
 		"SELECT age FROM t WHERE id = 1").Scan(&age); err != nil {
 		t.Fatalf("session B post-ALTER select: %v", err)
 	}
+
 	if age != 0 {
 		t.Errorf("session B sees age = %d, want 0 (DEFAULT)", age)
 	}

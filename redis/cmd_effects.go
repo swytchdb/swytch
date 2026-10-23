@@ -57,6 +57,7 @@ func RegisterEffectsFlags(fs *flag.FlagSet) *EffectsConfig {
 	fs.IntVar(&cfg.ClusterPort, "cluster-port", 0, "QUIC port for cluster traffic (default: --port + 1000)")
 	fs.StringVar(&cfg.AdvertiseAddr, "cluster-advertise", "", "Address:port this node advertises to peers (default: auto-detect)")
 	fs.BoolVar(&cfg.Compress, "compress", false, "Store values compressed inside effects (more resident data per byte of memory, decompression on read); nodes with any setting interoperate")
+
 	return cfg
 }
 
@@ -74,10 +75,12 @@ func InitializeEffects(cfg *EffectsConfig) error {
 	if cfg.Cloud != "" && (cfg.ClusterPassphrase != "" || cfg.JoinAddr != "") {
 		return fmt.Errorf("--cloud is exclusive with --cluster-passphrase and --join: the connection secret derives the cluster identity and peers are discovered via cloud")
 	}
+
 	clusterPort := cfg.ClusterPort
 	if clusterPort == 0 && (cfg.ClusterPassphrase != "" || cfg.Cloud != "") {
 		clusterPort = cfg.Port + 1000
 	}
+
 	if cfg.ClusterPassphrase == "" && cfg.JoinAddr != "" {
 		return fmt.Errorf("--join requires --cluster-passphrase")
 	}
@@ -93,14 +96,17 @@ func InitializeEffects(cfg *EffectsConfig) error {
 		CompressValues:     cfg.Compress,
 	})
 	cfg.Cloud = "" // derive-and-drop: the runtime has its keys, nothing retains the master
+
 	if err != nil {
 		return fmt.Errorf("start cluster runtime: %w", err)
 	}
+
 	activeRuntime = rt
 
 	// Expose the engine's NodeID via the shared globals so legacy
 	// callers that reach through shared.GetNodeID() still work.
 	shared.InitEffectsGlobals(rt.Engine.NodeID())
+
 	return nil
 }
 
@@ -110,6 +116,7 @@ func GetActiveEngine() *effects.Engine {
 	if activeRuntime == nil {
 		return nil
 	}
+
 	return activeRuntime.Engine
 }
 
@@ -121,12 +128,14 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 	if activeRuntime == nil {
 		return fmt.Errorf("InitializeCluster called before InitializeEffects")
 	}
+
 	engine := activeRuntime.Engine
 
 	h, ok := handler.(*Handler)
 	if !ok {
 		return fmt.Errorf("effects handler must be the standard redis Handler")
 	}
+
 	h.engine = engine
 
 	// Wire notification callbacks from effects engine to subscription
@@ -138,6 +147,7 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 		if origAdded != nil {
 			origAdded(key)
 		}
+
 		subs.Notify([]byte(key))
 	}
 	origDeleted := engine.OnKeyDeleted
@@ -145,6 +155,7 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 		if origDeleted != nil {
 			origDeleted(key)
 		}
+
 		subs.NotifyAllWaiters([]byte(key))
 	}
 	origFlushAll := engine.OnFlushAll
@@ -152,6 +163,7 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 		if origFlushAll != nil {
 			origFlushAll()
 		}
+
 		subs.NotifyAll()
 	}
 
@@ -177,12 +189,15 @@ func InitializeCluster(cfg *EffectsConfig, handler shared.CommandHandler) error 
 
 	if cfg.ClusterPassphrase == "" {
 		slog.Debug("no cluster passphrase, running in single-node mode")
+
 		return nil
 	}
+
 	slog.Info("cluster initialized",
 		"node_id", engine.NodeID(),
 		"join", cfg.JoinAddr,
 	)
+
 	return nil
 }
 
@@ -196,9 +211,11 @@ func StopCluster() {
 	// it points at — otherwise any in-flight Publish/Subscribe would
 	// reach a dead PeerManager via stale pointers.
 	shared.SetPubSubClusterRouter(nil)
+
 	if err := activeRuntime.Stop(); err != nil {
 		slog.Error("cluster runtime shutdown", "error", err)
 	}
+
 	activeRuntime = nil
 }
 
@@ -207,12 +224,15 @@ func PrintEffectsConfig(cfg *EffectsConfig) {
 	if cfg.Enabled && activeRuntime != nil {
 		fmt.Printf("  Effects engine: node %d\n", activeRuntime.Engine.NodeID())
 	}
+
 	if cfg.ClusterPassphrase != "" {
 		fmt.Printf("  Cluster mTLS: passphrase-derived\n")
 	}
+
 	if cfg.JoinAddr != "" {
 		fmt.Printf("  Cluster join: %s\n", cfg.JoinAddr)
 	}
+
 	if activeRuntime != nil && activeRuntime.CloudSync != nil {
 		fmt.Printf("  Cloud durability: %s\n", cluster.CloudEndpoint)
 	}

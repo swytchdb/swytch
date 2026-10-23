@@ -60,8 +60,10 @@ func containerRef(vid string) elemRef { return elemRef{childVid: vid} }
 func setRefValue(d *pb.DataEffect, ref elemRef) {
 	if ref.childVid != "" {
 		d.Value = &pb.DataEffect_Child{Child: []byte(ref.childVid)}
+
 		return
 	}
+
 	d.Value = &pb.DataEffect_Raw{Raw: ref.scalar}
 }
 
@@ -74,6 +76,7 @@ func virtBytes(vid string) []byte {
 	if vid == "" {
 		return nil
 	}
+
 	return []byte(vid)
 }
 
@@ -103,6 +106,7 @@ func orderedInsertEffect(key, vid string, id []byte, ref elemRef) *pb.Effect {
 		Id: id,
 	}
 	setRefValue(d, ref)
+
 	return &pb.Effect{
 		Key:     []byte(key),
 		Virtual: virtBytes(vid),
@@ -115,9 +119,11 @@ func encodeRoot(emit emitFn, key string, v *Value) error {
 	if v.IsContainer() {
 		return encodeContainer(emit, key, "", v)
 	}
+
 	if err := emit(metaEffect(key, "", pb.ValueType_TYPE_JSON)); err != nil {
 		return err
 	}
+
 	return emit(scalarEffect(key, "", Serialize(v)))
 }
 
@@ -127,29 +133,36 @@ func encodeContainer(emit emitFn, key, vid string, v *Value) error {
 		if err := emit(metaEffect(key, vid, pb.ValueType_TYPE_JSON_OBJECT)); err != nil {
 			return err
 		}
+
 		for _, m := range v.Obj {
 			ref, err := encodeRef(emit, key, m.Val)
 			if err != nil {
 				return err
 			}
+
 			if err := emit(orderedInsertEffect(key, vid, []byte(m.Key), ref)); err != nil {
 				return err
 			}
 		}
+
 		return nil
 	}
+
 	if err := emit(metaEffect(key, vid, pb.ValueType_TYPE_JSON_ARRAY)); err != nil {
 		return err
 	}
+
 	for _, iv := range v.Arr {
 		ref, err := encodeRef(emit, key, iv)
 		if err != nil {
 			return err
 		}
+
 		if err := emit(orderedInsertEffect(key, vid, []byte(newVid()), ref)); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -161,8 +174,10 @@ func encodeRef(emit emitFn, key string, v *Value) (elemRef, error) {
 		if err := encodeContainer(emit, key, childVid, v); err != nil {
 			return elemRef{}, err
 		}
+
 		return containerRef(childVid), nil
 	}
+
 	return scalarRef(Serialize(v)), nil
 }
 
@@ -171,7 +186,8 @@ func nodeAt(root *pb.ReducedEffect, vid string) *pb.ReducedEffect {
 	if vid == "" {
 		return root
 	}
-	return root.Partitions[vid]
+
+	return root.GetPartitions()[vid]
 }
 
 // assemble reconstructs the JSON value rooted at vid from the partition map,
@@ -182,24 +198,29 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 	if p == nil {
 		return nil
 	}
+
 	// Container tags need reconstruction; all other tags use the scalar encoding.
 	//exhaustive:ignore
-	switch p.TypeTag {
+	switch p.GetTypeTag() {
 	case pb.ValueType_TYPE_JSON_OBJECT:
 		obj := &Value{Kind: KindObject}
-		for _, el := range p.OrderedElements {
+
+		for _, el := range p.GetOrderedElements() {
 			if v := decodeRef(root, el.GetData()); v != nil {
 				obj.Obj = append(obj.Obj, Member{Key: string(el.GetData().GetId()), Val: v})
 			}
 		}
+
 		return obj
 	case pb.ValueType_TYPE_JSON_ARRAY:
 		arr := &Value{Kind: KindArray}
-		for _, el := range p.OrderedElements {
+
+		for _, el := range p.GetOrderedElements() {
 			if v := decodeRef(root, el.GetData()); v != nil {
 				arr.Arr = append(arr.Arr, v)
 			}
 		}
+
 		return arr
 	default:
 		if p.GetScalar() != nil {
@@ -207,6 +228,7 @@ func assemble(root *pb.ReducedEffect, vid string) *Value {
 				return v
 			}
 		}
+
 		return nil
 	}
 }
@@ -217,10 +239,12 @@ func decodeRef(root *pb.ReducedEffect, d *pb.DataEffect) *Value {
 	if child := d.GetChild(); len(child) > 0 {
 		return assemble(root, string(child))
 	}
+
 	if raw := d.GetRaw(); len(raw) > 0 {
 		if v, err := Parse(raw); err == nil {
 			return v
 		}
 	}
+
 	return nil
 }

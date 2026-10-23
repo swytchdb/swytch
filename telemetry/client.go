@@ -76,6 +76,7 @@ func New(cfg Config) *Client {
 	if sf == nil {
 		sf = func() HeartbeatStats { return HeartbeatStats{} }
 	}
+
 	return &Client{
 		nodeID:            cfg.NodeID,
 		clusterID:         cfg.ClusterID,
@@ -93,6 +94,7 @@ func New(cfg Config) *Client {
 
 func (c *Client) Run(ctx context.Context) {
 	c.sendStartup(ctx)
+
 	if c.adopterEmail != "" {
 		c.sendAdopter(ctx)
 	}
@@ -106,6 +108,7 @@ func (c *Client) Run(ctx context.Context) {
 			finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			c.sendHeartbeat(finalCtx)
 			cancel()
+
 			return
 		case <-ticker.C:
 			c.sendHeartbeat(ctx)
@@ -117,15 +120,19 @@ func (c *Client) sendStartup(ctx context.Context) {
 	params := url.Values{}
 	params.Set("ev", "startup")
 	params.Set("node_id", c.nodeID)
+
 	if c.clusterID != "" {
 		params.Set("cluster_id", c.clusterID)
 	}
+
 	params.Set("ver", c.version)
 	params.Set("os", c.goos)
 	params.Set("arch", c.goarch)
+
 	if c.features != "" {
 		params.Set("features", c.features)
 	}
+
 	c.doGet(ctx, params)
 }
 
@@ -134,36 +141,47 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 	params := url.Values{}
 	params.Set("ev", "heartbeat")
 	params.Set("node_id", c.nodeID)
+
 	if c.clusterID != "" {
 		params.Set("cluster_id", c.clusterID)
 	}
+
 	params.Set("ver", c.version)
 	params.Set("nodes", strconv.Itoa(stats.Nodes))
 	params.Set("uptime", strconv.Itoa(stats.UptimeSeconds))
+
 	if stats.MemoryAvail != 0 {
 		params.Set("memory_available", strconv.FormatInt(stats.MemoryAvail, 10))
 	}
+
 	if stats.MemoryUsage != 0 {
 		params.Set("memory_usage", strconv.FormatInt(stats.MemoryUsage, 10))
 	}
+
 	if stats.HitCount != 0 {
 		params.Set("hit_count", strconv.FormatUint(stats.HitCount, 10))
 	}
+
 	if stats.MissCount != 0 {
 		params.Set("miss_count", strconv.FormatUint(stats.MissCount, 10))
 	}
+
 	if stats.Evictions != 0 {
 		params.Set("evictions", strconv.FormatUint(stats.Evictions, 10))
 	}
+
 	if stats.EntryCount != 0 {
 		params.Set("entry_count", strconv.Itoa(stats.EntryCount))
 	}
+
 	if stats.Capacity != 0 {
 		params.Set("capacity", strconv.Itoa(stats.Capacity))
 	}
+
 	if stats.AverageK != 0 {
 		params.Set("average_k", strconv.FormatFloat(stats.AverageK, 'f', 2, 64))
 	}
+
 	c.doGet(ctx, params)
 }
 
@@ -177,11 +195,14 @@ func (c *Client) sendAdopter(ctx context.Context) {
 
 func (c *Client) doGet(ctx context.Context, params url.Values) {
 	u := c.endpoint + "/t/v1/nearcache?" + params.Encode()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		slog.Debug("telemetry: build request", "error", err)
+
 		return
 	}
+
 	resp, err := c.httpClient.Do(req)
 	if resp != nil && resp.Body != nil {
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
@@ -192,6 +213,7 @@ func (c *Client) doGet(ctx context.Context, params url.Values) {
 			slog.Debug("telemetry: close response", "error", err)
 		}
 	}
+
 	if err != nil {
 		slog.Debug("telemetry: send", "error", err)
 	}

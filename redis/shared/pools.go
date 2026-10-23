@@ -48,6 +48,7 @@ var writerPool = sync.Pool{
 	New: func() any {
 		buf := &bytes.Buffer{}
 		buf.Grow(ResponseBufSize)
+
 		return &Writer{buf: buf}
 	},
 }
@@ -76,24 +77,31 @@ func sizeClassIndex(n int) int {
 	if n <= 64 {
 		return 0
 	}
+
 	if n <= 256 {
 		return 1
 	}
+
 	if n <= 1024 {
 		return 2
 	}
+
 	if n <= 4096 {
 		return 3
 	}
+
 	if n <= 16384 {
 		return 4
 	}
+
 	if n <= 65536 {
 		return 5
 	}
+
 	if n <= 262144 {
 		return 6
 	}
+
 	return 7
 }
 
@@ -106,6 +114,7 @@ func GetDataBuf(n int) []byte {
 
 	poolIdx := sizeClassIndex(n)
 	p := dataBufPools[poolIdx].Get().(unsafe.Pointer)
+
 	return unsafe.Slice((*byte)(p), dataBufSizes[poolIdx])[:n]
 }
 
@@ -121,6 +130,7 @@ func PutDataBuf(buf []byte) {
 	for i := len(dataBufSizes) - 1; i >= 0; i-- {
 		if c >= dataBufSizes[i] {
 			dataBufPools[i].Put(unsafe.Pointer(unsafe.SliceData(buf)))
+
 			return
 		}
 	}
@@ -130,6 +140,7 @@ func PutDataBuf(buf []byte) {
 func GetCommand() *Command {
 	cmd := commandPool.Get().(*Command)
 	cmd.Reset()
+
 	return cmd
 }
 
@@ -144,6 +155,7 @@ func PutCommand(cmd *Command) {
 			PutDataBuf(arg)
 		}
 	}
+
 	clear(cmd.Args[:cap(cmd.Args)])
 	cmd.keyScratch[0] = ""
 	cmd.Args = cmd.Args[:0]
@@ -154,6 +166,7 @@ func PutCommand(cmd *Command) {
 func GetWriter() *Writer {
 	w := writerPool.Get().(*Writer)
 	w.buf.Reset()
+
 	return w
 }
 
@@ -162,14 +175,17 @@ func PutWriter(w *Writer) {
 	if w == nil || w.buf == nil {
 		return
 	}
+
 	if w.buf.Cap() > ResponseBufSize*4 {
 		// Don't pool overly large buffers
 		return
 	}
+
 	if w.scratch.Cap() > ResponseBufSize*4 {
 		// Same size policy as buf: one huge response must not pin its
 		// staging capacity in the pool forever.
 		w.scratch = bytes.Buffer{}
 	}
+
 	writerPool.Put(w)
 }

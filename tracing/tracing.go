@@ -64,6 +64,7 @@ func Init(ctx context.Context, cfg Config) func(context.Context) error {
 	exporter, err := otlptracehttp.New(ctx, opts...)
 	if err != nil {
 		slog.Error("tracing: failed to create OTLP exporter", "error", err)
+
 		return func(context.Context) error { return nil }
 	}
 
@@ -77,6 +78,7 @@ func Init(ctx context.Context, cfg Config) func(context.Context) error {
 	)
 	if err != nil {
 		slog.Error("tracing: failed to create resource", "error", err)
+
 		return func(context.Context) error { return exporter.Shutdown(ctx) }
 	}
 
@@ -87,6 +89,7 @@ func Init(ctx context.Context, cfg Config) func(context.Context) error {
 	otel.SetTracerProvider(tp)
 
 	enabled = true
+
 	slog.Info("tracing: initialized", "endpoint", cfg.Endpoint, "service", cfg.ServiceName, "node", cfg.NodeID)
 
 	return tp.Shutdown
@@ -117,9 +120,11 @@ func InjectIntoBytes(ctx context.Context) []byte {
 	buf[0] = 0 // version
 	tid := sc.TraceID()
 	copy(buf[1:17], tid[:])
+
 	sid := sc.SpanID()
 	copy(buf[17:25], sid[:])
 	buf[25] = byte(sc.TraceFlags())
+
 	return buf
 }
 
@@ -133,6 +138,7 @@ func ExtractFromBytes(data []byte) context.Context {
 
 	var tid trace.TraceID
 	copy(tid[:], data[1:17])
+
 	var sid trace.SpanID
 	copy(sid[:], data[17:25])
 	flags := trace.TraceFlags(data[25])
@@ -170,6 +176,7 @@ func (h *TracingHandler) Handle(ctx context.Context, r slog.Record) error {
 			slog.String("span_id", sc.SpanID().String()),
 		)
 	}
+
 	return h.inner.Handle(ctx, r)
 }
 

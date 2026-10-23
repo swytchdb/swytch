@@ -36,6 +36,7 @@ func TestEncodeIndexValueInteger(t *testing.T) {
 	nums := []int64{
 		math.MinInt64, -1000, -1, 0, 1, 1000, math.MaxInt64,
 	}
+
 	encoded := make([][]byte, len(nums))
 	for i, n := range nums {
 		encoded[i] = encodeIndexValue(sqlite.IntegerValue(n), affinityInteger)
@@ -57,6 +58,7 @@ func TestEncodeIndexValueReal(t *testing.T) {
 	nums := []float64{
 		math.Inf(-1), -1e308, -1.5, -0.001, 0, 0.001, 1.5, 1e308, math.Inf(1),
 	}
+
 	encoded := make([][]byte, len(nums))
 	for i, n := range nums {
 		encoded[i] = encodeIndexValue(sqlite.FloatValue(n), affinityReal)
@@ -64,6 +66,7 @@ func TestEncodeIndexValueReal(t *testing.T) {
 			t.Errorf("float %v: encoded length %d, want 8", n, len(encoded[i]))
 		}
 	}
+
 	for i := 1; i < len(encoded); i++ {
 		if bytes.Compare(encoded[i-1], encoded[i]) >= 0 {
 			t.Errorf("lex order broken between %v and %v: %x vs %x",
@@ -74,6 +77,7 @@ func TestEncodeIndexValueReal(t *testing.T) {
 
 func TestEncodeIndexValueText(t *testing.T) {
 	strs := []string{"", "a", "apple", "banana", "foo", "foo/bar", "zebra"}
+
 	encoded := make([][]byte, len(strs))
 	for i, s := range strs {
 		encoded[i] = encodeIndexValue(sqlite.TextValue(s), affinityText)
@@ -83,9 +87,11 @@ func TestEncodeIndexValueText(t *testing.T) {
 	// SQL BINARY collation).
 	want := append([]string(nil), strs...)
 	sort.Strings(want)
+
 	if !sortedEqual(strs, want) {
 		t.Fatalf("input not pre-sorted: %v vs %v", strs, want)
 	}
+
 	for i := 1; i < len(encoded); i++ {
 		if bytes.Compare(encoded[i-1], encoded[i]) > 0 {
 			t.Errorf("lex order broken between %q and %q", strs[i-1], strs[i])
@@ -97,17 +103,21 @@ func TestEncodeIndexValueRangeScan(t *testing.T) {
 	// Pick a random-looking set, encode them, sort by encoded bytes,
 	// verify the resulting numeric order is ascending.
 	nums := []int64{42, -7, 0, 999, -2, 1, -1000, math.MaxInt64 / 2}
+
 	type pair struct {
 		n   int64
 		enc []byte
 	}
+
 	pairs := make([]pair, len(nums))
 	for i, n := range nums {
 		pairs[i] = pair{n, encodeIndexValue(sqlite.IntegerValue(n), affinityInteger)}
 	}
+
 	sort.Slice(pairs, func(i, j int) bool {
 		return bytes.Compare(pairs[i].enc, pairs[j].enc) < 0
 	})
+
 	for i := 1; i < len(pairs); i++ {
 		if pairs[i-1].n >= pairs[i].n {
 			t.Errorf("order broken at %d: %d should come before %d",
@@ -120,10 +130,12 @@ func sortedEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
+
 	for i := range a {
 		if a[i] != b[i] {
 			return false
 		}
 	}
+
 	return true
 }

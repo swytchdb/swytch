@@ -55,5 +55,6 @@ func ParseScore(s []byte) (score float64, exclusive bool, ok bool) {
 	if math.IsNaN(f) {
 		return 0, false, false
 	}
+
 	return f, exclusive, true
 }

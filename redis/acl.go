@@ -91,6 +91,7 @@ func NewACLManager() *ACLManager {
 		Commands:    make(map[shared.CommandType]bool),
 		Subcommands: make(map[shared.CommandType]map[string]bool),
 	}
+
 	return m
 }
 
@@ -98,6 +99,7 @@ func NewACLManager() *ACLManager {
 func (m *ACLManager) GetUser(name string) *shared.ACLUser {
 	token := m.mu.RLock()
 	defer m.mu.RUnlock(token)
+
 	return m.users[name]
 }
 
@@ -105,10 +107,12 @@ func (m *ACLManager) GetUser(name string) *shared.ACLUser {
 func (m *ACLManager) GetUsers() []string {
 	token := m.mu.RLock()
 	defer m.mu.RUnlock(token)
+
 	names := make([]string, 0, len(m.users))
 	for name := range m.users {
 		names = append(names, name)
 	}
+
 	return names
 }
 
@@ -116,6 +120,7 @@ func (m *ACLManager) GetUsers() []string {
 func (m *ACLManager) SetUser(user *shared.ACLUser) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	m.users[user.Name] = user
 }
 
@@ -124,12 +129,16 @@ func (m *ACLManager) DeleteUser(name string) bool {
 	if name == defaultUsername {
 		return false // Cannot delete default user
 	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	if _, ok := m.users[name]; ok {
 		delete(m.users, name)
+
 		return true
 	}
+
 	return false
 }
 
@@ -182,10 +191,12 @@ func (m *ACLManager) AuthenticateDefault() (*shared.ACLUser, bool) {
 func (m *ACLManager) RequiresAuth() bool {
 	token := m.mu.RLock()
 	defer m.mu.RUnlock(token)
+
 	user, ok := m.users[defaultUsername]
 	if !ok || !user.Enabled {
 		return true
 	}
+
 	return !user.NoPass
 }
 
@@ -209,6 +220,7 @@ func (m *ACLManager) CheckCommand(user *shared.ACLUser, cmd shared.CommandType) 
 		if allowed {
 			return nil
 		}
+
 		return ErrNoPermission
 	}
 
@@ -267,6 +279,7 @@ func (m *ACLManager) CheckKey(user *shared.ACLUser, key string, isWrite bool) er
 		if selector.AllKeys {
 			return nil
 		}
+
 		for _, pattern := range selector.KeyPatterns {
 			if aclMatchGlob(pattern.Pattern, key) {
 				switch pattern.Type {
@@ -324,6 +337,7 @@ func (m *ACLManager) LogDenied(reason, context, object, username, clientInfo str
 			entry.Count++
 			entry.AgeSeconds = 0
 			entry.TimestampUsec = usec
+
 			return
 		}
 	}
@@ -365,6 +379,7 @@ func (m *ACLManager) GetLog(count int) []ACLLogEntry {
 
 	result := make([]ACLLogEntry, count)
 	copy(result, m.log[:count])
+
 	return result
 }
 
@@ -372,6 +387,7 @@ func (m *ACLManager) GetLog(count int) []ACLLogEntry {
 func (m *ACLManager) ResetLog() {
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
+
 	m.log = m.log[:0]
 }
 
@@ -385,11 +401,14 @@ func GeneratePassword(bits int) (string, error) {
 	if bits <= 0 {
 		bits = 256
 	}
+
 	bytes := (bits + 7) / 8
+
 	buf := make([]byte, bytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
+
 	return hex.EncodeToString(buf), nil
 }
 
@@ -408,9 +427,11 @@ func (m *ACLManager) LoadFromFile(path string) error {
 	m.users = make(map[string]*shared.ACLUser)
 
 	scanner := bufio.NewScanner(f)
+
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
+
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -437,6 +458,7 @@ func (m *ACLManager) LoadFromFile(path string) error {
 	}
 
 	m.aclFile = path
+
 	return scanner.Err()
 }
 
@@ -448,16 +470,19 @@ func (m *ACLManager) SaveToFile(path string) error {
 	if path == "" {
 		path = m.aclFile
 	}
+
 	if path == "" {
 		return errors.New("ERR no ACL file configured")
 	}
 
 	// Write to temp file first
 	dir := filepath.Dir(path)
+
 	f, err := os.CreateTemp(dir, "acl-*.tmp")
 	if err != nil {
 		return err
 	}
+
 	tmpPath := f.Name()
 
 	// Sort users by name for deterministic output
@@ -465,26 +490,31 @@ func (m *ACLManager) SaveToFile(path string) error {
 	for name := range m.users {
 		usernames = append(usernames, name)
 	}
+
 	sort.Strings(usernames)
 
 	for _, username := range usernames {
 		user := m.users[username]
+
 		line := m.formatUserRule(user)
 		if _, err := fmt.Fprintln(f, line); err != nil {
 			closeErr := f.Close()
 			removeErr := os.Remove(tmpPath)
+
 			return errors.Join(err, closeErr, removeErr)
 		}
 	}
 
 	if err := f.Close(); err != nil {
 		removeErr := os.Remove(tmpPath)
+
 		return errors.Join(err, removeErr)
 	}
 
 	// Atomic rename
 	if err := os.Rename(tmpPath, path); err != nil {
 		removeErr := os.Remove(tmpPath)
+
 		return errors.Join(err, removeErr)
 	}
 
@@ -499,6 +529,7 @@ func (m *ACLManager) parseACLLine(line string) error {
 	}
 
 	username := fields[1]
+
 	user, ok := m.users[username]
 	if !ok {
 		user = &shared.ACLUser{
@@ -520,6 +551,7 @@ func (m *ACLManager) applyACLRules(user *shared.ACLUser, rules []string) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -574,10 +606,12 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 	case strings.HasPrefix(lower, ">"):
 		// Plaintext password - hash it (case-sensitive payload)
 		password := rule[1:]
+
 		hash, err := HashPassword(password)
 		if err != nil {
 			return fmt.Errorf("failed to hash password: %w", err)
 		}
+
 		user.PasswordHashes = append(user.PasswordHashes, hash)
 		user.NoPass = false
 
@@ -590,32 +624,38 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 	case strings.HasPrefix(lower, "<"):
 		// Remove password (case-sensitive payload)
 		password := rule[1:]
+
 		newHashes := user.PasswordHashes[:0]
 		for _, hash := range user.PasswordHashes {
 			if bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil {
 				newHashes = append(newHashes, hash)
 			}
 		}
+
 		user.PasswordHashes = newHashes
 
 	case strings.HasPrefix(lower, "!"):
 		// Remove hashed password (case-sensitive payload)
 		hashStr := rule[1:]
+
 		newHashes := user.PasswordHashes[:0]
 		for _, hash := range user.PasswordHashes {
 			if string(hash) != hashStr {
 				newHashes = append(newHashes, hash)
 			}
 		}
+
 		user.PasswordHashes = newHashes
 
 	case strings.HasPrefix(lower, "+@"):
 		// Add category
 		catName := rule[2:]
+
 		cat, ok := shared.GetCategoryByName(catName)
 		if !ok {
 			return fmt.Errorf("unknown category: %s", catName)
 		}
+
 		if cat == shared.CatAll {
 			user.AllCommands = true
 		} else {
@@ -625,10 +665,12 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 	case strings.HasPrefix(lower, "-@"):
 		// Remove category
 		catName := rule[2:]
+
 		cat, ok := shared.GetCategoryByName(catName)
 		if !ok {
 			return fmt.Errorf("unknown category: %s", catName)
 		}
+
 		if cat == shared.CatAll {
 			user.AllCommands = false
 		} else {
@@ -642,19 +684,23 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 			// Subcommand permission
 			cmdName := cmdStr[:idx]
 			subName := cmdStr[idx+1:]
+
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdName))
 			if !ok {
 				return fmt.Errorf("unknown command: %s", cmdName)
 			}
+
 			if user.Subcommands[cmd] == nil {
 				user.Subcommands[cmd] = make(map[string]bool)
 			}
+
 			user.Subcommands[cmd][strings.ToLower(subName)] = true
 		} else {
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdStr))
 			if !ok {
 				return fmt.Errorf("unknown command: %s", cmdStr)
 			}
+
 			user.Commands[cmd] = true
 		}
 
@@ -664,19 +710,23 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 		if idx := strings.Index(cmdStr, "|"); idx > 0 {
 			cmdName := cmdStr[:idx]
 			subName := cmdStr[idx+1:]
+
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdName))
 			if !ok {
 				return fmt.Errorf("unknown command: %s", cmdName)
 			}
+
 			if user.Subcommands[cmd] == nil {
 				user.Subcommands[cmd] = make(map[string]bool)
 			}
+
 			user.Subcommands[cmd][strings.ToLower(subName)] = false
 		} else {
 			cmd, ok := shared.LookupCommandName(strings.ToUpper(cmdStr))
 			if !ok {
 				return fmt.Errorf("unknown command: %s", cmdStr)
 			}
+
 			user.Commands[cmd] = false
 		}
 
@@ -723,6 +773,7 @@ func (m *ACLManager) applyACLRule(user *shared.ACLUser, rule string) error {
 // formatUserRule formats a user's ACL rules as a string
 func (m *ACLManager) formatUserRule(user *shared.ACLUser) string {
 	var parts []string
+
 	parts = append(parts, "user", user.Name)
 
 	if user.Enabled {
@@ -805,8 +856,10 @@ func aclMatchGlobRecursive(pattern, str string, pi, si int) bool {
 				if pattern[pi] != '*' {
 					return false
 				}
+
 				pi++
 			}
+
 			return true
 		}
 
@@ -818,6 +871,7 @@ func aclMatchGlobRecursive(pattern, str string, pi, si int) bool {
 					return true
 				}
 			}
+
 			return false
 		case '?':
 			// Match exactly one character
@@ -826,37 +880,46 @@ func aclMatchGlobRecursive(pattern, str string, pi, si int) bool {
 		case '[':
 			// Character class
 			pi++
+
 			negated := false
 			if pi < len(pattern) && pattern[pi] == '^' {
 				negated = true
 				pi++
 			}
+
 			matched := false
+
 			for pi < len(pattern) && pattern[pi] != ']' {
 				if pi+2 < len(pattern) && pattern[pi+1] == '-' {
 					// Range
 					if str[si] >= pattern[pi] && str[si] <= pattern[pi+2] {
 						matched = true
 					}
+
 					pi += 3
 				} else {
 					if pattern[pi] == str[si] {
 						matched = true
 					}
+
 					pi++
 				}
 			}
+
 			if pi < len(pattern) {
 				pi++ // skip ']'
 			}
+
 			if matched == negated {
 				return false
 			}
+
 			si++
 		default:
 			if pattern[pi] != str[si] {
 				return false
 			}
+
 			pi++
 			si++
 		}

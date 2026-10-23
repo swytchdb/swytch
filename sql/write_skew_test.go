@@ -69,45 +69,56 @@ func TestConcurrentWriteSkewMeetingRoom(t *testing.T) {
 		if err := conn.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM meetings WHERE room = 'X' AND slot = 5").Scan(&count); err != nil {
 			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+
 			return err
 		}
+
 		bothRead.Done()
 		bothRead.Wait()
 
 		if count != 0 {
 			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+
 			return nil
 		}
+
 		insert := fmt.Sprintf(
 			"INSERT INTO meetings VALUES (%d, 'X', 5, '%s')", id, owner)
 		if _, err := conn.ExecContext(ctx, insert); err != nil {
 			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+
 			return err
 		}
+
 		bothInsert.Done()
 		bothCommit.Wait()
 
 		_, err = conn.ExecContext(ctx, "COMMIT")
+
 		return err
 	}
 
 	results := make([]error, 2)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	for i := range 2 {
 		go func(idx int) {
 			defer wg.Done()
+
 			id := idx + 1
 			owner := "owner" + string(rune('A'+idx))
 			results[idx] = run(id, owner)
 		}(i)
 	}
+
 	bothInsert.Wait()
 	bothCommit.Done()
 	wg.Wait()
 
 	var succeeded, serialization int
+
 	for _, err := range results {
 		switch {
 		case err == nil:
@@ -118,6 +129,7 @@ func TestConcurrentWriteSkewMeetingRoom(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	}
+
 	t.Logf("write-skew outcome: %d committed, %d serialization-aborted",
 		succeeded, serialization)
 
@@ -127,6 +139,7 @@ func TestConcurrentWriteSkewMeetingRoom(t *testing.T) {
 	if succeeded > 1 {
 		t.Errorf("write-skew violation: %d txs committed, want at most 1", succeeded)
 	}
+
 	if succeeded == 0 {
 		t.Errorf("both txs aborted — expected exactly one to commit")
 	}
@@ -155,18 +168,22 @@ func TestPhantomInsertAbortsObserver(t *testing.T) {
 	}
 
 	ctx := context.Background()
+
 	observer, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = observer.Close() }()
 
 	mustExecCtx(t, observer, ctx, "BEGIN")
+
 	var count int
 	if err := observer.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM t WHERE role = 'admin'").Scan(&count); err != nil {
 		t.Fatalf("observer select: %v", err)
 	}
+
 	if count != 0 {
 		t.Fatalf("observer initial count = %d, want 0", count)
 	}
@@ -195,6 +212,7 @@ func TestConcurrentDisjointWritesBothCommit(t *testing.T) {
 		"CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)"); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := db.Exec("INSERT INTO t VALUES (1, 10), (2, 20)"); err != nil {
 		t.Fatal(err)
 	}
@@ -215,35 +233,47 @@ func TestConcurrentDisjointWritesBothCommit(t *testing.T) {
 		if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
 			return err
 		}
+
 		var v int
+
 		sel := fmt.Sprintf("SELECT v FROM t WHERE id = %d", id)
 		if err := conn.QueryRowContext(ctx, sel).Scan(&v); err != nil {
 			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+
 			return err
 		}
+
 		bothRead.Done()
 		bothCommit.Wait()
+
 		upd := fmt.Sprintf("UPDATE t SET v = %d WHERE id = %d", newVal, id)
 		if _, err := conn.ExecContext(ctx, upd); err != nil {
 			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+
 			return err
 		}
+
 		_, err = conn.ExecContext(ctx, "COMMIT")
+
 		return err
 	}
 
 	results := make([]error, 2)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
+
 	ids := []int{1, 2}
 	newVals := []int{100, 200}
 
 	for i := range 2 {
 		go func(idx int) {
 			defer wg.Done()
+
 			results[idx] = run(ids[idx], newVals[idx])
 		}(i)
 	}
+
 	bothRead.Wait()
 	bothCommit.Done()
 	wg.Wait()
@@ -275,10 +305,12 @@ func TestNonRepeatableReadAborts(t *testing.T) {
 	}
 
 	ctx := context.Background()
+
 	observer, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = observer.Close() }()
 
 	mustExecCtx(t, observer, ctx, "BEGIN")
@@ -289,15 +321,20 @@ func TestNonRepeatableReadAborts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observer read 1: %v", err)
 	}
+
 	var firstRead []int
+
 	for rows.Next() {
 		var v int
 		if err := rows.Scan(&v); err != nil {
 			t.Fatal(err)
 		}
+
 		firstRead = append(firstRead, v)
 	}
+
 	_ = rows.Close()
+
 	if len(firstRead) != 0 {
 		t.Fatalf("first read = %v, want []", firstRead)
 	}
@@ -319,14 +356,18 @@ func TestNonRepeatableReadAborts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observer read 2: %v", err)
 	}
+
 	var secondRead []int
+
 	for rows2.Next() {
 		var v int
 		if err := rows2.Scan(&v); err != nil {
 			t.Fatal(err)
 		}
+
 		secondRead = append(secondRead, v)
 	}
+
 	_ = rows2.Close()
 
 	_, commitErr := observer.ExecContext(ctx, "COMMIT")

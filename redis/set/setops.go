@@ -29,16 +29,19 @@ func getSetMembers(snap *pb.ReducedEffect) map[string]struct{} {
 	if snap == nil || snap.NetAdds == nil {
 		return nil
 	}
-	members := make(map[string]struct{}, len(snap.NetAdds))
-	for m := range snap.NetAdds {
+
+	members := make(map[string]struct{}, len(snap.GetNetAdds()))
+	for m := range snap.GetNetAdds() {
 		members[m] = struct{}{}
 	}
+
 	return members
 }
 
 func handleSInter(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("sinter")
+
 		return
 	}
 
@@ -52,16 +55,21 @@ func handleSInter(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// Type-check all keys first, collecting snapshots
 		sets := make([]map[string]struct{}, len(keys))
 		hasEmpty := false
+
 		for i, key := range keys {
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				hasEmpty = true
 			} else {
@@ -72,39 +80,49 @@ func handleSInter(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// Any non-existent key means empty intersection
 		if hasEmpty {
 			w.WriteArray(0)
+
 			return
 		}
 
 		// Compute intersection
 		result := make(map[string]struct{})
+
 		for m := range sets[0] {
 			inAll := true
+
 			for _, other := range sets[1:] {
 				if other == nil {
 					inAll = false
+
 					break
 				}
+
 				if _, has := other[m]; !has {
 					inAll = false
+
 					break
 				}
 			}
+
 			if inAll {
 				result[m] = struct{}{}
 			}
 		}
 
 		w.WriteArray(len(result))
+
 		for m := range result {
 			w.WriteBulkString([]byte(m))
 		}
 	}
+
 	return
 }
 
 func handleSInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("sinterstore")
+
 		return
 	}
 
@@ -112,6 +130,7 @@ func handleSInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	destKey := keys[0]
 
 	valid = true
@@ -122,12 +141,16 @@ func handleSInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				srcSets = append(srcSets, nil)
 			} else {
@@ -141,18 +164,24 @@ func handleSInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			result = map[string]struct{}{}
 		} else {
 			result = make(map[string]struct{})
+
 			for m := range srcSets[0] {
 				inAll := true
+
 				for _, other := range srcSets[1:] {
 					if other == nil {
 						inAll = false
+
 						break
 					}
+
 					if _, has := other[m]; !has {
 						inAll = false
+
 						break
 					}
 				}
+
 				if inAll {
 					result[m] = struct{}{}
 				}
@@ -161,45 +190,55 @@ func handleSInterStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 		writeStoreResult(cmd, w, destKey, result)
 	}
+
 	return
 }
 
 func handleSInterCard(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("sintercard")
+
 		return
 	}
 
 	numKeys, ok := shared.ParseInt64(cmd.Args[0])
 	if !ok || numKeys < 1 {
 		w.WriteError("ERR numkeys should be greater than 0")
+
 		return
 	}
 
 	if int(numKeys) > len(cmd.Args)-1 {
 		w.WriteError("ERR Number of keys can't be greater than number of args")
+
 		return
 	}
 
 	limit := int64(0)
 	keyArgs := cmd.Args[1 : 1+numKeys]
+
 	remaining := cmd.Args[1+numKeys:]
 	for i := 0; i < len(remaining); i++ {
 		arg := shared.ToUpper(remaining[i])
 		if string(arg) == "LIMIT" {
 			if i+1 >= len(remaining) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			l, ok := shared.ParseInt64(remaining[i+1])
 			if !ok || l < 0 {
 				w.WriteError("ERR LIMIT can't be negative")
+
 				return
 			}
+
 			limit = l
 			i++
 		} else {
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -213,16 +252,21 @@ func handleSInterCard(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	runner = func() {
 		sets := make([]map[string]struct{}, len(keys))
 		hasEmpty := false
+
 		for i, key := range keys {
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				hasEmpty = true
 			} else {
@@ -232,22 +276,29 @@ func handleSInterCard(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 		if hasEmpty {
 			w.WriteInteger(0)
+
 			return
 		}
 
 		count := int64(0)
+
 		for m := range sets[0] {
 			inAll := true
+
 			for _, other := range sets[1:] {
 				if other == nil {
 					inAll = false
+
 					break
 				}
+
 				if _, has := other[m]; !has {
 					inAll = false
+
 					break
 				}
 			}
+
 			if inAll {
 				count++
 				if limit > 0 && count >= limit {
@@ -258,12 +309,14 @@ func handleSInterCard(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 		w.WriteInteger(count)
 	}
+
 	return
 }
 
 func handleSUnion(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("sunion")
+
 		return
 	}
 
@@ -275,34 +328,42 @@ func handleSUnion(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	valid = true
 	runner = func() {
 		result := make(map[string]struct{})
+
 		for _, key := range keys {
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if exists && snap.NetAdds != nil {
-				for m := range snap.NetAdds {
+				for m := range snap.GetNetAdds() {
 					result[m] = struct{}{}
 				}
 			}
 		}
 
 		w.WriteArray(len(result))
+
 		for m := range result {
 			w.WriteBulkString([]byte(m))
 		}
 	}
+
 	return
 }
 
 func handleSUnionStore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("sunionstore")
+
 		return
 	}
 
@@ -310,23 +371,29 @@ func handleSUnionStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	destKey := keys[0]
 
 	valid = true
 	runner = func() {
 		result := make(map[string]struct{})
+
 		for _, key := range keys[1:] {
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if exists && snap.NetAdds != nil {
-				for m := range snap.NetAdds {
+				for m := range snap.GetNetAdds() {
 					result[m] = struct{}{}
 				}
 			}
@@ -334,12 +401,14 @@ func handleSUnionStore(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 		writeStoreResult(cmd, w, destKey, result)
 	}
+
 	return
 }
 
 func handleSDiff(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("sdiff")
+
 		return
 	}
 
@@ -355,12 +424,16 @@ func handleSDiff(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				sets[i] = nil
 			} else {
@@ -370,36 +443,44 @@ func handleSDiff(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 		if sets[0] == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
 		result := make(map[string]struct{})
+
 		for m := range sets[0] {
 			inOther := false
+
 			for _, other := range sets[1:] {
 				if other != nil {
 					if _, has := other[m]; has {
 						inOther = true
+
 						break
 					}
 				}
 			}
+
 			if !inOther {
 				result[m] = struct{}{}
 			}
 		}
 
 		w.WriteArray(len(result))
+
 		for m := range result {
 			w.WriteBulkString([]byte(m))
 		}
 	}
+
 	return
 }
 
 func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("sdiffstore")
+
 		return
 	}
 
@@ -407,6 +488,7 @@ func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	destKey := keys[0]
 
 	valid = true
@@ -416,12 +498,16 @@ func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				srcSets = append(srcSets, nil)
 			} else {
@@ -434,16 +520,20 @@ func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			result = map[string]struct{}{}
 		} else {
 			result = make(map[string]struct{})
+
 			for m := range srcSets[0] {
 				inOther := false
+
 				for _, other := range srcSets[1:] {
 					if other != nil {
 						if _, has := other[m]; has {
 							inOther = true
+
 							break
 						}
 					}
 				}
+
 				if !inOther {
 					result[m] = struct{}{}
 				}
@@ -452,6 +542,7 @@ func handleSDiffStore(cmd *shared.Command, w *shared.Writer, db *shared.Database
 
 		writeStoreResult(cmd, w, destKey, result)
 	}
+
 	return
 }
 
@@ -461,12 +552,14 @@ func writeStoreResult(cmd *shared.Command, w *shared.Writer, destKey string, res
 
 	if err := emitDeleteKey(cmd, destKey, destTips); err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
 
 	for m := range result {
 		if err := emitSetInsert(cmd, destKey, []byte(m)); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 	}
@@ -474,6 +567,7 @@ func writeStoreResult(cmd *shared.Command, w *shared.Writer, destKey string, res
 	if len(result) > 0 {
 		if err := emitSetTypeTag(cmd, destKey); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 	}

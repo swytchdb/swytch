@@ -78,6 +78,7 @@ func Run(args []string) error {
 	if *cloudSecret != "" && (*clusterPassphrase != "" || *joinAddr != "") {
 		return fmt.Errorf("--cloud is exclusive with --cluster-passphrase and --join: the connection secret derives the cluster identity and peers are discovered via cloud")
 	}
+
 	if *clusterPassphrase == "" && *joinAddr != "" {
 		return fmt.Errorf("--join requires --cluster-passphrase")
 	}
@@ -99,13 +100,16 @@ func Run(args []string) error {
 	if *verbose {
 		level = slog.LevelDebug
 	}
+
 	var handler slog.Handler
+
 	opts := &slog.HandlerOptions{Level: level}
 	if *logFormat == "json" {
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	}
+
 	logger := slog.New(handler)
 	// Package-internal code in effects/, cluster/, and beacon/ reaches
 	// for slog.Default() rather than taking a Logger argument. Install
@@ -136,6 +140,7 @@ func Run(args []string) error {
 		Logger:             logger,
 	})
 	*cloudSecret = "" // derive-and-drop: the runtime has its keys, nothing retains the master
+
 	if err != nil {
 		return fmt.Errorf("start cluster runtime: %w", err)
 	}
@@ -155,17 +160,22 @@ func Run(args []string) error {
 	}
 
 	// Start telemetry client
-	var telemetryCancel context.CancelFunc
-	var telemetryDone chan struct{}
+	var (
+		telemetryCancel context.CancelFunc
+		telemetryDone   chan struct{}
+	)
+
 	if telemetryEnabled {
 		telCtx, cancel := context.WithCancel(context.Background())
 		telemetryCancel = cancel
 		startTime := time.Now()
 		nodeID := fmt.Sprintf("%x", uint64(rt.Engine.NodeID()))
+
 		var clusterID string
 		if *joinAddr != "" {
 			clusterID = fmt.Sprintf("%x", xxh3.HashString(*joinAddr))
 		}
+
 		tc := telemetry.New(telemetry.Config{
 			NodeID:       nodeID,
 			ClusterID:    clusterID,
@@ -177,12 +187,14 @@ func Run(args []string) error {
 				if rt.PeerManager != nil {
 					nodes = len(rt.PeerManager.PeerIDs()) + 1
 				}
+
 				return telemetry.HeartbeatStats{
 					Nodes:         nodes,
 					UptimeSeconds: int(time.Since(startTime).Seconds()),
 				}
 			},
 		})
+
 		telemetryDone = make(chan struct{})
 		go func() { defer close(telemetryDone); tc.Run(telCtx) }()
 	}
@@ -203,24 +215,29 @@ func Run(args []string) error {
 		stopTelemetry()
 	case err := <-server.Done():
 		stopTelemetry()
+
 		if err != nil {
 			return errors.Join(
 				fmt.Errorf("server exited: %w", err),
 				rt.Stop(),
 			)
 		}
+
 		return rt.Stop()
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var errs []error
 	if err := server.Stop(shutdownCtx); err != nil {
 		errs = append(errs, fmt.Errorf("server stop: %w", err))
 	}
+
 	if err := rt.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("runtime stop: %w", err))
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -232,10 +249,12 @@ func deriveClusterPort(listen string) int {
 	if err != nil {
 		return 0
 	}
+
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return 0
 	}
+
 	return port + 1000
 }
 
@@ -246,8 +265,10 @@ func normaliseListenAddr(addr string) string {
 	if addr == "" {
 		return addr
 	}
+
 	if _, err := strconv.Atoi(addr); err == nil {
 		return ":" + addr
 	}
+
 	return addr
 }

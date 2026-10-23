@@ -37,6 +37,7 @@ import (
 func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xadd")
+
 		return
 	}
 
@@ -45,12 +46,14 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	i := 1
 
 	// Parse options
-	var noMkStream bool
-	var trimOpts shared.TrimOptions
-	var idmpProducer string
-	var idmpIID string
-	var idmpAuto bool
-	var hasIDMP bool
+	var (
+		noMkStream   bool
+		trimOpts     shared.TrimOptions
+		idmpProducer string
+		idmpIID      string
+		idmpAuto     bool
+		hasIDMP      bool
+	)
 
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
@@ -70,52 +73,71 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		case "IDMP":
 			if hasIDMP {
 				w.WriteError("ERR IDMP/IDMPAUTO specified multiple times")
+
 				return
 			}
+
 			hasIDMP = true
+
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			idmpProducer = string(cmd.Args[i])
 			if idmpProducer == "" {
 				w.WriteError("ERR IDMP requires a non-empty producer ID")
+
 				return
 			}
+
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			idmpIID = string(cmd.Args[i])
 			if idmpIID == "" {
 				w.WriteError("ERR IDMP requires a non-empty idempotent ID")
+
 				return
 			}
+
 			i++
 		case "IDMPAUTO":
 			if hasIDMP {
 				w.WriteError("ERR IDMP/IDMPAUTO specified multiple times")
+
 				return
 			}
+
 			hasIDMP = true
 			idmpAuto = true
+
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			idmpProducer = string(cmd.Args[i])
 			if idmpProducer == "" {
 				w.WriteError("ERR IDMPAUTO requires a non-empty producer ID")
+
 				return
 			}
+
 			i++
 		case "MAXLEN":
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
 			// Check for = or ~
@@ -127,15 +149,20 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				trimOpts.Approx = true
 				i++
 			}
+
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			maxLen, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 			if err != nil || maxLen < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			trimOpts.MaxLen = maxLen
 			trimOpts.HasMaxLen = true
 			i++
@@ -144,13 +171,17 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				i++
 				if i >= len(cmd.Args) {
 					w.WriteError("ERR syntax error")
+
 					return
 				}
+
 				limit, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 				if err != nil || limit < 0 {
 					w.WriteError("ERR value is not an integer or out of range")
+
 					return
 				}
+
 				trimOpts.Limit = limit
 				trimOpts.HasExplicitLimit = true
 				i++
@@ -159,6 +190,7 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
 			// Check for = or ~
@@ -170,15 +202,20 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				trimOpts.Approx = true
 				i++
 			}
+
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			minID, _, _, err := shared.ParseStreamID(string(cmd.Args[i]))
 			if err != nil {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			trimOpts.MinID = &minID
 			i++
 			// Check for LIMIT
@@ -186,13 +223,17 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				i++
 				if i >= len(cmd.Args) {
 					w.WriteError("ERR syntax error")
+
 					return
 				}
+
 				limit, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 				if err != nil || limit < 0 {
 					w.WriteError("ERR value is not an integer or out of range")
+
 					return
 				}
+
 				trimOpts.Limit = limit
 				trimOpts.HasExplicitLimit = true
 				i++
@@ -205,6 +246,7 @@ func handleXAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 parseID:
 	if i >= len(cmd.Args) {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -218,9 +260,12 @@ parseID:
 		_, _, _, parseErr := shared.ParseStreamID(idStr)
 		if parseErr != nil {
 			w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 			return
 		}
+
 		w.WriteError("ERR IDMP/IDMPAUTO can be used only with auto-generated IDs")
+
 		return
 	}
 
@@ -228,6 +273,7 @@ parseID:
 	remaining := cmd.Args[i:]
 	if len(remaining) == 0 || len(remaining)%2 != 0 {
 		w.WriteWrongNumArguments("xadd")
+
 		return
 	}
 
@@ -235,13 +281,16 @@ parseID:
 	if idmpAuto {
 		// Collect field-value pairs and sort by field name for order independence
 		type fvPair struct{ field, value []byte }
+
 		pairs := make([]fvPair, 0, len(remaining)/2)
 		for j := 0; j < len(remaining)-1; j += 2 {
 			pairs = append(pairs, fvPair{remaining[j], remaining[j+1]})
 		}
+
 		sort.Slice(pairs, func(a, b int) bool {
 			return string(pairs[a].field) < string(pairs[b].field)
 		})
+
 		h := sha256.New()
 		for _, p := range pairs {
 			h.Write(p.field)
@@ -249,6 +298,7 @@ parseID:
 			h.Write(p.value)
 			h.Write([]byte{0})
 		}
+
 		idmpIID = hex.EncodeToString(h.Sum(nil))
 	}
 
@@ -269,28 +319,38 @@ parseID:
 				cmd.Context.RestoreSavepoint(savepoint)
 			}
 		}()
+
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if exists && wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// NOMKSTREAM: don't create if doesn't exist
 		if noMkStream && !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
 
 		// Read IDMP config once (before any transaction) to avoid stale reads
-		var idmpGen int64
-		var idmpDuration, idmpMaxsize int64
+		var (
+			idmpGen                   int64
+			idmpDuration, idmpMaxsize int64
+		)
+
 		if hasIDMP {
 			idmpGen = getIdmpGeneration(cmd, key)
+
 			var durationExplicit bool
+
 			idmpDuration, idmpMaxsize, durationExplicit = getStreamConfig(cmd, key)
 			if !durationExplicit {
 				idmpDuration = 0 // don't expire with default duration
@@ -308,7 +368,9 @@ parseID:
 				}
 
 				succeeded = true
+
 				w.WriteBulkStringStr(existingID.String())
+
 				return
 			}
 		}
@@ -326,24 +388,30 @@ parseID:
 			id = generateStreamID(snap)
 			if id.IsZero() {
 				w.WriteError("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+
 				return
 			}
 		} else {
 			var isSpecial bool
+
 			id, _, isSpecial, err = shared.ParseStreamID(idStr)
 			if err != nil {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			if isSpecial {
 				if len(idStr) > 2 && idStr[len(idStr)-2:] == "-*" {
 					id, err = generateStreamIDWithMs(snap, id.Ms)
 					if err != nil {
 						w.WriteError("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+
 						return
 					}
 				} else {
 					w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 					return
 				}
 			}
@@ -352,10 +420,13 @@ parseID:
 		// Validate ID > LastID
 		if id.Compare(lastID) <= 0 {
 			w.WriteError("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+
 			return
 		}
+
 		if id.IsZero() {
 			w.WriteError("ERR The ID specified in XADD must be greater than 0-0")
+
 			return
 		}
 
@@ -369,6 +440,7 @@ parseID:
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -376,12 +448,14 @@ parseID:
 		// Emit the entry insert (ORDERED, PLACE_TAIL)
 		if err := emitStreamInsert(cmd, key, id, fields); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Increment entries-added counter
 		if err := incrementStreamEntriesAdded(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
@@ -389,6 +463,7 @@ parseID:
 		if !exists {
 			if err := emitStreamTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -397,10 +472,13 @@ parseID:
 		if hasIDMP && idmpIID != "" {
 			if err := emitProducerSeqWithConfig(cmd, key, idmpProducer, idmpIID, id, idmpGen, idmpMaxsize); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := incrementIidsAdded(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -420,8 +498,10 @@ parseID:
 		}
 
 		succeeded = true
+
 		w.WriteBulkStringStr(id.String())
 	}
+
 	return
 }
 
@@ -453,21 +533,25 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			if err != nil {
 				return false, err
 			}
+
 			lastDelivered, _, _ := getGroupMeta(gSnap)
 			if id.Compare(lastDelivered) > 0 {
 				return false, nil
 			}
+
 			pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 			if err != nil {
 				return false, err
 			}
+
 			if pelSnap != nil && pelSnap.NetAdds != nil {
 				elemID := encodeStreamElementID(id)
-				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
+				if _, pending := pelSnap.GetNetAdds()[string(elemID)]; pending {
 					return false, nil
 				}
 			}
 		}
+
 		return true, nil
 	}
 
@@ -476,21 +560,24 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 		if opts.RefMode != shared.RefModeDelRef {
 			return nil
 		}
+
 		groupNames := listGroupNames(cmd, key)
 		for _, gName := range groupNames {
 			pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 			if err != nil {
 				return err
 			}
+
 			if pelSnap != nil && pelSnap.NetAdds != nil {
 				elemID := encodeStreamElementID(id)
-				if _, pending := pelSnap.NetAdds[string(elemID)]; pending {
+				if _, pending := pelSnap.GetNetAdds()[string(elemID)]; pending {
 					if err := emitPELRemove(cmd, key, gName, id); err != nil {
 						return err
 					}
 				}
 			}
 		}
+
 		return nil
 	}
 
@@ -502,9 +589,11 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			if trimCount >= limit {
 				break
 			}
+
 			if entry.ID.Compare(*opts.MinID) >= 0 {
 				break
 			}
+
 			canRemove, err := canTrim(entry.ID)
 			if err != nil {
 				return err
@@ -513,6 +602,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			if !canRemove {
 				continue
 			}
+
 			if err := emitStreamRemove(cmd, key, entry.ID); err != nil {
 				return err
 			}
@@ -520,6 +610,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 			if err := handleTrim(entry.ID); err != nil {
 				return err
 			}
+
 			trimCount++
 		}
 	}
@@ -532,11 +623,13 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 		}
 
 		currentLen := int64(len(entries)) - trimCount
+
 		toTrim := currentLen - effectiveMaxLen
 		if toTrim > 0 {
 			if toTrim > limit-trimCount {
 				toTrim = limit - trimCount
 			}
+
 			if opts.Approx && opts.HasExplicitLimit && opts.NodeSize > 0 {
 				toTrim = (toTrim / opts.NodeSize) * opts.NodeSize
 			}
@@ -548,6 +641,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 				if trimmedHere >= toTrim {
 					break
 				}
+
 				canRemove, err := canTrim(entry.ID)
 				if err != nil {
 					return err
@@ -560,6 +654,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 				if opts.MinID != nil && entry.ID.Compare(*opts.MinID) < 0 {
 					continue // already counted
 				}
+
 				if err := emitStreamRemove(cmd, key, entry.ID); err != nil {
 					return err
 				}
@@ -567,10 +662,12 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 				if err := handleTrim(entry.ID); err != nil {
 					return err
 				}
+
 				trimmedHere++
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -578,6 +675,7 @@ func trimEntries(cmd *shared.Command, key string, entries []*shared.StreamEntry,
 func handleXLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("xlen")
+
 		return
 	}
 
@@ -589,19 +687,25 @@ func handleXLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		w.WriteInteger(int64(streamLen(snap)))
 	}
+
 	return
 }
 
@@ -609,6 +713,7 @@ func handleXLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xrange")
+
 		return
 	}
 
@@ -619,16 +724,20 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	// Parse COUNT option
 	count := 0
+
 	if len(cmd.Args) >= 5 {
 		if string(shared.ToUpper(cmd.Args[3])) == optionCount {
 			c, err := strconv.Atoi(string(cmd.Args[4]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			count = c
 		} else {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -637,12 +746,14 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	start, startExcl, err := shared.ParseStreamIDForRange(startStr, false)
 	if err != nil {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
 	end, endExcl, err := shared.ParseStreamIDForRange(endStr, true)
 	if err != nil {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
@@ -651,14 +762,19 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -666,6 +782,7 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		result := rangeEntries(entries, start, end, startExcl, endExcl, count)
 		writeStreamEntries(w, result)
 	}
+
 	return
 }
 
@@ -673,6 +790,7 @@ func handleXRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xrevrange")
+
 		return
 	}
 
@@ -684,16 +802,20 @@ func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 
 	// Parse COUNT option
 	count := 0
+
 	if len(cmd.Args) >= 5 {
 		if string(shared.ToUpper(cmd.Args[3])) == optionCount {
 			c, err := strconv.Atoi(string(cmd.Args[4]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			count = c
 		} else {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -702,12 +824,14 @@ func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	start, startExcl, err := shared.ParseStreamIDForRange(startStr, false)
 	if err != nil {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
 	end, endExcl, err := shared.ParseStreamIDForRange(endStr, true)
 	if err != nil {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
@@ -716,14 +840,19 @@ func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -731,6 +860,7 @@ func handleXRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		result := rangeEntriesReverse(entries, start, end, startExcl, endExcl, count)
 		writeStreamEntries(w, result)
 	}
+
 	return
 }
 
@@ -739,16 +869,20 @@ func handleXRead(cmd *shared.Command, w *shared.Writer, db *shared.Database, con
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
 		handleXReadNonBlocking(cmd, w, db)
+
 		return
 	}
 
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xread")
+
 		return
 	}
 
 	var count int
+
 	var block float64 = -1 // -1 means no blocking
+
 	i := 0
 
 	// Parse options
@@ -759,48 +893,62 @@ func handleXRead(cmd *shared.Command, w *shared.Writer, db *shared.Database, con
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			c, err := strconv.Atoi(string(cmd.Args[i]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			count = c
 			i++
 		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			b, err := strconv.ParseFloat(string(cmd.Args[i]), 64)
 			if err != nil || b < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			block = b / 1000.0 // Convert ms to seconds
 			i++
 		case optionStreams:
 			i++
+
 			goto parseStreams
 		case optionClaim:
 			w.WriteError("ERR The CLAIM option is only supported when using the GROUP option")
+
 			return
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
 
 	w.WriteError("ERR syntax error")
+
 	return
 
 parseStreams:
 	// Remaining args are: key [key ...] id [id ...]
 	remaining := cmd.Args[i:]
+
 	if len(remaining) < 2 || len(remaining)%2 != 0 {
 		w.WriteError("ERR Unbalanced 'xread' list of streams: for each stream key an ID, '+', or '$' must be specified.")
+
 		return
 	}
 
@@ -823,12 +971,16 @@ parseStreams:
 			id, _, isSpecial, err := shared.ParseStreamID(idStr)
 			if err != nil {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			if isSpecial && idStr != "-" {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			ids[j] = id
 		}
 	}
@@ -842,6 +994,7 @@ parseStreams:
 			if err != nil {
 				return nil, err
 			}
+
 			if !exists || wrongType {
 				continue
 			}
@@ -853,15 +1006,18 @@ parseStreams:
 				if len(entries) > 0 {
 					results = append(results, streamResult{key: sKey, entries: entries[len(entries)-1:]})
 				}
+
 				continue
 			}
 
 			var startID shared.StreamID
+
 			if useLastID[j] {
 				lastID, _, _, found := streamMetadata(snap)
 				if !found {
 					lastID = streamLastID(entries)
 				}
+
 				startID = lastID
 			} else {
 				startID = ids[j]
@@ -882,13 +1038,18 @@ parseStreams:
 		results, err := tryReadStreams()
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if len(results) == 0 {
 			w.WriteNullArray()
+
 			return
 		}
+
 		writeXReadResults(w, results)
+
 		return
 	}
 
@@ -899,16 +1060,20 @@ parseStreams:
 			snap, _, exists, _, err := getStreamSnapshot(cmd, sKey)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists {
 				lastID, _, _, found := streamMetadata(snap)
 				if !found {
 					entries := snapshotToEntries(snap)
 					lastID = streamLastID(entries)
 				}
+
 				ids[j] = lastID
 			}
+
 			useLastID[j] = false
 		}
 	}
@@ -922,6 +1087,7 @@ parseStreams:
 	for j, k := range streamKeys {
 		keyBytes[j] = []byte(k)
 	}
+
 	reg, _ := db.Manager().Subscriptions.Register(ctx, keyBytes...)
 	defer reg.Cancel()
 
@@ -931,11 +1097,14 @@ parseStreams:
 		if err != nil {
 			reg.Cancel()
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if len(results) > 0 {
 			reg.Cancel()
 			writeXReadResults(w, results)
+
 			return
 		}
 
@@ -943,9 +1112,12 @@ parseStreams:
 		if _, err := reg.Wait(); err != nil {
 			if conn.WasUnblockedWithError() {
 				w.WriteError("UNBLOCKED client unblocked via CLIENT UNBLOCK")
+
 				return
 			}
+
 			w.WriteNullArray()
+
 			return
 		}
 	}
@@ -955,10 +1127,12 @@ parseStreams:
 func handleXReadNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xread")
+
 		return
 	}
 
 	var count int
+
 	i := 0
 
 	// Parse options
@@ -969,47 +1143,60 @@ func handleXReadNonBlocking(cmd *shared.Command, w *shared.Writer, db *shared.Da
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			c, err := strconv.Atoi(string(cmd.Args[i]))
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			count = c
 			i++
 		case optionBlock:
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
 			// Parse but ignore in non-blocking mode
 			_, err := strconv.ParseFloat(string(cmd.Args[i]), 64)
 			if err != nil {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			i++
 		case optionStreams:
 			i++
+
 			goto parseNBStreams
 		case optionClaim:
 			w.WriteError("ERR The CLAIM option is only supported when using the GROUP option")
+
 			return
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
 
 	w.WriteError("ERR syntax error")
+
 	return
 
 parseNBStreams:
 	remaining := cmd.Args[i:]
+
 	if len(remaining) < 2 || len(remaining)%2 != 0 {
 		w.WriteError("ERR Unbalanced 'xread' list of streams: for each stream key an ID, '+', or '$' must be specified.")
+
 		return
 	}
 
@@ -1032,12 +1219,16 @@ parseNBStreams:
 			id, _, isSpecial, err := shared.ParseStreamID(idStr)
 			if err != nil {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			if isSpecial && idStr != "-" {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			ids[j] = id
 		}
 	}
@@ -1051,8 +1242,10 @@ parseNBStreams:
 			snap, _, exists, wrongType, err := getStreamSnapshot(cmd, sKey)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if !exists || wrongType {
 				continue
 			}
@@ -1063,15 +1256,18 @@ parseNBStreams:
 				if len(entries) > 0 {
 					results = append(results, streamResult{key: sKey, entries: entries[len(entries)-1:]})
 				}
+
 				continue
 			}
 
 			var startID shared.StreamID
+
 			if useLastID[j] {
 				lastID, _, _, found := streamMetadata(snap)
 				if !found {
 					lastID = streamLastID(entries)
 				}
+
 				startID = lastID
 			} else {
 				startID = ids[j]
@@ -1085,10 +1281,13 @@ parseNBStreams:
 
 		if len(results) == 0 {
 			w.WriteNullArray()
+
 			return
 		}
+
 		writeXReadResults(w, results)
 	}
+
 	return
 }
 
@@ -1114,10 +1313,12 @@ type claimEntry struct {
 // writeStreamEntries writes an array of stream entries
 func writeStreamEntries(w *shared.Writer, entries []*shared.StreamEntry) {
 	w.WriteArray(len(entries))
+
 	for _, entry := range entries {
 		w.WriteArray(2)
 		w.WriteBulkStringStr(entry.ID.String())
 		w.WriteArray(len(entry.Fields))
+
 		for _, f := range entry.Fields {
 			w.WriteBulkString(f)
 		}
@@ -1127,13 +1328,16 @@ func writeStreamEntries(w *shared.Writer, entries []*shared.StreamEntry) {
 // writeStreamEntriesWithClaim writes an array of stream entries with claim metadata
 func writeStreamEntriesWithClaim(w *shared.Writer, entries []claimEntry) {
 	w.WriteArray(len(entries))
+
 	for _, ce := range entries {
 		w.WriteArray(4)
 		w.WriteBulkStringStr(ce.entry.ID.String())
 		w.WriteArray(len(ce.entry.Fields))
+
 		for _, f := range ce.entry.Fields {
 			w.WriteBulkString(f)
 		}
+
 		w.WriteInteger(ce.idleTime)
 		w.WriteInteger(ce.deliveryCount)
 	}
@@ -1142,6 +1346,7 @@ func writeStreamEntriesWithClaim(w *shared.Writer, entries []claimEntry) {
 // writeXReadResults writes XREAD results
 func writeXReadResults(w *shared.Writer, results []streamResult) {
 	w.WriteArray(len(results))
+
 	for _, r := range results {
 		w.WriteArray(2)
 		w.WriteBulkStringStr(r.key)
@@ -1160,9 +1365,11 @@ func writeXReadGroupHistoryResults(w *shared.Writer, results []streamResult, str
 	}
 
 	w.WriteArray(len(streamKeys))
+
 	for _, sk := range streamKeys {
 		w.WriteArray(2)
 		w.WriteBulkStringStr(sk)
+
 		if r, ok := resultMap[sk]; ok && len(r.entries) > 0 {
 			writeStreamEntries(w, r.entries)
 		} else {
@@ -1174,6 +1381,7 @@ func writeXReadGroupHistoryResults(w *shared.Writer, results []streamResult, str
 // writeXReadResultsWithClaim writes XREAD results with claim metadata
 func writeXReadResultsWithClaim(w *shared.Writer, results []streamResultWithClaim) {
 	w.WriteArray(len(results))
+
 	for _, r := range results {
 		w.WriteArray(2)
 		w.WriteBulkStringStr(r.key)
@@ -1185,6 +1393,7 @@ func writeXReadResultsWithClaim(w *shared.Writer, results []streamResultWithClai
 func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("xdel")
+
 		return
 	}
 
@@ -1197,8 +1406,10 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		id, _, isSpecial, err := shared.ParseStreamID(string(cmd.Args[i]))
 		if err != nil || isSpecial {
 			w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 			return
 		}
+
 		ids = append(ids, id)
 	}
 
@@ -1207,26 +1418,34 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Check which IDs exist
 		entries := snapshotToEntries(snap)
+
 		entrySet := make(map[string]bool, len(entries))
 		for _, e := range entries {
 			entrySet[string(encodeStreamElementID(e.ID))] = true
 		}
 
 		deleted := int64(0)
+
 		var toDelete []shared.StreamID
+
 		for _, id := range ids {
 			elemID := encodeStreamElementID(id)
 			if entrySet[string(elemID)] {
@@ -1237,21 +1456,25 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		if deleted == 0 {
 			w.WriteInteger(0)
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		for _, id := range toDelete {
 			if err := emitStreamRemove(cmd, key, id); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 			// Emit a second remove so the ID lands in NetRemoves (the first
@@ -1259,12 +1482,14 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			// absent, records it as a tombstone for MaxDeletedID tracking).
 			if err := emitStreamRemove(cmd, key, id); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(deleted)
 	}
+
 	return
 }
 
@@ -1272,6 +1497,7 @@ func handleXDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo' command")
+
 		return
 	}
 
@@ -1280,8 +1506,10 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	if subCmd == "STREAM" || subCmd == "GROUPS" || subCmd == "CONSUMERS" {
 		if len(cmd.Args) < 2 {
 			w.WriteError("ERR wrong number of arguments for 'xinfo|" + string(cmd.Args[0]) + "' command")
+
 			return
 		}
+
 		keys = []string{string(cmd.Args[1])}
 	}
 
@@ -1297,13 +1525,16 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		case subcommandHelp:
 			if len(cmd.Args) > 1 {
 				w.WriteError("ERR wrong number of arguments for 'xinfo|help' command")
+
 				return
 			}
+
 			handleXInfoHelp(w)
 		default:
 			w.WriteError("ERR unknown subcommand '" + string(cmd.Args[0]) + "'. Try XINFO HELP.")
 		}
 	}
+
 	return
 }
 
@@ -1311,6 +1542,7 @@ func handleXInfo(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|stream' command")
+
 		return
 	}
 
@@ -1327,16 +1559,21 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			c, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 			if err != nil || c < 0 {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			count = c
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -1344,14 +1581,19 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if !exists {
 		w.WriteError("ERR no such key")
+
 		return
 	}
+
 	if wrongType {
 		w.WriteWrongType()
+
 		return
 	}
 
@@ -1362,6 +1604,7 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
 		entriesAdded = cfgEA
 	}
+
 	if lastID.IsZero() {
 		lastID = streamLastID(entries)
 	}
@@ -1377,12 +1620,14 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 	currentGen := getIdmpGeneration(cmd, key)
 	producerCount := 0
 	iidsTracked := 0
+
 	for _, pName := range producerNames {
 		snap, _, err := cmd.Context.GetSnapshot(producerKey(key, pName))
 		if err == nil && snap != nil && snap.NetAdds != nil {
 			count := 0
-			for _, elem := range snap.NetAdds {
-				r := elem.Data.Decompress()
+
+			for _, elem := range snap.GetNetAdds() {
+				r := elem.GetData().Decompress()
 				if len(r) >= 32 {
 					entryGen := int64(binary.LittleEndian.Uint64(r[24:32]))
 					if entryGen == currentGen {
@@ -1395,9 +1640,11 @@ func handleXInfoStream(cmd *shared.Command, w *shared.Writer) {
 					}
 				}
 			}
+
 			if count > 0 {
 				producerCount++
 			}
+
 			iidsTracked += count
 		}
 	}
@@ -1460,6 +1707,7 @@ func writeXInfoStreamBasic(w *shared.Writer, entries []*shared.StreamEntry, last
 	w.WriteInteger(idmpMaxsize)
 
 	w.WriteBulkStringStr("first-entry")
+
 	if len(entries) > 0 {
 		writeStreamEntry(w, entries[0])
 	} else {
@@ -1467,6 +1715,7 @@ func writeXInfoStreamBasic(w *shared.Writer, entries []*shared.StreamEntry, last
 	}
 
 	w.WriteBulkStringStr("last-entry")
+
 	if len(entries) > 0 {
 		writeStreamEntry(w, entries[len(entries)-1])
 	} else {
@@ -1499,11 +1748,14 @@ func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastI
 	w.WriteBulkStringStr(firstID.String())
 
 	w.WriteBulkStringStr("entries")
+
 	numEntries := int64(len(entries))
 	if count > 0 && count < numEntries {
 		numEntries = count
 	}
+
 	w.WriteArray(int(numEntries))
+
 	for i := int64(0); i < numEntries && i < int64(len(entries)); i++ {
 		writeStreamEntry(w, entries[i])
 	}
@@ -1528,6 +1780,7 @@ func writeXInfoStreamFull(w *shared.Writer, entries []*shared.StreamEntry, lastI
 
 	w.WriteBulkStringStr("groups")
 	w.WriteArray(len(groupNames))
+
 	for _, name := range groupNames {
 		writeXInfoGroupFull(w, cmd, key, name, entriesAdded, int64(len(entries)), count)
 	}
@@ -1549,6 +1802,7 @@ func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName s
 	w.WriteBulkStringStr(lastDelivered.String())
 
 	w.WriteBulkStringStr("entries-read")
+
 	if entriesRead >= 0 {
 		w.WriteInteger(entriesRead)
 	} else {
@@ -1556,6 +1810,7 @@ func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName s
 	}
 
 	w.WriteBulkStringStr("lag")
+
 	if entriesRead >= 0 {
 		lag := max(entriesAdded-entriesRead, 0)
 		w.WriteInteger(lag)
@@ -1564,15 +1819,19 @@ func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName s
 	}
 
 	pelEntries := pelToEntries(pelSnap)
+
 	w.WriteBulkStringStr("pel-count")
 	w.WriteInteger(int64(len(pelEntries)))
 
 	w.WriteBulkStringStr("pending")
+
 	displayPEL := pelEntries
 	if count > 0 && int64(len(displayPEL)) > count {
 		displayPEL = displayPEL[:count]
 	}
+
 	w.WriteArray(len(displayPEL))
+
 	for _, pe := range displayPEL {
 		w.WriteArray(4)
 		w.WriteBulkStringStr(pe.ID.String())
@@ -1582,6 +1841,7 @@ func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName s
 	}
 
 	w.WriteBulkStringStr("consumers")
+
 	if len(consumers) == 0 {
 		w.WriteArray(0)
 	} else {
@@ -1589,8 +1849,10 @@ func writeXInfoGroupFull(w *shared.Writer, cmd *shared.Command, key, groupName s
 		for name := range consumers {
 			consumerNames = append(consumerNames, name)
 		}
+
 		sort.Strings(consumerNames)
 		w.WriteArray(len(consumerNames))
+
 		for _, name := range consumerNames {
 			writeXInfoConsumerFull(w, name, pelEntries, consumers, count)
 		}
@@ -1605,7 +1867,7 @@ func writeXInfoConsumerFull(w *shared.Writer, name string, pelEntries []*shared.
 
 	seenTime, activeTime := int64(0), int64(0)
 	if elem, ok := consumers[name]; ok {
-		seenTime, activeTime = decodeConsumerMeta(elem.Data.Decompress())
+		seenTime, activeTime = decodeConsumerMeta(elem.GetData().Decompress())
 	}
 
 	w.WriteBulkStringStr("seen-time")
@@ -1615,11 +1877,15 @@ func writeXInfoConsumerFull(w *shared.Writer, name string, pelEntries []*shared.
 	w.WriteInteger(activeTime)
 
 	// Count pending for this consumer
-	var pending int64
-	var consumerPEL []*shared.PendingEntry
+	var (
+		pending     int64
+		consumerPEL []*shared.PendingEntry
+	)
+
 	for _, pe := range pelEntries {
 		if pe.Consumer == name {
 			pending++
+
 			consumerPEL = append(consumerPEL, pe)
 		}
 	}
@@ -1631,8 +1897,10 @@ func writeXInfoConsumerFull(w *shared.Writer, name string, pelEntries []*shared.
 	if count > 0 && int64(len(displayPEL)) > count {
 		displayPEL = displayPEL[:count]
 	}
+
 	w.WriteBulkStringStr("pending")
 	w.WriteArray(len(displayPEL))
+
 	for _, pe := range displayPEL {
 		w.WriteArray(3)
 		w.WriteBulkStringStr(pe.ID.String())
@@ -1646,6 +1914,7 @@ func writeStreamEntry(w *shared.Writer, entry *shared.StreamEntry) {
 	w.WriteArray(2)
 	w.WriteBulkStringStr(entry.ID.String())
 	w.WriteArray(len(entry.Fields))
+
 	for _, f := range entry.Fields {
 		w.WriteBulkString(f)
 	}
@@ -1655,6 +1924,7 @@ func writeStreamEntry(w *shared.Writer, entry *shared.StreamEntry) {
 func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|groups' command")
+
 		return
 	}
 
@@ -1663,18 +1933,24 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if !exists {
 		w.WriteError("ERR no such key")
+
 		return
 	}
+
 	if wrongType {
 		w.WriteWrongType()
+
 		return
 	}
 
 	entries := snapshotToEntries(snap)
+
 	_, entriesAdded, _, _ := streamMetadata(snap)
 	if cfgEA := getStreamEntriesAdded(cmd, key); cfgEA >= 0 {
 		entriesAdded = cfgEA
@@ -1683,10 +1959,12 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 	groupNames := listGroupNames(cmd, key)
 	if len(groupNames) == 0 {
 		w.WriteArray(0)
+
 		return
 	}
 
 	w.WriteArray(len(groupNames))
+
 	for _, name := range groupNames {
 		gSnap, _, _ := getGroupSnapshot(cmd, key, name)
 		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
@@ -1695,8 +1973,9 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 
 		pelCount := 0
 		if pelSnap != nil && pelSnap.NetAdds != nil {
-			pelCount = len(pelSnap.NetAdds)
+			pelCount = len(pelSnap.GetNetAdds())
 		}
+
 		consumerCount := len(consumers)
 
 		w.WriteArray(12)
@@ -1714,6 +1993,7 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 		w.WriteBulkStringStr(lastDelivered.String())
 
 		w.WriteBulkStringStr("entries-read")
+
 		if entriesRead >= 0 {
 			w.WriteInteger(entriesRead)
 		} else {
@@ -1721,6 +2001,7 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 		}
 
 		w.WriteBulkStringStr("lag")
+
 		if entriesRead >= 0 {
 			lag := max(entriesAdded-entriesRead, 0)
 			w.WriteInteger(lag)
@@ -1734,6 +2015,7 @@ func handleXInfoGroups(cmd *shared.Command, w *shared.Writer) {
 func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 3 {
 		w.WriteError("ERR wrong number of arguments for 'xinfo|consumers' command")
+
 		return
 	}
 
@@ -1743,19 +2025,25 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 	_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if !exists {
 		w.WriteError("ERR no such key")
+
 		return
 	}
+
 	if wrongType {
 		w.WriteWrongType()
+
 		return
 	}
 
 	if !groupExists(cmd, key, groupName) {
 		w.WriteError("NOGROUP No such consumer group '" + groupName + "' for key name '" + key + "'")
+
 		return
 	}
 
@@ -1765,6 +2053,7 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 
 	if len(consumers) == 0 {
 		w.WriteArray(0)
+
 		return
 	}
 
@@ -1774,12 +2063,14 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 	for name := range consumers {
 		consumerNames = append(consumerNames, name)
 	}
+
 	sort.Strings(consumerNames)
 
 	w.WriteArray(len(consumerNames))
+
 	for _, name := range consumerNames {
 		elem := consumers[name]
-		seenTime, activeTime := decodeConsumerMeta(elem.Data.Decompress())
+		seenTime, activeTime := decodeConsumerMeta(elem.GetData().Decompress())
 		pendingCount := consumerPendingCount(pelSnap, name)
 
 		w.WriteArray(8)
@@ -1791,10 +2082,12 @@ func handleXInfoConsumers(cmd *shared.Command, w *shared.Writer) {
 		w.WriteInteger(pendingCount)
 
 		w.WriteBulkStringStr("idle")
+
 		idle := max(now-seenTime, 0)
 		w.WriteInteger(idle)
 
 		w.WriteBulkStringStr("inactive")
+
 		if activeTime == 0 {
 			w.WriteInteger(-1)
 		} else {
@@ -1817,6 +2110,7 @@ func handleXInfoHelp(w *shared.Writer) {
 		"    Print this help.",
 	}
 	w.WriteArray(len(help))
+
 	for _, line := range help {
 		w.WriteBulkStringStr(line)
 	}
@@ -1826,6 +2120,7 @@ func handleXInfoHelp(w *shared.Writer) {
 func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("xtrim")
+
 		return
 	}
 
@@ -1834,6 +2129,7 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	i := 1
 
 	var trimOpts shared.TrimOptions
+
 	hasExplicitLimit := false
 
 	strategy := string(shared.ToUpper(cmd.Args[i]))
@@ -1842,8 +2138,10 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		i++
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		next := string(cmd.Args[i])
 		switch next {
 		case "=":
@@ -1852,15 +2150,20 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			trimOpts.Approx = true
 			i++
 		}
+
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		maxLen, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 		if err != nil || maxLen < 0 {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
+
 		trimOpts.MaxLen = maxLen
 		trimOpts.HasMaxLen = true
 		i++
@@ -1868,8 +2171,10 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		i++
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		next := string(cmd.Args[i])
 		switch next {
 		case "=":
@@ -1878,19 +2183,25 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			trimOpts.Approx = true
 			i++
 		}
+
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		minID, _, _, err := shared.ParseStreamID(string(cmd.Args[i]))
 		if err != nil {
 			w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 			return
 		}
+
 		trimOpts.MinID = &minID
 		i++
 	default:
 		w.WriteError("ERR syntax error, MAXLEN or MINID must be specified")
+
 		return
 	}
 
@@ -1898,17 +2209,23 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		i++
 		if i >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		if !trimOpts.Approx {
 			w.WriteError("ERR syntax error, LIMIT cannot be used without the special ~ option")
+
 			return
 		}
+
 		limit, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 		if err != nil || limit < 0 {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
+
 		trimOpts.Limit = limit
 		hasExplicitLimit = true
 		i++
@@ -1928,12 +2245,14 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			i++
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
 
 	if i < len(cmd.Args) {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -1949,17 +2268,23 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				cmd.Context.RestoreSavepoint(savepoint)
 			}
 		}()
+
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -1969,11 +2294,13 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		trimOpts.NodeSize = shared.GetStreamNodeMaxEntries()
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
@@ -1995,8 +2322,10 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		if trimmed > 0 {
 			// Identify which entries were trimmed
 			remainingMap := make(map[string]bool)
+
 			sv.ForEach(func(entry *shared.StreamEntry) bool {
 				remainingMap[entry.ID.Key()] = true
+
 				return true
 			})
 
@@ -2020,15 +2349,18 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 						return
 					}
+
 					if pelSnap == nil || pelSnap.NetAdds == nil {
 						continue
 					}
+
 					for _, entry := range entries {
 						if remainingMap[entry.ID.Key()] {
 							continue
 						}
+
 						pelElemID := encodeStreamElementID(entry.ID)
-						if _, hasPEL := pelSnap.NetAdds[string(pelElemID)]; hasPEL {
+						if _, hasPEL := pelSnap.GetNetAdds()[string(pelElemID)]; hasPEL {
 							if err := emitPELRemove(cmd, key, gName, entry.ID); err != nil {
 								w.WriteError(err.Error())
 
@@ -2041,9 +2373,12 @@ func handleXTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		}
 
 		_ = beforeLen
+
 		succeeded = true
+
 		w.WriteInteger(trimmed)
 	}
+
 	return
 }
 
@@ -2056,6 +2391,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 		if err != nil {
 			return err
 		}
+
 		lastDelivered, entriesRead, _ := getGroupMeta(gSnap)
 
 		group := &shared.ConsumerGroup{
@@ -2071,11 +2407,13 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 		if err != nil {
 			return err
 		}
+
 		if pelSnap != nil && pelSnap.NetAdds != nil {
-			for elemID, elem := range pelSnap.NetAdds {
+			for elemID, elem := range pelSnap.GetNetAdds() {
 				if len(elemID) == 16 {
 					id := decodeStreamElementID([]byte(elemID))
-					raw := elem.Data.Decompress()
+
+					raw := elem.GetData().Decompress()
 					if len(raw) >= 24 {
 						consumer := string(raw[24:])
 						group.Pending[id] = &shared.PendingEntry{
@@ -2089,6 +2427,7 @@ func populateStreamGroups(cmd *shared.Command, key string, sv *shared.StreamValu
 
 		sv.Groups[gName] = group
 	}
+
 	return nil
 }
 
@@ -2103,9 +2442,11 @@ func entriesToStreamValue(entries []*shared.StreamEntry, snap *pb.ReducedEffect)
 		sv.Entries[e.ID.Key()] = e
 		sv.Index.Insert(e.ID.Key(), nil, nil)
 	}
+
 	if len(entries) > 0 {
 		sv.FirstID = entries[0].ID
 	}
+
 	return sv
 }
 
@@ -2113,6 +2454,7 @@ func entriesToStreamValue(entries []*shared.StreamEntry, snap *pb.ReducedEffect)
 func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("xdelex")
+
 		return
 	}
 
@@ -2121,6 +2463,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	i := 1
 
 	refMode := shared.RefModeKeepRef
+
 	if i < len(cmd.Args) {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		switch opt {
@@ -2137,26 +2480,32 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			// Not a mode option, fall through
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
 
 	if i >= len(cmd.Args) || string(shared.ToUpper(cmd.Args[i])) != optionIDs {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
+
 	i++
 
 	if i >= len(cmd.Args) {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	numIds, err := strconv.Atoi(string(cmd.Args[i]))
 	if err != nil || numIds < 1 {
 		w.WriteError("ERR Number of IDs must be a positive integer")
+
 		return
 	}
+
 	i++
 
 	if i+numIds != len(cmd.Args) {
@@ -2165,6 +2514,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		} else {
 			w.WriteError("ERR syntax error")
 		}
+
 		return
 	}
 
@@ -2173,8 +2523,10 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		id, _, isSpecial, err := shared.ParseStreamID(string(cmd.Args[i+j]))
 		if err != nil || isSpecial {
 			w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 			return
 		}
+
 		ids[j] = id
 	}
 
@@ -2188,50 +2540,63 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				cmd.Context.RestoreSavepoint(savepoint)
 			}
 		}()
+
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(numIds)
+
 			for range numIds {
 				w.WriteInteger(-1)
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Build set of existing entries
 		entries := snapshotToEntries(snap)
+
 		entrySet := make(map[string]bool, len(entries))
 		for _, e := range entries {
 			entrySet[string(encodeStreamElementID(e.ID))] = true
 		}
 
 		results := make([]int64, numIds)
+
 		for j, id := range ids {
 			elemID := encodeStreamElementID(id)
 			if !entrySet[string(elemID)] {
 				results[j] = -1
+
 				continue
 			}
 
 			// ACKED mode check
 			if refMode == shared.RefModeAcked {
 				canDelete := true
+
 				groupNames := listGroupNames(cmd, key)
 				for _, gName := range groupNames {
 					gSnap, _, err := getGroupSnapshot(cmd, key, gName)
@@ -2240,27 +2605,34 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 						return
 					}
+
 					lastDelivered, _, _ := getGroupMeta(gSnap)
 					if id.Compare(lastDelivered) > 0 {
 						canDelete = false
+
 						break
 					}
+
 					pelSnap, _, err := getPELSnapshot(cmd, key, gName)
 					if err != nil {
 						w.WriteError(err.Error())
 
 						return
 					}
+
 					if pelSnap != nil && pelSnap.NetAdds != nil {
 						pelElemID := encodeStreamElementID(id)
-						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
+						if _, pending := pelSnap.GetNetAdds()[string(pelElemID)]; pending {
 							canDelete = false
+
 							break
 						}
 					}
 				}
+
 				if !canDelete {
 					results[j] = 2
+
 					continue
 				}
 			}
@@ -2268,6 +2640,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			// Delete
 			if err := emitStreamRemove(cmd, key, id); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
@@ -2281,9 +2654,10 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 						return
 					}
+
 					if pelSnap != nil && pelSnap.NetAdds != nil {
 						pelElemID := encodeStreamElementID(id)
-						if _, pending := pelSnap.NetAdds[string(pelElemID)]; pending {
+						if _, pending := pelSnap.GetNetAdds()[string(pelElemID)]; pending {
 							if err := emitPELRemove(cmd, key, gName, id); err != nil {
 								w.WriteError(err.Error())
 
@@ -2298,11 +2672,14 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		}
 
 		succeeded = true
+
 		w.WriteArray(numIds)
+
 		for _, r := range results {
 			w.WriteInteger(r)
 		}
 	}
+
 	return
 }
 
@@ -2310,6 +2687,7 @@ func handleXDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("xsetid")
+
 		return
 	}
 
@@ -2320,11 +2698,15 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	lastID, _, isSpecial, err := shared.ParseStreamID(lastIDStr)
 	if err != nil || isSpecial {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
-	var entriesAddedOpt int64 = -1
-	var maxDeletedIDOpt *shared.StreamID
+	var (
+		entriesAddedOpt int64 = -1
+		maxDeletedIDOpt *shared.StreamID
+	)
+
 	i := 2
 
 	for i < len(cmd.Args) {
@@ -2334,34 +2716,45 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			ea, err := strconv.ParseInt(string(cmd.Args[i]), 10, 64)
 			if err != nil {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			if ea < 0 {
 				w.WriteError("ERR entries_added must be positive")
+
 				return
 			}
+
 			entriesAddedOpt = ea
 			i++
 		case "MAXDELETEDID":
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			mdID, _, isSpecial, err := shared.ParseStreamID(string(cmd.Args[i]))
 			if err != nil || isSpecial {
 				w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 				return
 			}
+
 			maxDeletedIDOpt = &mdID
 			i++
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -2371,18 +2764,24 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, tips, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteError("ERR no such key")
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		curLastID, _, curMaxDeletedID, _ := streamMetadata(snap)
+
 		entries := snapshotToEntries(snap)
 		if curLastID.IsZero() {
 			curLastID = streamLastID(entries)
@@ -2391,12 +2790,14 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// Validate: last-id must be >= current max_deleted_entry_id
 		if lastID.Compare(curMaxDeletedID) < 0 {
 			w.WriteError("ERR The ID specified in XSETID is smaller than current max_deleted_entry_id")
+
 			return
 		}
 
 		// Validate: if maxDeletedID specified, must be <= lastID
 		if maxDeletedIDOpt != nil && maxDeletedIDOpt.Compare(lastID) > 0 {
 			w.WriteError("ERR The ID specified in XSETID is smaller than the provided max_deleted_entry_id")
+
 			return
 		}
 
@@ -2405,11 +2806,13 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			topEntry := entries[len(entries)-1]
 			if lastID.Compare(topEntry.ID) < 0 {
 				w.WriteError("ERR The ID specified in XSETID is smaller than the target stream top item")
+
 				return
 			}
 
 			if entriesAddedOpt >= 0 && int64(len(entries)) > entriesAddedOpt {
 				w.WriteError("ERR The entries_added specified in XSETID is smaller than the target stream length")
+
 				return
 			}
 		}
@@ -2418,12 +2821,14 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// to establish the lastID cursor, then immediately remove it.
 		// This preserves the "lastID" semantics without a separate metadata key.
 		cmd.Context.BeginTx()
+
 		if len(tips) > 0 {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -2433,15 +2838,19 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		if lastID.Compare(curLastID) > 0 {
 			if err := emitStreamInsert(cmd, key, lastID, nil); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 			// First remove pulls from OrderedElements; second ensures NetRemoves tombstone.
 			if err := emitStreamRemove(cmd, key, lastID); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStreamRemove(cmd, key, lastID); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -2450,14 +2859,19 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		if maxDeletedIDOpt != nil && maxDeletedIDOpt.Compare(curMaxDeletedID) > 0 {
 			if err := emitStreamInsert(cmd, key, *maxDeletedIDOpt, nil); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStreamRemove(cmd, key, *maxDeletedIDOpt); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStreamRemove(cmd, key, *maxDeletedIDOpt); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -2465,12 +2879,14 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		if entriesAddedOpt >= 0 {
 			if err := setStreamEntriesAdded(cmd, key, entriesAddedOpt); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
@@ -2479,6 +2895,7 @@ func handleXSetId(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 4 {
 		w.WriteWrongNumArguments("xidmprecord")
+
 		return
 	}
 
@@ -2489,16 +2906,20 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 	if producer == "" {
 		w.WriteError("ERR producer ID must be non-empty")
+
 		return
 	}
+
 	if iid == "" {
 		w.WriteError("ERR idempotent ID must be non-empty")
+
 		return
 	}
 
 	id, _, _, err := shared.ParseStreamID(idStr)
 	if err != nil {
 		w.WriteError("ERR Invalid stream ID specified as stream command argument")
+
 		return
 	}
 
@@ -2508,28 +2929,37 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		snap, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteError("ERR no such key")
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Verify the stream ID exists in the stream
 		entries := snapshotToEntries(snap)
 		found := false
+
 		for _, e := range entries {
 			if e.ID.Compare(id) == 0 {
 				found = true
+
 				break
 			}
 		}
+
 		if !found {
 			w.WriteError("ERR No such message in stream")
+
 			return
 		}
 
@@ -2537,10 +2967,12 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		if existingID, exists := lookupProducerSeq(cmd, key, producer, iid); exists {
 			if existingID.Compare(id) != 0 {
 				w.WriteError("ERR IID already exists for this producer with a different stream ID")
+
 				return
 			}
 			// Idempotent: same mapping already exists
 			w.WriteOK()
+
 			return
 		}
 
@@ -2548,16 +2980,19 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 
 		if err := emitProducerSeq(cmd, key, producer, iid, id); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if err := incrementIidsAdded(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
@@ -2565,6 +3000,7 @@ func handleXIdmpRecord(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("xcfgset")
+
 		return
 	}
 
@@ -2573,38 +3009,50 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR At least one parameter (IDMP-DURATION or IDMP-MAXSIZE) is required")
+
 		return
 	}
 
 	// Parse and validate config options
 	cfgValues := make(map[string]int64)
+
 	for i := 1; i < len(cmd.Args); i += 2 {
 		opt := string(shared.ToUpper(cmd.Args[i]))
 		if i+1 >= len(cmd.Args) {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		valStr := string(cmd.Args[i+1])
+
 		val, err := strconv.ParseInt(valStr, 10, 64)
 		if err != nil || (len(valStr) > 1 && valStr[0] == '0') {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
+
 		switch opt {
 		case "IDMP-DURATION":
 			if val < 1 || val > 86400 {
 				w.WriteError("ERR IDMP-DURATION must be between 1 and 86400")
+
 				return
 			}
+
 			cfgValues["idmp-duration"] = val
 		case "IDMP-MAXSIZE":
 			if val < 1 || val > 10000 {
 				w.WriteError("ERR IDMP-MAXSIZE must be between 1 and 10000")
+
 				return
 			}
+
 			cfgValues["idmp-maxsize"] = val
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -2619,26 +3067,34 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 				cmd.Context.RestoreSavepoint(savepoint)
 			}
 		}()
+
 		_, _, exists, wrongType, err := getStreamSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteError("ERR no such key")
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Check if any value actually changed — if so, clear IDMP history
 		oldDuration, oldMaxsize, _ := getStreamConfig(cmd, key)
+
 		changed := false
 		if v, ok := cfgValues["idmp-duration"]; ok && v != oldDuration {
 			changed = true
 		}
+
 		if v, ok := cfgValues["idmp-maxsize"]; ok && v != oldMaxsize {
 			changed = true
 		}
@@ -2646,6 +3102,7 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		for field, val := range cfgValues {
 			if err := emitCfgSet(cmd, key, field, val); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -2659,7 +3116,9 @@ func handleXCfgSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 
 		succeeded = true
+
 		w.WriteOK()
 	}
+
 	return
 }

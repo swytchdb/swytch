@@ -61,9 +61,11 @@ func TestJSON_Resp(t *testing.T) {
 	if got := h.run(handleJSONResp, "nokey", "$"); got != "$-1\r\n" {
 		t.Errorf("RESP missing key: %q", got)
 	}
+
 	if got := h.run(handleJSONResp, "d", "$.nope"); got != "*0\r\n" {
 		t.Errorf("RESP $.nope: %q", got)
 	}
+
 	if got := h.run(handleJSONResp, "d", ".nope"); !strings.HasPrefix(got, "-ERR") {
 		t.Errorf("RESP .nope: %q", got)
 	}

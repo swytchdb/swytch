@@ -38,6 +38,7 @@ func TestInMemoryHandler_DeleteAfterIncr(t *testing.T) {
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
 	h.ExecuteInto(&shared.Command{Type: shared.CmdIncr, Args: [][]byte{[]byte("counter")}}, w, conn)
+
 	if resp := buf.String(); resp != ":1\r\n" {
 		t.Errorf("INCR: expected :1, got %q", resp)
 	}
@@ -45,6 +46,7 @@ func TestInMemoryHandler_DeleteAfterIncr(t *testing.T) {
 	// INCR again
 	buf.Reset()
 	h.ExecuteInto(&shared.Command{Type: shared.CmdIncr, Args: [][]byte{[]byte("counter")}}, w, conn)
+
 	if resp := buf.String(); resp != ":2\r\n" {
 		t.Errorf("INCR: expected :2, got %q", resp)
 	}
@@ -52,6 +54,7 @@ func TestInMemoryHandler_DeleteAfterIncr(t *testing.T) {
 	// DEL the counter
 	buf.Reset()
 	h.ExecuteInto(&shared.Command{Type: shared.CmdDel, Args: [][]byte{[]byte("counter")}}, w, conn)
+
 	if resp := buf.String(); resp != ":1\r\n" {
 		t.Errorf("DEL after INCR: expected :1, got %q", resp)
 	}
@@ -59,6 +62,7 @@ func TestInMemoryHandler_DeleteAfterIncr(t *testing.T) {
 	// EXISTS should return 0
 	buf.Reset()
 	h.ExecuteInto(&shared.Command{Type: shared.CmdExists, Args: [][]byte{[]byte("counter")}}, w, conn)
+
 	if resp := buf.String(); resp != ":0\r\n" {
 		t.Errorf("EXISTS after DEL: expected :0, got %q", resp)
 	}
@@ -66,6 +70,7 @@ func TestInMemoryHandler_DeleteAfterIncr(t *testing.T) {
 	// INCR should start from 0 again
 	buf.Reset()
 	h.ExecuteInto(&shared.Command{Type: shared.CmdIncr, Args: [][]byte{[]byte("counter")}}, w, conn)
+
 	if resp := buf.String(); resp != ":1\r\n" {
 		t.Errorf("INCR after DEL: expected :1 (fresh start), got %q", resp)
 	}

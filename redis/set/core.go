@@ -32,15 +32,19 @@ func getSetSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, ti
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_KEYED {
+
+	if snap.GetCollection() == pb.CollectionKind_KEYED {
 		return snap, tips, true, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && snap.TypeTag == pb.ValueType_TYPE_SET {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && snap.GetTypeTag() == pb.ValueType_TYPE_SET {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -88,6 +92,7 @@ func emitDeleteKey(cmd *shared.Command, key string, tips ...[]effects.Tip) error
 func handleSAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("sadd")
+
 		return
 	}
 
@@ -100,23 +105,30 @@ func handleSAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		added := 0
+
 		for _, m := range members {
 			if snap != nil && snap.NetAdds != nil {
-				if _, has := snap.NetAdds[string(m)]; has {
+				if _, has := snap.GetNetAdds()[string(m)]; has {
 					continue
 				}
 			}
+
 			added++
+
 			if err := emitSetInsert(cmd, key, m); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -124,18 +136,21 @@ func handleSAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		if !exists {
 			if err := emitSetTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(int64(added))
 	}
+
 	return
 }
 
 func handleSRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("srem")
+
 		return
 	}
 
@@ -148,24 +163,32 @@ func handleSRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		removed := 0
+
 		for _, m := range members {
 			if snap.NetAdds != nil {
-				if _, has := snap.NetAdds[string(m)]; has {
+				if _, has := snap.GetNetAdds()[string(m)]; has {
 					removed++
+
 					if err := emitSetRemove(cmd, key, m); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -174,12 +197,14 @@ func handleSRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		w.WriteInteger(int64(removed))
 	}
+
 	return
 }
 
 func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("spop")
+
 		return
 	}
 
@@ -187,14 +212,18 @@ func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	keys = []string{key}
 
 	count := 1
+
 	returnArray := false
 	if len(cmd.Args) == 2 {
 		returnArray = true
+
 		c, ok := shared.ParseInt64(cmd.Args[1])
 		if !ok || c < 0 {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
+
 		count = int(c)
 	}
 
@@ -203,18 +232,23 @@ func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if returnArray {
 				w.WriteArray(0)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -226,12 +260,13 @@ func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Collect members from snapshot
-		members := make([]string, 0, len(snap.NetAdds))
-		for m := range snap.NetAdds {
+		members := make([]string, 0, len(snap.GetNetAdds()))
+		for m := range snap.GetNetAdds() {
 			members = append(members, m)
 		}
 
@@ -245,12 +280,14 @@ func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		for _, m := range popped {
 			if err := emitSetRemove(cmd, key, m); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		if returnArray {
 			w.WriteArray(len(popped))
+
 			for _, member := range popped {
 				w.WriteBulkString(member)
 			}
@@ -262,12 +299,14 @@ func handleSPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		}
 	}
+
 	return
 }
 
 func handleSMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("smove")
+
 		return
 	}
 
@@ -281,35 +320,45 @@ func handleSMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		srcSnap, srcTips, srcExists, srcWrongType, err := getSetSnapshot(cmd, srcKey)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if srcExists && srcWrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		_, _, dstExists, dstWrongType, err := getSetSnapshot(cmd, dstKey)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if dstExists && dstWrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		if !srcExists {
 			w.WriteInteger(0)
+
 			return
 		}
 
 		// Check if member exists in source
 		if srcSnap.NetAdds == nil {
 			w.WriteInteger(0)
+
 			return
 		}
-		if _, has := srcSnap.NetAdds[string(member)]; !has {
+
+		if _, has := srcSnap.GetNetAdds()[string(member)]; !has {
 			w.WriteInteger(0)
+
 			return
 		}
 
@@ -321,27 +370,32 @@ func handleSMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, srcTips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if err := emitSetRemove(cmd, srcKey, member); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if err := emitSetInsert(cmd, dstKey, member); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if !dstExists {
 			if err := emitSetTypeTag(cmd, dstKey); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(1)
 	}
+
 	return
 }

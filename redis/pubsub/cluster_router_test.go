@@ -54,48 +54,58 @@ type routedCall struct {
 func (r *fakeClusterRouter) AnnounceSub(channel string, isPattern bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	r.subAnnounces = append(r.subAnnounces, announceCall{channel, isPattern})
 }
 
 func (r *fakeClusterRouter) AnnounceUnsub(channel string, isPattern bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	r.unsubAnnounces = append(r.unsubAnnounces, announceCall{channel, isPattern})
 }
 
 func (r *fakeClusterRouter) RouteMessage(channel string, payload []byte) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	r.routed = append(r.routed, routedCall{channel, string(payload)})
+
 	return r.routeCount
 }
 
 func (r *fakeClusterRouter) ClusterChannels(_ string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	return append([]string(nil), r.clusterChans...)
 }
 
 func (r *fakeClusterRouter) ClusterNumSub(channels []string) map[string]int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	out := make(map[string]int, len(channels))
 	for _, ch := range channels {
 		out[ch] = r.clusterNumSub[ch]
 	}
+
 	return out
 }
 
 func (r *fakeClusterRouter) ClusterPatterns() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	return append([]string(nil), r.clusterPatterns...)
 }
 
 func withRouter(t *testing.T, r shared.PubSubClusterRouter, fn func()) {
 	t.Helper()
+
 	shared.SetPubSubClusterRouter(r)
 	defer shared.SetPubSubClusterRouter(nil)
+
 	fn()
 }
 
@@ -114,6 +124,7 @@ func TestManager_Subscribe_AnnouncesOnFirstSubscriberOnly(t *testing.T) {
 		if len(r.subAnnounces) != 1 {
 			t.Fatalf("expected 1 sub announce, got %d (%v)", len(r.subAnnounces), r.subAnnounces)
 		}
+
 		if r.subAnnounces[0] != (announceCall{channel: "news", isPattern: false}) {
 			t.Errorf("unexpected announce: %v", r.subAnnounces[0])
 		}
@@ -126,18 +137,22 @@ func TestManager_Unsubscribe_AnnouncesWhenLastLeaves(t *testing.T) {
 		m := NewManager()
 		c1 := shared.NewPubSubClient(nil, shared.RESP2)
 		c2 := shared.NewPubSubClient(nil, shared.RESP2)
+
 		m.Subscribe(c1, "news")
 		m.Subscribe(c2, "news")
 
 		m.Unsubscribe(c1, "news") // one local subscriber remains: no unsub
+
 		if len(r.unsubAnnounces) != 0 {
 			t.Errorf("expected 0 unsub announces, got %d", len(r.unsubAnnounces))
 		}
 
 		m.Unsubscribe(c2, "news") // last local subscriber: announce unsub
+
 		if len(r.unsubAnnounces) != 1 {
 			t.Fatalf("expected 1 unsub announce, got %d", len(r.unsubAnnounces))
 		}
+
 		if r.unsubAnnounces[0] != (announceCall{channel: "news", isPattern: false}) {
 			t.Errorf("unexpected unsub: %v", r.unsubAnnounces[0])
 		}
@@ -169,9 +184,11 @@ func TestManager_Publish_AddsRouterCountToLocal(t *testing.T) {
 		if got != 3 {
 			t.Errorf("publish count: got %d want 3", got)
 		}
+
 		if len(r.routed) != 1 {
 			t.Fatalf("expected 1 routed call, got %d", len(r.routed))
 		}
+
 		if r.routed[0] != (routedCall{"news", "hi"}) {
 			t.Errorf("routed call: %v", r.routed[0])
 		}
@@ -195,6 +212,7 @@ func TestManager_DeliverLocal_NoReBroadcast(t *testing.T) {
 		default:
 			t.Fatalf("local subscriber did not receive inbound message")
 		}
+
 		if len(r.routed) != 0 {
 			t.Errorf("DeliverLocal must not re-broadcast, routed=%v", r.routed)
 		}
@@ -210,6 +228,7 @@ func TestManager_Channels_MergesClusterView(t *testing.T) {
 		m.Subscribe(c, "shared")
 
 		got := m.Channels("")
+
 		want := []string{"local-only", "remote-only", "shared"}
 		if !slices.Equal(got, want) {
 			t.Errorf("Channels: got %v want %v", got, want)
@@ -225,6 +244,7 @@ func TestManager_NumSub_SumsLocalAndRemote(t *testing.T) {
 		m := NewManager()
 		c1 := shared.NewPubSubClient(nil, shared.RESP2)
 		c2 := shared.NewPubSubClient(nil, shared.RESP2)
+
 		m.Subscribe(c1, "news")
 		m.Subscribe(c2, "news")
 
@@ -232,9 +252,11 @@ func TestManager_NumSub_SumsLocalAndRemote(t *testing.T) {
 		if got["news"] != 6 {
 			t.Errorf("news: got %d want 6", got["news"])
 		}
+
 		if got["sports"] != 1 {
 			t.Errorf("sports: got %d want 1", got["sports"])
 		}
+
 		if got["absent"] != 0 {
 			t.Errorf("absent: got %d want 0", got["absent"])
 		}
@@ -264,6 +286,7 @@ func TestManager_Cleanup_AnnouncesUnsubForLastSubscriber(t *testing.T) {
 		m := NewManager()
 		c1 := shared.NewPubSubClient(nil, shared.RESP2)
 		c2 := shared.NewPubSubClient(nil, shared.RESP2)
+
 		m.Subscribe(c1, "news", "stale")
 		m.Subscribe(c2, "stale")
 		m.PSubscribe(c1, "alerts.*")
@@ -277,12 +300,14 @@ func TestManager_Cleanup_AnnouncesUnsubForLastSubscriber(t *testing.T) {
 		m.Cleanup(c1)
 
 		seen := map[string]bool{}
+
 		r.mu.Lock()
 		for _, a := range r.unsubAnnounces {
 			key := a.channel
 			if a.isPattern {
 				key = "p:" + key
 			}
+
 			seen[key] = true
 		}
 		r.mu.Unlock()
@@ -290,9 +315,11 @@ func TestManager_Cleanup_AnnouncesUnsubForLastSubscriber(t *testing.T) {
 		if !seen["news"] {
 			t.Errorf("expected unsub for 'news'")
 		}
+
 		if !seen["p:alerts.*"] {
 			t.Errorf("expected unsub for pattern 'alerts.*'")
 		}
+
 		if seen["stale"] {
 			t.Errorf("'stale' has other subscriber, must not announce unsub")
 		}

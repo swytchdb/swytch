@@ -29,6 +29,7 @@ import (
 func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zrange")
+
 		return
 	}
 
@@ -37,7 +38,9 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 	// Parse options
 	var byScore, byLex, rev, withScores bool
+
 	offset, count := 0, -1
+
 	var hasLimit bool
 
 	// First two args after key are start/stop
@@ -58,24 +61,33 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			withScores = true
 		case optionLimit:
 			hasLimit = true
+
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			var err error
+
 			offset, err = strconv.Atoi(string(cmd.Args[i+1]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			count, err = strconv.Atoi(string(cmd.Args[i+2]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			i += 2
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -83,53 +95,68 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	// BYSCORE and BYLEX are mutually exclusive
 	if byScore && byLex {
 		w.WriteSyntaxError()
+
 		return
 	}
 
 	// LIMIT requires BYSCORE or BYLEX
 	if hasLimit && !byScore && !byLex {
 		w.WriteSyntaxError()
+
 		return
 	}
 
 	// BYLEX and WITHSCORES cannot be used together
 	if byLex && withScores {
 		w.WriteSyntaxError()
+
 		return
 	}
 
 	// Pre-parse score/lex/index ranges during validation
-	var minScore, maxScore float64
-	var minScoreEx, maxScoreEx bool
-	var minLex, maxLex LexBound
-	var startIdx, stopIdx int
+	var (
+		minScore, maxScore     float64
+		minScoreEx, maxScoreEx bool
+		minLex, maxLex         LexBound
+		startIdx, stopIdx      int
+	)
 
 	if byScore {
 		var ok1, ok2 bool
+
 		minScore, minScoreEx, ok1 = ParseScore(startArg)
+
 		maxScore, maxScoreEx, ok2 = ParseScore(stopArg)
 		if !ok1 || !ok2 {
 			w.WriteError("ERR min or max is not a float")
+
 			return
 		}
 	} else if byLex {
 		var ok1, ok2 bool
+
 		minLex, ok1 = ParseLexBound(startArg)
+
 		maxLex, ok2 = ParseLexBound(stopArg)
 		if !ok1 || !ok2 {
 			w.WriteError("ERR min or max not valid string range item")
+
 			return
 		}
 	} else {
 		var err error
+
 		startIdx, err = strconv.Atoi(string(startArg))
 		if err != nil {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		stopIdx, err = strconv.Atoi(string(stopArg))
 		if err != nil {
 			w.WriteNotInteger()
+
 			return
 		}
 	}
@@ -139,29 +166,37 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
+
 		var entries []shared.ZSetEntry
 
 		if byScore {
 			mn, mx := minScore, maxScore
 			mnEx, mxEx := minScoreEx, maxScoreEx
+
 			if rev {
 				mn, mx = mx, mn
 				mnEx, mxEx = mxEx, mnEx
 			}
 			// Filter by score range
 			filtered := make([]shared.ZSetEntry, 0)
+
 			if rev {
 				for _, s := range slices.Backward(sorted) {
 					if scoreInRange(s.Score, mn, mx, mnEx, mxEx) {
@@ -185,15 +220,18 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 					filtered = filtered[offset:]
 				}
 			}
+
 			if count >= 0 && count < len(filtered) {
 				filtered = filtered[:count]
 			}
+
 			entries = filtered
 		} else if byLex {
 			mn, mx := minLex, maxLex
 			if rev {
 				mn, mx = mx, mn
 			}
+
 			var source []shared.ZSetEntry
 			if rev {
 				source = make([]shared.ZSetEntry, len(sorted))
@@ -203,7 +241,9 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			} else {
 				source = sorted
 			}
+
 			filtered := make([]shared.ZSetEntry, 0)
+
 			for _, entry := range source {
 				if InLexRange(entry.Member, mn, mx) {
 					filtered = append(filtered, entry)
@@ -219,9 +259,11 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 					filtered = filtered[offset:]
 				}
 			}
+
 			if count >= 0 && count < len(filtered) {
 				filtered = filtered[:count]
 			}
+
 			entries = filtered
 		} else {
 			// By index (rank)
@@ -230,17 +272,20 @@ func handleZRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		if entries == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
 		writeZSetEntries(w, entries, withScores)
 	}
+
 	return
 }
 
 func handleZRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zrevrange")
+
 		return
 	}
 
@@ -250,21 +295,26 @@ func handleZRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	start, err := strconv.Atoi(string(cmd.Args[1]))
 	if err != nil {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	stop, err := strconv.Atoi(string(cmd.Args[2]))
 	if err != nil {
 		w.WriteNotInteger()
+
 		return
 	}
 
 	var withScores bool
+
 	for i := 3; i < len(cmd.Args); i++ {
 		opt := shared.ToUpper(cmd.Args[i])
 		if string(opt) == optionWithScores {
 			withScores = true
 		} else {
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -274,32 +324,41 @@ func handleZRevRange(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
+
 		entries := zsetRangeByIndex(sorted, start, stop, true)
 		if entries == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
 		writeZSetEntries(w, entries, withScores)
 	}
+
 	return
 }
 
 func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zrangebyscore")
+
 		return
 	}
 
@@ -307,13 +366,16 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 	keys = []string{key}
 
 	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+
 	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
+
 		return
 	}
 
 	var withScores bool
+
 	offset, count := 0, -1
 
 	for i := 3; i < len(cmd.Args); i++ {
@@ -324,22 +386,30 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			var err error
+
 			offset, err = strconv.Atoi(string(cmd.Args[i+1]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			count, err = strconv.Atoi(string(cmd.Args[i+2]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			i += 2
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -349,32 +419,41 @@ func handleZRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
+
 		entries := zsetFilterByScore(sorted, minScore, maxScore, minEx, maxEx, false, offset, count)
 		if entries == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
 		writeZSetEntries(w, entries, withScores)
 	}
+
 	return
 }
 
 func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zrevrangebyscore")
+
 		return
 	}
 
@@ -383,13 +462,16 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 
 	// Note: for ZREVRANGEBYSCORE, max comes before min
 	maxScore, maxEx, ok1 := ParseScore(cmd.Args[1])
+
 	minScore, minEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
+
 		return
 	}
 
 	var withScores bool
+
 	offset, count := 0, -1
 
 	for i := 3; i < len(cmd.Args); i++ {
@@ -400,22 +482,30 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 		case optionLimit:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			var err error
+
 			offset, err = strconv.Atoi(string(cmd.Args[i+1]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			count, err = strconv.Atoi(string(cmd.Args[i+2]))
 			if err != nil {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			i += 2
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -425,26 +515,34 @@ func handleZRevRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
+
 		entries := zsetFilterByScore(sorted, minScore, maxScore, minEx, maxEx, true, offset, count)
 		if entries == nil {
 			w.WriteArray(0)
+
 			return
 		}
 
 		writeZSetEntries(w, entries, withScores)
 	}
+
 	return
 }
 
@@ -459,6 +557,7 @@ func zsetRangeByIndex(sorted []shared.ZSetEntry, start, stop int, rev bool) []sh
 	if start < 0 {
 		start = length + start
 	}
+
 	if stop < 0 {
 		stop = length + stop
 	}
@@ -467,6 +566,7 @@ func zsetRangeByIndex(sorted []shared.ZSetEntry, start, stop int, rev bool) []sh
 	if start < 0 {
 		start = 0
 	}
+
 	if stop >= length {
 		stop = length - 1
 	}
@@ -487,12 +587,14 @@ func zsetRangeByIndex(sorted []shared.ZSetEntry, start, stop int, rev bool) []sh
 			result = append(result, sorted[i])
 		}
 	}
+
 	return result
 }
 
 // zsetFilterByScore filters sorted members by score range, with optional reverse and LIMIT.
 func zsetFilterByScore(sorted []shared.ZSetEntry, minScore, maxScore float64, minEx, maxEx bool, rev bool, offset, count int) []shared.ZSetEntry {
 	filtered := make([]shared.ZSetEntry, 0)
+
 	if rev {
 		for _, s := range slices.Backward(sorted) {
 			if scoreInRange(s.Score, minScore, maxScore, minEx, maxEx) {
@@ -511,15 +613,19 @@ func zsetFilterByScore(sorted []shared.ZSetEntry, minScore, maxScore float64, mi
 	if offset < 0 {
 		return nil
 	}
+
 	if offset > 0 {
 		if offset >= len(filtered) {
 			return nil
 		}
+
 		filtered = filtered[offset:]
 	}
+
 	if count >= 0 && count < len(filtered) {
 		filtered = filtered[:count]
 	}
+
 	return filtered
 }
 
@@ -528,6 +634,7 @@ func writeZSetEntries(w *shared.Writer, entries []shared.ZSetEntry, withScores b
 	if withScores {
 		if w.Protocol() == shared.RESP3 {
 			w.WriteArray(len(entries))
+
 			for _, entry := range entries {
 				w.WriteArray(2)
 				w.WriteBulkStringStr(entry.Member)
@@ -535,6 +642,7 @@ func writeZSetEntries(w *shared.Writer, entries []shared.ZSetEntry, withScores b
 			}
 		} else {
 			w.WriteArray(len(entries) * 2)
+
 			for _, entry := range entries {
 				w.WriteBulkStringStr(entry.Member)
 				w.WriteScore(entry.Score)
@@ -542,6 +650,7 @@ func writeZSetEntries(w *shared.Writer, entries []shared.ZSetEntry, withScores b
 		}
 	} else {
 		w.WriteArray(len(entries))
+
 		for _, entry := range entries {
 			w.WriteBulkStringStr(entry.Member)
 		}

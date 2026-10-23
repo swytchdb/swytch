@@ -36,33 +36,40 @@ func getHLLSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, ti
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && snap.TypeTag == pb.ValueType_TYPE_HLL {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && snap.GetTypeTag() == pb.ValueType_TYPE_HLL {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
 // reconstructHLL rebuilds an HLLValue from a SCALAR snapshot.
 func reconstructHLL(snap *pb.ReducedEffect) *shared.HLLValue {
 	hll := &shared.HLLValue{}
-	if snap == nil || snap.Scalar == nil {
+	if snap == nil || snap.GetScalar() == nil {
 		return hll
 	}
-	raw := snap.Scalar.Decompress()
+
+	raw := snap.GetScalar().Decompress()
 	n := min(len(raw), 16384)
 	copy(hll.Registers[:n], raw)
+
 	return hll
 }
 
 // mergeHLLFromSnap merges registers from a SCALAR snapshot directly into dst.
 func mergeHLLFromSnap(dst *shared.HLLValue, snap *pb.ReducedEffect) {
-	if snap == nil || snap.Scalar == nil {
+	if snap == nil || snap.GetScalar() == nil {
 		return
 	}
-	raw := snap.Scalar.Decompress()
+
+	raw := snap.GetScalar().Decompress()
+
 	n := min(len(raw), 16384)
 	for i := range n {
 		if raw[i] > dst.Registers[i] {
@@ -75,6 +82,7 @@ func mergeHLLFromSnap(dst *shared.HLLValue, snap *pb.ReducedEffect) {
 func emitHLLScalar(cmd *shared.Command, key string, registers *[16384]uint8, tips []effects.Tip) error {
 	raw := make([]byte, 16384)
 	copy(raw, registers[:])
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -93,6 +101,7 @@ func emitHLLScalar(cmd *shared.Command, key string, registers *[16384]uint8, tip
 func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("pfadd")
+
 		return
 	}
 
@@ -105,10 +114,13 @@ func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, tips, exists, wrongType, err := getHLLSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -116,6 +128,7 @@ func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		current := reconstructHLL(snap)
 
 		modified := false
+
 		for _, elem := range elements {
 			regIdx, rho := hllHashElement(elem)
 			if rho > current.Registers[regIdx] {
@@ -136,6 +149,7 @@ func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_HLL}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -144,13 +158,16 @@ func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		if modified {
 			if err := emitHLLScalar(cmd, key, &current.Registers, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			w.WriteInteger(1)
 		} else {
 			w.WriteInteger(0)
 		}
 	}
+
 	return
 }
 
@@ -160,6 +177,7 @@ func handlePFAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 func handlePFCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("pfcount")
+
 		return
 	}
 
@@ -174,33 +192,45 @@ func handlePFCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			snap, _, exists, wrongType, err := getHLLSnapshot(cmd, keys[0])
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if !exists {
 				w.WriteInteger(0)
+
 				return
 			}
+
 			if wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			hll := reconstructHLL(snap)
 			w.WriteInteger(hll.Count())
+
 			return
 		}
 
 		// Single pass: check types and merge simultaneously
 		merged := &shared.HLLValue{}
+
 		for _, key := range keys {
 			snap, _, exists, wrongType, err := getHLLSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if exists {
 				mergeHLLFromSnap(merged, snap)
 			}
@@ -208,6 +238,7 @@ func handlePFCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 
 		w.WriteInteger(merged.Count())
 	}
+
 	return
 }
 
@@ -217,10 +248,12 @@ func handlePFCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 func handlePFMerge(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("pfmerge")
+
 		return
 	}
 
 	destKey := string(cmd.Args[0])
+
 	srcKeys := make([]string, len(cmd.Args)-1)
 	for i := 1; i < len(cmd.Args); i++ {
 		srcKeys[i-1] = string(cmd.Args[i])
@@ -234,25 +267,33 @@ func handlePFMerge(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		destSnap, destTips, destExists, wrongType, err := getHLLSnapshot(cmd, destKey)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if destExists && wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Build merged HLL from dest + all sources (single pass)
 		merged := reconstructHLL(destSnap)
+
 		for _, key := range srcKeys {
 			snap, _, exists, wt, err := getHLLSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wt {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if exists {
 				mergeHLLFromSnap(merged, snap)
 			}
@@ -265,6 +306,7 @@ func handlePFMerge(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 				Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_HLL}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -272,11 +314,13 @@ func handlePFMerge(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		// Emit the full merged register array as a single scalar
 		if err := emitHLLScalar(cmd, destKey, &merged.Registers, destTips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
@@ -294,6 +338,7 @@ func handlePFSelfTest(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		count := hll.Count()
 		if count < 900 || count > 1100 {
 			w.WriteError("ERR HLL self test failed: count deviation too high")
+
 			return
 		}
 
@@ -303,14 +348,17 @@ func handlePFSelfTest(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		}
 
 		hll.Merge(hll2)
+
 		mergedCount := hll.Count()
 		if mergedCount < 1800 || mergedCount > 2200 {
 			w.WriteError("ERR HLL self test failed: merged count deviation too high")
+
 			return
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
@@ -319,6 +367,7 @@ func handlePFSelfTest(cmd *shared.Command, w *shared.Writer, db *shared.Database
 func handlePFDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("pfdebug")
+
 		return
 	}
 
@@ -331,14 +380,19 @@ func handlePFDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getHLLSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -347,12 +401,14 @@ func handlePFDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		switch string(subCmd) {
 		case "GETREG":
 			w.WriteArray(16384)
+
 			for _, reg := range hll.Registers {
 				w.WriteInteger(int64(reg))
 			}
 
 		case "DECODE":
 			w.WriteArray(16384)
+
 			for _, reg := range hll.Registers {
 				w.WriteInteger(int64(reg))
 			}
@@ -367,6 +423,7 @@ func handlePFDebug(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			w.WriteError("ERR Unknown PFDEBUG subcommand '" + string(subCmd) + "'")
 		}
 	}
+
 	return
 }
 
@@ -378,5 +435,6 @@ func hllHashElement(element []byte) (regIdx int, rho uint8) {
 	regIdx = int(hash & 0x3FFF)
 	remainingBits := hash << 14
 	rho = min(shared.HLLRho(remainingBits), 63)
+
 	return
 }

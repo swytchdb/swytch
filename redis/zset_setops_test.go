@@ -29,6 +29,7 @@ import (
 func TestZUnionStore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zus1: a=1, b=2, c=3
@@ -39,6 +40,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zus1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zus1: got %q, want %q", got, ":3\r\n")
 		}
@@ -51,6 +53,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zus2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zus2: got %q, want %q", got, ":3\r\n")
 		}
@@ -63,6 +66,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zusdest1"), []byte("2"), []byte("zus1"), []byte("zus2"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":4\r\n" {
 			t.Errorf("ZUNIONSTORE got %q, want %q", got, ":4\r\n")
 		}
@@ -74,6 +78,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zusdest1"), []byte("0"), []byte("-1"), []byte("WITHSCORES"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*8\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n4\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\nc\r\n$1\r\n6\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("ZRANGE WITHSCORES got %q, want %q", got, expected)
@@ -88,6 +93,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("WEIGHTS"), []byte("2"), []byte("1"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":4\r\n" {
 			t.Errorf("ZUNIONSTORE WEIGHTS got %q, want %q", got, ":4\r\n")
 		}
@@ -100,6 +106,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zusdest2"), []byte("0"), []byte("-1"), []byte("WITHSCORES"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*8\r\n$1\r\na\r\n$1\r\n2\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\nb\r\n$1\r\n6\r\n$1\r\nc\r\n$1\r\n9\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("ZRANGE WITHSCORES got %q, want %q", got, expected)
@@ -114,6 +121,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("AGGREGATE"), []byte("MIN"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":4\r\n" {
 			t.Errorf("ZUNIONSTORE AGGREGATE MIN got %q, want %q", got, ":4\r\n")
 		}
@@ -126,6 +134,7 @@ func TestZUnionStore(t *testing.T) {
 			[]byte("zusdest3"), []byte("0"), []byte("-1"), []byte("WITHSCORES"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*8\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("ZRANGE WITHSCORES got %q, want %q", got, expected)
@@ -136,6 +145,7 @@ func TestZUnionStore(t *testing.T) {
 func TestZInterStore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zis1: a=1, b=2, c=3
@@ -146,6 +156,7 @@ func TestZInterStore(t *testing.T) {
 			[]byte("zis1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zis1: got %q, want %q", got, ":3\r\n")
 		}
@@ -158,6 +169,7 @@ func TestZInterStore(t *testing.T) {
 			[]byte("zis2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zis2: got %q, want %q", got, ":3\r\n")
 		}
@@ -170,6 +182,7 @@ func TestZInterStore(t *testing.T) {
 			[]byte("zisdest"), []byte("2"), []byte("zis1"), []byte("zis2"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":2\r\n" {
 			t.Errorf("ZINTERSTORE got %q, want %q", got, ":2\r\n")
 		}
@@ -181,6 +194,7 @@ func TestZInterStore(t *testing.T) {
 			[]byte("zisdest"), []byte("0"), []byte("-1"), []byte("WITHSCORES"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*4\r\n$1\r\nb\r\n$1\r\n4\r\n$1\r\nc\r\n$1\r\n6\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("ZRANGE WITHSCORES got %q, want %q", got, expected)
@@ -191,6 +205,7 @@ func TestZInterStore(t *testing.T) {
 func TestZUnion(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zu1: a=1, b=2, c=3
@@ -201,6 +216,7 @@ func TestZUnion(t *testing.T) {
 			[]byte("zu1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zu1: got %q, want %q", got, ":3\r\n")
 		}
@@ -213,6 +229,7 @@ func TestZUnion(t *testing.T) {
 			[]byte("zu2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zu2: got %q, want %q", got, ":3\r\n")
 		}
@@ -236,6 +253,7 @@ func TestZUnion(t *testing.T) {
 func TestZInter(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zi1: a=1, b=2, c=3
@@ -246,6 +264,7 @@ func TestZInter(t *testing.T) {
 			[]byte("zi1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zi1: got %q, want %q", got, ":3\r\n")
 		}
@@ -258,6 +277,7 @@ func TestZInter(t *testing.T) {
 			[]byte("zi2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zi2: got %q, want %q", got, ":3\r\n")
 		}
@@ -281,6 +301,7 @@ func TestZInter(t *testing.T) {
 func TestZInterCard(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zic1: a=1, b=2, c=3
@@ -291,6 +312,7 @@ func TestZInterCard(t *testing.T) {
 			[]byte("zic1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zic1: got %q, want %q", got, ":3\r\n")
 		}
@@ -303,6 +325,7 @@ func TestZInterCard(t *testing.T) {
 			[]byte("zic2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zic2: got %q, want %q", got, ":3\r\n")
 		}
@@ -315,6 +338,7 @@ func TestZInterCard(t *testing.T) {
 			[]byte("2"), []byte("zic1"), []byte("zic2"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":2\r\n" {
 			t.Errorf("ZINTERCARD got %q, want %q", got, ":2\r\n")
 		}
@@ -327,6 +351,7 @@ func TestZInterCard(t *testing.T) {
 			[]byte("2"), []byte("zic1"), []byte("zic2"), []byte("LIMIT"), []byte("1"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":1\r\n" {
 			t.Errorf("ZINTERCARD LIMIT got %q, want %q", got, ":1\r\n")
 		}
@@ -336,6 +361,7 @@ func TestZInterCard(t *testing.T) {
 func TestZDiff(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zd1: a=1, b=2, c=3
@@ -346,6 +372,7 @@ func TestZDiff(t *testing.T) {
 			[]byte("zd1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zd1: got %q, want %q", got, ":3\r\n")
 		}
@@ -358,6 +385,7 @@ func TestZDiff(t *testing.T) {
 			[]byte("zd2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zd2: got %q, want %q", got, ":3\r\n")
 		}
@@ -395,6 +423,7 @@ func TestZDiff(t *testing.T) {
 func TestZDiffStore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zds1: a=1, b=2, c=3
@@ -405,6 +434,7 @@ func TestZDiffStore(t *testing.T) {
 			[]byte("zds1"), []byte("1"), []byte("a"), []byte("2"), []byte("b"), []byte("3"), []byte("c"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zds1: got %q, want %q", got, ":3\r\n")
 		}
@@ -417,6 +447,7 @@ func TestZDiffStore(t *testing.T) {
 			[]byte("zds2"), []byte("2"), []byte("b"), []byte("3"), []byte("c"), []byte("4"), []byte("d"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Fatalf("seed zds2: got %q, want %q", got, ":3\r\n")
 		}
@@ -429,6 +460,7 @@ func TestZDiffStore(t *testing.T) {
 			[]byte("zdsdest"), []byte("2"), []byte("zds1"), []byte("zds2"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":1\r\n" {
 			t.Errorf("ZDIFFSTORE got %q, want %q", got, ":1\r\n")
 		}
@@ -438,6 +470,7 @@ func TestZDiffStore(t *testing.T) {
 func TestZRangeStore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed zrssrc with 5 members: a=1, b=2, c=3, d=4, e=5
@@ -453,6 +486,7 @@ func TestZRangeStore(t *testing.T) {
 			[]byte("5"), []byte("e"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":5\r\n" {
 			t.Fatalf("seed zrssrc: got %q, want %q", got, ":5\r\n")
 		}
@@ -465,6 +499,7 @@ func TestZRangeStore(t *testing.T) {
 			[]byte("zrsdest"), []byte("zrssrc"), []byte("0"), []byte("2"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":3\r\n" {
 			t.Errorf("ZRANGESTORE got %q, want %q", got, ":3\r\n")
 		}
@@ -476,6 +511,7 @@ func TestZRangeStore(t *testing.T) {
 			[]byte("zrsdest"), []byte("0"), []byte("-1"), []byte("WITHSCORES"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*6\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("ZRANGE WITHSCORES got %q, want %q", got, expected)

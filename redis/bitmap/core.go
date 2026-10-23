@@ -48,12 +48,15 @@ func getBitmapSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection != pb.CollectionKind_KEYED && snap.Collection != pb.CollectionKind_SCALAR {
+
+	if snap.GetCollection() != pb.CollectionKind_KEYED && snap.GetCollection() != pb.CollectionKind_SCALAR {
 		return nil, tips, true, true, nil
 	}
+
 	return snap, tips, true, false, nil
 }
 
@@ -61,9 +64,11 @@ func getBitmapSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 func getScalarBit(data []byte, offset int64) int64 {
 	byteIndex := offset / 8
 	bitIndex := 7 - (offset % 8)
+
 	if int64(len(data)) <= byteIndex {
 		return 0
 	}
+
 	return int64((data[byteIndex] >> bitIndex) & 1)
 }
 
@@ -72,27 +77,31 @@ func getBit(snap *pb.ReducedEffect, offset int64) int64 {
 	if snap == nil {
 		return 0
 	}
-	if snap.Collection == pb.CollectionKind_KEYED {
+
+	if snap.GetCollection() == pb.CollectionKind_KEYED {
 		baseBit := int64(0)
-		if snap.Scalar != nil {
-			baseBit = getScalarBit(snap.Scalar.Decompress(), offset)
+		if snap.GetScalar() != nil {
+			baseBit = getScalarBit(snap.GetScalar().Decompress(), offset)
 		}
-		elem, exists := snap.NetAdds[strconv.FormatInt(offset, 10)]
+
+		elem, exists := snap.GetNetAdds()[strconv.FormatInt(offset, 10)]
 		if exists {
-			if snap.Scalar != nil {
+			if snap.GetScalar() != nil {
 				// XOR mode: IntVal=1 means toggle from base
-				if elem.Data.GetIntVal() == 1 {
+				if elem.GetData().GetIntVal() == 1 {
 					return 1 - baseBit
 				}
+
 				return baseBit
 			}
 			// Pure KEYED: IntVal is the actual bit value
-			return elem.Data.GetIntVal()
+			return elem.GetData().GetIntVal()
 		}
+
 		return baseBit
 	}
 	// Pure SCALAR bitmap
-	return getScalarBit(snap.Scalar.Decompress(), offset)
+	return getScalarBit(snap.GetScalar().Decompress(), offset)
 }
 
 // reconstructBitmapBytes rebuilds a byte array from a bitmap snapshot.
@@ -104,8 +113,8 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 		return nil
 	}
 	// Pure SCALAR path
-	if snap.Collection == pb.CollectionKind_SCALAR {
-		return snap.Scalar.Decompress()
+	if snap.GetCollection() == pb.CollectionKind_SCALAR {
+		return snap.GetScalar().Decompress()
 	}
 
 	// Collect overlay offsets.  Every entry in NetAdds contributes to the
@@ -115,20 +124,25 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 		offset int64
 		set    bool // IntVal == 1
 	}
-	entries := make([]bitEntry, 0, len(snap.NetAdds))
+
+	entries := make([]bitEntry, 0, len(snap.GetNetAdds()))
+
 	var maxOffset int64
-	for key, elem := range snap.NetAdds {
+
+	for key, elem := range snap.GetNetAdds() {
 		off, _ := strconv.ParseInt(key, 10, 64)
 		if off > maxOffset {
 			maxOffset = off
 		}
-		entries = append(entries, bitEntry{off, elem.Data.GetIntVal() == 1})
+
+		entries = append(entries, bitEntry{off, elem.GetData().GetIntVal() == 1})
 	}
 
 	// Start from SCALAR base or empty
 	var data []byte
-	if snap.Scalar != nil {
-		base := snap.Scalar.Decompress()
+
+	if snap.GetScalar() != nil {
+		base := snap.GetScalar().Decompress()
 		data = make([]byte, len(base))
 		copy(data, base)
 		// Extend if overlays go beyond SCALAR length
@@ -148,6 +162,7 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 				data[byteIdx] ^= 1 << uint(bitIdx)
 			}
 		}
+
 		return data
 	}
 
@@ -155,7 +170,9 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 	if len(entries) == 0 {
 		return nil
 	}
+
 	data = make([]byte, maxOffset/8+1)
+
 	for _, e := range entries {
 		if e.set {
 			byteIdx := e.offset / 8
@@ -163,6 +180,7 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 			data[byteIdx] |= 1 << uint(bitIdx)
 		}
 	}
+
 	return data
 }
 
@@ -172,6 +190,7 @@ func reconstructBitmapBytes(snap *pb.ReducedEffect) []byte {
 // when setting a bit to 0.  IntVal carries the actual bit value (0 or 1).
 func emitSetBit(cmd *shared.Command, key string, offset int64, value int64) error {
 	id := []byte(strconv.FormatInt(offset, 10))
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -192,18 +211,20 @@ func emitSetBit(cmd *shared.Command, key string, offset int64, value int64) erro
 func emitBitmapBulk(cmd *shared.Command, key string, data []byte, oldSnap *pb.ReducedEffect, tips []effects.Tip) error {
 	// Determine SCALAR base for overlay-aware emit
 	var baseData []byte
-	if oldSnap != nil && oldSnap.Scalar != nil {
-		baseData = oldSnap.Scalar.Decompress()
+	if oldSnap != nil && oldSnap.GetScalar() != nil {
+		baseData = oldSnap.GetScalar().Decompress()
 	}
 
 	// Build set of bit offsets that need a KEYED element (toggle/set)
 	needInsert := make(map[string]struct{})
+
 	maxLen := max(len(baseData), len(data))
 	for byteIdx := range maxLen {
 		var dataByte, baseByte byte
 		if byteIdx < len(data) {
 			dataByte = data[byteIdx]
 		}
+
 		if byteIdx < len(baseData) {
 			baseByte = baseData[byteIdx]
 		}
@@ -225,12 +246,13 @@ func emitBitmapBulk(cmd *shared.Command, key string, data []byte, oldSnap *pb.Re
 			t = tips
 			first = false
 		}
+
 		return cmd.Context.Emit(eff, t)
 	}
 
 	// REMOVE old overlay elements no longer needed
-	if oldSnap != nil && oldSnap.Collection == pb.CollectionKind_KEYED {
-		for id := range oldSnap.NetAdds {
+	if oldSnap != nil && oldSnap.GetCollection() == pb.CollectionKind_KEYED {
+		for id := range oldSnap.GetNetAdds() {
 			if _, keep := needInsert[id]; !keep {
 				if err := emit(&pb.Effect{
 					Key: []byte(key),
@@ -271,6 +293,7 @@ func emitBitmapBulk(cmd *shared.Command, key string, data []byte, oldSnap *pb.Re
 func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("setbit")
+
 		return
 	}
 
@@ -280,12 +303,14 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	offset, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || offset < 0 || offset >= 4*1024*1024*1024 {
 		w.WriteError("ERR bit offset is not an integer or out of range")
+
 		return
 	}
 
 	value, ok := shared.ParseInt64(cmd.Args[2])
 	if !ok || (value != 0 && value != 1) {
 		w.WriteError("ERR bit is not an integer or out of range")
+
 		return
 	}
 
@@ -294,10 +319,13 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, _, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -307,6 +335,7 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// the key as a zero-filled string. Emit a SCALAR to establish it.
 		if snap == nil && value == 0 {
 			byteLen := (offset / 8) + 1
+
 			zeroData := make([]byte, byteLen)
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(key),
@@ -318,16 +347,21 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
 				Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_BITMAP}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			w.WriteInteger(0)
+
 			return
 		}
 
@@ -336,8 +370,9 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		//   INSERT = "this bit differs from base"
 		//   REMOVE = "this bit matches base"
 		emitValue := value
-		if snap != nil && snap.Scalar != nil {
-			baseBit := getScalarBit(snap.Scalar.Decompress(), offset)
+
+		if snap != nil && snap.GetScalar() != nil {
+			baseBit := getScalarBit(snap.GetScalar().Decompress(), offset)
 			if value != baseBit {
 				emitValue = 1 // INSERT (toggle from base)
 			} else {
@@ -347,6 +382,7 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		if err := emitSetBit(cmd, key, offset, emitValue); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
@@ -357,12 +393,14 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_BITMAP}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(oldBit)
 	}
+
 	return
 }
 
@@ -371,6 +409,7 @@ func handleSetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleGetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("getbit")
+
 		return
 	}
 
@@ -380,6 +419,7 @@ func handleGetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	offset, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || offset < 0 {
 		w.WriteError("ERR bit offset is not an integer or out of range")
+
 		return
 	}
 
@@ -388,19 +428,25 @@ func handleGetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		w.WriteInteger(getBit(snap, offset))
 	}
+
 	return
 }
 
@@ -409,6 +455,7 @@ func handleGetBit(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("bitcount")
+
 		return
 	}
 
@@ -417,6 +464,7 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 	// Valid arg counts: 1 (just key), 3 (key start end), 4 (key start end BYTE|BIT)
 	if len(cmd.Args) == 2 {
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -425,20 +473,25 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 	// Default values
 	var start, end int64 = 0, -1
+
 	useBitIndex := false
 	hasRange := len(cmd.Args) >= 3
 
 	// Parse optional range arguments before checking key existence
 	if hasRange {
 		var ok bool
+
 		start, ok = shared.ParseInt64(cmd.Args[1])
 		if !ok {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		end, ok = shared.ParseInt64(cmd.Args[2])
 		if !ok {
 			w.WriteNotInteger()
+
 			return
 		}
 
@@ -452,6 +505,7 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				useBitIndex = false
 			default:
 				w.WriteSyntaxError()
+
 				return
 			}
 		}
@@ -462,26 +516,34 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, _, exists, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Fast path: no range, pure KEYED (no SCALAR base) — count set bits
-		if !hasRange && snap.Collection == pb.CollectionKind_KEYED && snap.Scalar == nil {
+		if !hasRange && snap.GetCollection() == pb.CollectionKind_KEYED && snap.GetScalar() == nil {
 			count := int64(0)
-			for _, elem := range snap.NetAdds {
-				if elem.Data.GetIntVal() == 1 {
+
+			for _, elem := range snap.GetNetAdds() {
+				if elem.GetData().GetIntVal() == 1 {
 					count++
 				}
 			}
+
 			w.WriteInteger(count)
+
 			return
 		}
 
@@ -499,25 +561,33 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 		if useBitIndex {
 			bitLen := dataLen * 8
+
 			actualStart := start
 			if actualStart < 0 {
 				actualStart = bitLen + actualStart
 			}
+
 			if actualEnd < 0 {
 				actualEnd = bitLen + actualEnd
 			}
+
 			if actualStart < 0 {
 				actualStart = 0
 			}
+
 			if actualEnd >= bitLen {
 				actualEnd = bitLen - 1
 			}
+
 			if actualStart > actualEnd || actualStart >= bitLen {
 				w.WriteInteger(0)
+
 				return
 			}
+
 			for i := actualStart; i <= actualEnd; i++ {
 				byteIdx := i / 8
+
 				bitIdx := 7 - (i % 8)
 				if (data[byteIdx]>>bitIdx)&1 == 1 {
 					count++
@@ -528,19 +598,25 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			if actualStart < 0 {
 				actualStart = dataLen + actualStart
 			}
+
 			if actualEnd < 0 {
 				actualEnd = dataLen + actualEnd
 			}
+
 			if actualStart < 0 {
 				actualStart = 0
 			}
+
 			if actualEnd >= dataLen {
 				actualEnd = dataLen - 1
 			}
+
 			if actualStart > actualEnd || actualStart >= dataLen {
 				w.WriteInteger(0)
+
 				return
 			}
+
 			for i := actualStart; i <= actualEnd; i++ {
 				count += int64(bits.OnesCount8(data[i]))
 			}
@@ -548,6 +624,7 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 		w.WriteInteger(count)
 	}
+
 	return
 }
 
@@ -556,6 +633,7 @@ func handleBitCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("bitpos")
+
 		return
 	}
 
@@ -564,6 +642,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	// Max 5 arguments
 	if len(cmd.Args) > 5 {
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -573,11 +652,13 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	searchBit, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || (searchBit != 0 && searchBit != 1) {
 		w.WriteError("ERR bit is not an integer or out of range")
+
 		return
 	}
 
 	// Default range values
 	var start, end int64 = 0, -1
+
 	useBitIndex := false
 	hasEnd := false
 
@@ -592,6 +673,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			useBitIndex = false
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -601,6 +683,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		start, ok = shared.ParseInt64(cmd.Args[2])
 		if !ok {
 			w.WriteNotInteger()
+
 			return
 		}
 	}
@@ -610,8 +693,10 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		end, ok = shared.ParseInt64(cmd.Args[3])
 		if !ok {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		hasEnd = true
 	}
 
@@ -620,18 +705,23 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if searchBit == 0 {
 				w.WriteInteger(0)
 			} else {
 				w.WriteInteger(-1)
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -644,6 +734,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			} else {
 				w.WriteInteger(-1)
 			}
+
 			return
 		}
 
@@ -662,6 +753,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if actualStart < 0 {
 				actualStart = bitLen + actualStart
 			}
+
 			if actualEnd < 0 {
 				actualEnd = bitLen + actualEnd
 			}
@@ -670,15 +762,18 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if actualStart < 0 {
 				actualStart = 0
 			}
+
 			if !hasEnd {
 				actualEnd = bitLen - 1
 			}
+
 			if actualEnd >= bitLen {
 				actualEnd = bitLen - 1
 			}
 
 			if actualStart > actualEnd || actualStart >= bitLen {
 				w.WriteInteger(-1)
+
 				return
 			}
 
@@ -686,9 +781,11 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			for i := actualStart; i <= actualEnd; i++ {
 				byteIdx := i / 8
 				bitIdx := 7 - (i % 8)
+
 				bit := (data[byteIdx] >> bitIdx) & 1
 				if int64(bit) == searchBit {
 					w.WriteInteger(i)
+
 					return
 				}
 			}
@@ -701,6 +798,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if actualStart < 0 {
 				actualStart = dataLen + actualStart
 			}
+
 			if actualEnd < 0 {
 				actualEnd = dataLen + actualEnd
 			}
@@ -709,15 +807,18 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if actualStart < 0 {
 				actualStart = 0
 			}
+
 			if !hasEnd {
 				actualEnd = dataLen - 1
 			}
+
 			if actualEnd >= dataLen {
 				actualEnd = dataLen - 1
 			}
 
 			if actualStart > actualEnd || actualStart >= dataLen {
 				w.WriteInteger(-1)
+
 				return
 			}
 
@@ -729,6 +830,7 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 					if int64(bit) == searchBit {
 						pos := byteIdx*8 + (7 - bitIdx)
 						w.WriteInteger(pos)
+
 						return
 					}
 				}
@@ -738,12 +840,14 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			// If all bits are 1, return the first bit position after the string
 			if searchBit == 0 && !hasEnd {
 				w.WriteInteger(dataLen * 8)
+
 				return
 			}
 
 			w.WriteInteger(-1)
 		}
 	}
+
 	return
 }
 
@@ -752,11 +856,13 @@ func handleBitPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("bitop")
+
 		return
 	}
 
 	op := strings.ToUpper(string(cmd.Args[0]))
 	destKey := string(cmd.Args[1])
+
 	srcKeys := make([]string, len(cmd.Args)-2)
 	for i := 2; i < len(cmd.Args); i++ {
 		srcKeys[i-2] = string(cmd.Args[i])
@@ -769,28 +875,33 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	case "NOT":
 		if len(srcKeys) != 1 {
 			w.WriteError("ERR BITOP NOT requires one and only one key")
+
 			return
 		}
 	case "DIFF":
 		// DIFF requires at least 2 source keys: X and at least one Y
 		if len(srcKeys) < 2 {
 			w.WriteError("ERR BITOP DIFF requires at least two keys")
+
 			return
 		}
 	case "DIFF1":
 		// DIFF1 requires at least 2 source keys: X and at least one Y
 		if len(srcKeys) < 2 {
 			w.WriteError("ERR BITOP DIFF1 requires at least two keys")
+
 			return
 		}
 	case "ANDOR":
 		// ANDOR requires at least 2 source keys: X and at least one Y
 		if len(srcKeys) < 2 {
 			w.WriteError("ERR BITOP ANDOR requires at least two keys")
+
 			return
 		}
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -802,17 +913,23 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		// Read all source values via effects engine
 		sources := make([][]byte, len(srcKeys))
 		maxLen := 0
+
 		for i, srcKey := range srcKeys {
 			snap, _, _, wrongType, err := getBitmapSnapshot(cmd, srcKey)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			srcData := reconstructBitmapBytes(snap)
+
 			sources[i] = srcData
 			if len(srcData) > maxLen {
 				maxLen = len(srcData)
@@ -822,6 +939,7 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		// If all sources are empty/missing, result is empty
 		if maxLen == 0 {
 			w.WriteInteger(0)
+
 			return
 		}
 
@@ -835,6 +953,7 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			for i := range result {
 				result[i] = 0xFF
 			}
+
 			for _, src := range sources {
 				for i := 0; i < maxLen; i++ {
 					if i < len(src) {
@@ -866,6 +985,7 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if src == nil {
 				src = []byte{}
 			}
+
 			for i := 0; i < len(src); i++ {
 				result[i] = ^src[i]
 			}
@@ -878,6 +998,7 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			// A bit is set if it's set in exactly one source key
 			for i := 0; i < maxLen; i++ {
 				count := byte(0)
+
 				for _, src := range sources {
 					if i < len(src) {
 						count ^= src[i] // XOR counts odd occurrences per bit
@@ -894,11 +1015,13 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 					// Count bits that appear in exactly one source
 					for bit := range 8 {
 						bitCount := 0
+
 						for _, src := range sources {
 							if i < len(src) && (src[i]>>bit)&1 == 1 {
 								bitCount++
 							}
 						}
+
 						if bitCount == 1 {
 							result[i] |= (1 << bit)
 						}
@@ -911,10 +1034,12 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if len(sources) == 0 {
 				break
 			}
+
 			x := sources[0]
 			if x == nil {
 				x = []byte{}
 			}
+
 			copy(result, x)
 			// Remove bits that appear in any Y key
 			for j := 1; j < len(sources); j++ {
@@ -922,6 +1047,7 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				if y == nil {
 					continue
 				}
+
 				for i := 0; i < len(y) && i < len(result); i++ {
 					result[i] &^= y[i] // AND NOT: clear bits that are set in y
 				}
@@ -932,17 +1058,20 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if len(sources) == 0 {
 				break
 			}
+
 			x := sources[0]
 			if x == nil {
 				x = []byte{}
 			}
 			// First, OR all Y keys together
 			yUnion := make([]byte, maxLen)
+
 			for j := 1; j < len(sources); j++ {
 				y := sources[j]
 				if y == nil {
 					continue
 				}
+
 				for i := range y {
 					yUnion[i] |= y[i]
 				}
@@ -961,17 +1090,20 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if len(sources) == 0 {
 				break
 			}
+
 			x := sources[0]
 			if x == nil {
 				x = []byte{}
 			}
 			// First, OR all Y keys together
 			yUnion := make([]byte, maxLen)
+
 			for j := 1; j < len(sources); j++ {
 				y := sources[j]
 				if y == nil {
 					continue
 				}
+
 				for i := range y {
 					yUnion[i] |= y[i]
 				}
@@ -985,10 +1117,12 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		// Store result as a SCALAR string (like Redis does).
 		// This preserves exact byte length including trailing zero bytes.
 		destSnap, destTips, _, _, _ := getBitmapSnapshot(cmd, destKey)
+
 		var tips []effects.Tip
 		if destTips != nil {
 			tips = destTips
 		}
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key: []byte(destKey),
 			Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -999,22 +1133,25 @@ func handleBitOp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Tag as string if dest was a different type or new
-		if destSnap == nil || (destSnap.TypeTag != pb.ValueType_TYPE_STRING && destSnap.TypeTag != pb.ValueType_TYPE_UNSPECIFIED) {
+		if destSnap == nil || (destSnap.GetTypeTag() != pb.ValueType_TYPE_STRING && destSnap.GetTypeTag() != pb.ValueType_TYPE_UNSPECIFIED) {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(destKey),
 				Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_STRING}},
 			}); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(int64(len(result)))
 	}
+
 	return
 }
 
@@ -1035,6 +1172,7 @@ const (
 func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("bitfield")
+
 		return
 	}
 
@@ -1053,6 +1191,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 	}
 
 	var subCmds []subCommand
+
 	currentOverflow := overflowWrap
 
 	i := 1
@@ -1063,18 +1202,24 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		case bitfieldGet:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			signed, bitWidth, ok := parseBitfieldType(cmd.Args[i+1])
 			if !ok {
 				w.WriteError("ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.")
+
 				return
 			}
+
 			offset, offsetMul, ok := parseBitfieldOffset(cmd.Args[i+2], bitWidth)
 			if !ok {
 				w.WriteError("ERR bit offset is not an integer or out of range")
+
 				return
 			}
+
 			subCmds = append(subCmds, subCommand{
 				op:        bitfieldGet,
 				signed:    signed,
@@ -1088,23 +1233,31 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		case bitfieldSet:
 			if i+3 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			signed, bitWidth, ok := parseBitfieldType(cmd.Args[i+1])
 			if !ok {
 				w.WriteError("ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.")
+
 				return
 			}
+
 			offset, offsetMul, ok := parseBitfieldOffset(cmd.Args[i+2], bitWidth)
 			if !ok {
 				w.WriteError("ERR bit offset is not an integer or out of range")
+
 				return
 			}
+
 			value, ok := shared.ParseInt64(cmd.Args[i+3])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			subCmds = append(subCmds, subCommand{
 				op:        bitfieldSet,
 				signed:    signed,
@@ -1119,23 +1272,31 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		case bitfieldIncrBy:
 			if i+3 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			signed, bitWidth, ok := parseBitfieldType(cmd.Args[i+1])
 			if !ok {
 				w.WriteError("ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.")
+
 				return
 			}
+
 			offset, offsetMul, ok := parseBitfieldOffset(cmd.Args[i+2], bitWidth)
 			if !ok {
 				w.WriteError("ERR bit offset is not an integer or out of range")
+
 				return
 			}
+
 			increment, ok := shared.ParseInt64(cmd.Args[i+3])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			subCmds = append(subCmds, subCommand{
 				op:        bitfieldIncrBy,
 				signed:    signed,
@@ -1150,8 +1311,10 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		case "OVERFLOW":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			behavior := strings.ToUpper(string(cmd.Args[i+1]))
 			switch behavior {
 			case "WRAP":
@@ -1162,12 +1325,15 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				currentOverflow = overflowFail
 			default:
 				w.WriteError("ERR Invalid OVERFLOW type (should be one of WRAP, SAT, FAIL)")
+
 				return
 			}
+
 			i += 2
 
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -1178,6 +1344,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		runner = func() {
 			w.WriteArray(0)
 		}
+
 		return
 	}
 
@@ -1190,12 +1357,16 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, tips, _, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
+
 		rawData := reconstructBitmapBytes(snap)
 		// Copy data for mutation
 		data := append([]byte{}, rawData...)
@@ -1217,6 +1388,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				// Check for overflow
 				if checkBitfieldOverflow(newValue, sc.bits, sc.signed) && sc.overflow == overflowFail {
 					results[idx] = nil
+
 					continue
 				}
 
@@ -1232,6 +1404,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				}
 
 				setBitfieldInt(data, sc.offset, sc.bits, newValue)
+
 				results[idx] = oldValue
 				modified = true
 
@@ -1241,6 +1414,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				// Check for arithmetic overflow before adding
 				if sc.overflow == overflowFail && checkAdditionOverflow(oldValue, sc.value) {
 					results[idx] = nil
+
 					continue
 				}
 
@@ -1249,6 +1423,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 				// Check for type overflow
 				if checkBitfieldOverflow(newValue, sc.bits, sc.signed) && sc.overflow == overflowFail {
 					results[idx] = nil
+
 					continue
 				}
 
@@ -1272,15 +1447,17 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		if modified {
 			if err := emitBitmapBulk(cmd, key, data, snap, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 			// Tag as bitmap on first write or when converting from SCALAR
-			if snap == nil || snap.Collection == pb.CollectionKind_SCALAR {
+			if snap == nil || snap.GetCollection() == pb.CollectionKind_SCALAR {
 				if err := cmd.Context.Emit(&pb.Effect{
 					Key:  []byte(key),
 					Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_BITMAP}},
 				}); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			}
@@ -1288,6 +1465,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 		// Write results array
 		w.WriteArray(len(results))
+
 		for _, r := range results {
 			if r == nil {
 				w.WriteNullBulkString()
@@ -1296,6 +1474,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			}
 		}
 	}
+
 	return
 }
 
@@ -1304,6 +1483,7 @@ func handleBitField(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("bitfield_ro")
+
 		return
 	}
 
@@ -1327,18 +1507,24 @@ func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		case bitfieldGet:
 			if i+2 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			signed, bitWidth, ok := parseBitfieldType(cmd.Args[i+1])
 			if !ok {
 				w.WriteError("ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is.")
+
 				return
 			}
+
 			offset, _, ok := parseBitfieldOffset(cmd.Args[i+2], bitWidth)
 			if !ok {
 				w.WriteError("ERR bit offset is not an integer or out of range")
+
 				return
 			}
+
 			getCmds = append(getCmds, getCommand{
 				signed: signed,
 				bits:   bitWidth,
@@ -1349,6 +1535,7 @@ func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		default:
 			// BITFIELD_RO only supports GET
 			w.WriteError("ERR BITFIELD_RO only supports the GET subcommand")
+
 			return
 		}
 	}
@@ -1358,6 +1545,7 @@ func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		runner = func() {
 			w.WriteArray(0)
 		}
+
 		return
 	}
 
@@ -1366,21 +1554,27 @@ func handleBitFieldRO(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		snap, _, _, wrongType, err := getBitmapSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
+
 		data := reconstructBitmapBytes(snap)
 
 		// Execute GET subcommands and collect results
 		w.WriteArray(len(getCmds))
+
 		for _, gc := range getCmds {
 			value := getBitfieldInt(data, gc.offset, gc.bits, gc.signed)
 			w.WriteInteger(value)
 		}
 	}
+
 	return
 }
 
@@ -1428,6 +1622,7 @@ func parseBitfieldOffset(b []byte, bitWidth int) (int64, bool, bool) {
 		if !ok || idx < 0 {
 			return 0, false, false
 		}
+
 		return idx * int64(bitWidth), true, true
 	}
 
@@ -1435,6 +1630,7 @@ func parseBitfieldOffset(b []byte, bitWidth int) (int64, bool, bool) {
 	if !ok || offset < 0 {
 		return 0, false, false
 	}
+
 	return offset, false, true
 }
 
@@ -1445,6 +1641,7 @@ func getBitfieldInt(data []byte, bitOffset int64, bits int, signed bool) int64 {
 	}
 
 	var value int64
+
 	for i := range bits {
 		bitPos := bitOffset + int64(i)
 		byteIdx := bitPos / 8
@@ -1479,6 +1676,7 @@ func setBitfieldInt(data []byte, bitOffset int64, bits int, value int64) {
 	} else {
 		mask = (int64(1) << bits) - 1
 	}
+
 	value &= mask
 
 	// Write bits from MSB to LSB
@@ -1508,12 +1706,15 @@ func checkBitfieldOverflow(value int64, bits int, signed bool) bool {
 		if bits == 64 {
 			return false // i64 can hold any int64 value
 		}
+
 		minVal := -(int64(1) << (bits - 1))
 		maxVal := (int64(1) << (bits - 1)) - 1
+
 		return value < minVal || value > maxVal
 	}
 	// unsigned
 	maxVal := (int64(1) << bits) - 1
+
 	return value < 0 || value > maxVal
 }
 
@@ -1523,9 +1724,11 @@ func checkAdditionOverflow(a, b int64) bool {
 	if b > 0 && a > math.MaxInt64-b {
 		return true // positive overflow
 	}
+
 	if b < 0 && a < math.MinInt64-b {
 		return true // negative overflow
 	}
+
 	return false
 }
 
@@ -1556,10 +1759,12 @@ func applyOverflow(value int64, bits int, signed bool, behavior overflowBehavior
 			}
 			// Signed wraparound for smaller bit widths
 			range_ := int64(1) << bits
+
 			value = ((value - minVal) % range_)
 			if value < 0 {
 				value += range_
 			}
+
 			value += minVal
 		} else {
 			// Unsigned wraparound

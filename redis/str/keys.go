@@ -32,9 +32,10 @@ import (
 // Used by type-agnostic commands (EXISTS, TYPE, TTL, etc.)
 func getAnySnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, err error) {
 	snap, _, err = cmd.Context.GetSnapshot(key)
-	if snap != nil && snap.Op == pb.EffectOp_REMOVE_OP {
+	if snap != nil && snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, err
 	}
+
 	return
 }
 
@@ -45,50 +46,53 @@ func getAnySnapshotWithTips(cmd *shared.Command, key string) (snap *pb.ReducedEf
 	if err != nil {
 		return nil, nil, err
 	}
-	if snap != nil && snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap != nil && snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, nil
 	}
+
 	return snap, tips, nil
 }
 
 // emitSnapshotAtKey re-emits a full snapshot (any type) at a new key.
 // Used by RENAME, RENAMENX, COPY, MOVE to recreate a key's value at a different key.
 func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffect) error {
-	switch snap.Collection {
+	switch snap.GetCollection() {
 	case pb.CollectionKind_SCALAR:
-		if snap.Scalar != nil {
+		if snap.GetScalar() != nil {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(destKey),
 				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 					Op:         pb.EffectOp_INSERT_OP,
-					Merge:      snap.Merge,
+					Merge:      snap.GetMerge(),
 					Collection: pb.CollectionKind_SCALAR,
-					Value:      snap.Scalar.Value,
+					Value:      snap.GetScalar().GetValue(),
 				}},
 			}); err != nil {
 				return err
 			}
 		}
 	case pb.CollectionKind_KEYED:
-		for id, elem := range snap.NetAdds {
+		for id, elem := range snap.GetNetAdds() {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(destKey),
 				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 					Op:         pb.EffectOp_INSERT_OP,
-					Merge:      snap.Merge,
+					Merge:      snap.GetMerge(),
 					Collection: pb.CollectionKind_KEYED,
 					Id:         []byte(id),
-					Value:      elem.Data.Value,
+					Value:      elem.GetData().GetValue(),
 				}},
 			}); err != nil {
 				return err
 			}
-			if elem.ExpiresAt != nil {
+
+			if elem.GetExpiresAt() != nil {
 				if err := cmd.Context.Emit(&pb.Effect{
 					Key: []byte(destKey),
 					Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{
 						ElementId: []byte(id),
-						ExpiresAt: elem.ExpiresAt,
+						ExpiresAt: elem.GetExpiresAt(),
 					}},
 				}); err != nil {
 					return err
@@ -96,15 +100,15 @@ func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffe
 			}
 		}
 	case pb.CollectionKind_ORDERED:
-		for _, elem := range snap.OrderedElements {
+		for _, elem := range snap.GetOrderedElements() {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(destKey),
 				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
 					Op:         pb.EffectOp_INSERT_OP,
-					Merge:      snap.Merge,
+					Merge:      snap.GetMerge(),
 					Collection: pb.CollectionKind_ORDERED,
-					Id:         elem.Data.Id,
-					Value:      elem.Data.Value,
+					Id:         elem.GetData().GetId(),
+					Value:      elem.GetData().GetValue(),
 				}},
 			}); err != nil {
 				return err
@@ -113,18 +117,18 @@ func emitSnapshotAtKey(cmd *shared.Command, destKey string, snap *pb.ReducedEffe
 	}
 
 	// Emit type tag
-	if snap.TypeTag != pb.ValueType_TYPE_UNSPECIFIED {
+	if snap.GetTypeTag() != pb.ValueType_TYPE_UNSPECIFIED {
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(destKey),
-			Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: snap.TypeTag}},
+			Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: snap.GetTypeTag()}},
 		}); err != nil {
 			return err
 		}
 	}
 
 	// Emit key-level TTL
-	if snap.ExpiresAt != nil {
-		if err := emitStringTTL(cmd, destKey, snap.ExpiresAt); err != nil {
+	if snap.GetExpiresAt() != nil {
+		if err := emitStringTTL(cmd, destKey, snap.GetExpiresAt()); err != nil {
 			return err
 		}
 	}
@@ -158,6 +162,7 @@ func typeTagToString(tag pb.ValueType) string {
 func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("del")
+
 		return
 	}
 
@@ -165,16 +170,20 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	valid = true
 
 	runner = func() {
 		deleted := int64(0)
+
 		for _, key := range keys {
 			snap, err := getAnySnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if snap == nil {
 				continue
 			}
@@ -186,20 +195,26 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			// ever recreated as a stream.
 			if err := cleanupStreamGroups(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitDeleteKey(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			deleted++
 		}
 
 		w.WriteInteger(deleted)
+
 		if s := shared.GetServerStats(); s != nil {
 			s.CmdDel.Add(uint64(deleted))
 		}
 	}
+
 	return
 }
 
@@ -210,53 +225,63 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 func cleanupStreamGroups(cmd *shared.Command, key string) error {
 	// Clean up consumer groups
 	groupRegistryKey := key + "\x01g\x01__registry__"
+
 	registrySnap, _, err := cmd.Context.GetSnapshot(groupRegistryKey)
 	if err != nil {
 		return err
 	}
+
 	if registrySnap != nil && registrySnap.NetAdds != nil {
-		for groupName := range registrySnap.NetAdds {
+		for groupName := range registrySnap.GetNetAdds() {
 			// Delete per-group sub-keys: group metadata and PEL
 			groupKeyName := key + "\x01g\x01" + groupName
 			pelKeyName := key + "\x01pel\x01" + groupName
+
 			if err := emitDeleteKey(cmd, groupKeyName); err != nil {
 				return err
 			}
+
 			if err := emitDeleteKey(cmd, pelKeyName); err != nil {
 				return err
 			}
 		}
 	}
+
 	if err := emitDeleteKey(cmd, groupRegistryKey); err != nil {
 		return err
 	}
 
 	// Clean up producer dedup keys
 	producerRegistryKey := key + "\x01p\x01__registry__"
+
 	producerSnap, _, err := cmd.Context.GetSnapshot(producerRegistryKey)
 	if err != nil {
 		return err
 	}
+
 	if producerSnap != nil && producerSnap.NetAdds != nil {
-		for producerName := range producerSnap.NetAdds {
+		for producerName := range producerSnap.GetNetAdds() {
 			producerKeyName := key + "\x01p\x01" + producerName
 			if err := emitDeleteKey(cmd, producerKeyName); err != nil {
 				return err
 			}
 		}
 	}
+
 	if err := emitDeleteKey(cmd, producerRegistryKey); err != nil {
 		return err
 	}
 
 	// Clean up IDMP config key (KEYED collection — remove each element)
 	cfgKeyName := key + "\x01cfg"
+
 	cfgSnap, _, err := cmd.Context.GetSnapshot(cfgKeyName)
 	if err != nil {
 		return err
 	}
+
 	if cfgSnap != nil && cfgSnap.NetAdds != nil {
-		for elemID := range cfgSnap.NetAdds {
+		for elemID := range cfgSnap.GetNetAdds() {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key: []byte(cfgKeyName),
 				Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -269,6 +294,7 @@ func cleanupStreamGroups(cmd *shared.Command, key string) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -278,10 +304,12 @@ func cleanupStreamGroups(cmd *shared.Command, key string) error {
 func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) error {
 	srcRegistryKey := srcKey + "\x01g\x01__registry__"
 	dstRegistryKey := dstKey + "\x01g\x01__registry__"
+
 	registrySnap, _, err := cmd.Context.GetSnapshot(srcRegistryKey)
 	if err != nil {
 		return err
 	}
+
 	if registrySnap == nil || registrySnap.NetAdds == nil {
 		return nil
 	}
@@ -290,7 +318,7 @@ func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) error {
 		return err
 	}
 	// Copy per-group sub-keys
-	for groupName := range registrySnap.NetAdds {
+	for groupName := range registrySnap.GetNetAdds() {
 		srcGroupKey := srcKey + "\x01g\x01" + groupName
 		dstGroupKey := dstKey + "\x01g\x01" + groupName
 		srcPelKey := srcKey + "\x01pel\x01" + groupName
@@ -300,21 +328,25 @@ func copyStreamGroups(cmd *shared.Command, srcKey, dstKey string) error {
 		if err != nil {
 			return err
 		}
+
 		if snap != nil {
 			if err := emitSnapshotAtKey(cmd, dstGroupKey, snap); err != nil {
 				return err
 			}
 		}
+
 		pelSnap, _, err := cmd.Context.GetSnapshot(srcPelKey)
 		if err != nil {
 			return err
 		}
+
 		if pelSnap != nil {
 			if err := emitSnapshotAtKey(cmd, dstPelKey, pelSnap); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -322,6 +354,7 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	// DELEX key [IFEQ value | IFNE value | IFDEQ digest | IFDNE digest]
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("delex")
+
 		return
 	}
 
@@ -330,11 +363,15 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	// Parse option - must have exactly 3 args if options present: key, condition, value
 	if len(cmd.Args) != 1 && len(cmd.Args) != 3 {
 		w.WriteError("ERR wrong number of arguments for 'delex' command")
+
 		return
 	}
 
-	var optStr string
-	var compareValue []byte
+	var (
+		optStr       string
+		compareValue []byte
+	)
+
 	if len(cmd.Args) == 3 {
 		opt := shared.ToUpper(cmd.Args[1])
 		optStr = string(opt)
@@ -343,6 +380,7 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		// Validate condition
 		if optStr != optionIfEqual && optStr != optionIfNotEqual && optStr != optionIfDigestEqual && optStr != optionIfDigestNotEqual {
 			w.WriteError("ERR Invalid condition for DELEX")
+
 			return
 		}
 	}
@@ -356,17 +394,24 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			snap, err := getAnySnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if snap == nil {
 				w.WriteZero()
+
 				return
 			}
+
 			if err := emitDeleteKey(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			w.WriteOne()
+
 			return
 		}
 
@@ -374,25 +419,32 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteError("ERR DELEX with conditions only supports string values")
+
 			return
 		}
 
 		// Validate digest format
 		if (optStr == optionIfDigestEqual || optStr == optionIfDigestNotEqual) && !isValidHexDigest(compareValue) {
 			w.WriteError("ERR digest must be exactly 16 hexadecimal characters")
+
 			return
 		}
 
 		raw := snapshotToRaw(snap)
 		shouldDelete := false
+
 		switch optStr {
 		case optionIfEqual:
 			shouldDelete = bytes.Equal(raw, compareValue)
@@ -406,31 +458,39 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 		if !shouldDelete {
 			w.WriteZero()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			cmd.Context.Abort()
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitDeleteKey(cmd, key); err != nil {
 			cmd.Context.Abort()
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOne()
 	}
+
 	return
 }
 
 func handleExists(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("exists")
+
 		return
 	}
 
@@ -438,28 +498,35 @@ func handleExists(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	valid = true
 
 	runner = func() {
 		count := int64(0)
+
 		for _, key := range keys {
 			snap, err := getAnySnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if snap != nil {
 				count++
 			}
 		}
+
 		w.WriteInteger(count)
 	}
+
 	return
 }
 
 func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("rename")
+
 		return
 	}
 
@@ -472,19 +539,24 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, tips, err := getAnySnapshotWithTips(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if snap == nil {
 			w.WriteError("ERR no such key")
+
 			return
 		}
 
 		if key == newKey {
 			w.WriteOK()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := func() error {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
@@ -492,10 +564,12 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			}, tips); err != nil {
 				return err
 			}
+
 			destSnap, destTips, err := getAnySnapshotWithTips(cmd, newKey)
 			if err != nil {
 				return err
 			}
+
 			if len(destTips) > 0 {
 				if err := cmd.Context.Emit(&pb.Effect{
 					Key:  []byte(newKey),
@@ -508,29 +582,35 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			if err := emitDeleteKey(cmd, key); err != nil {
 				return err
 			}
+
 			if err := emitDeleteKey(cmd, newKey); err != nil {
 				return err
 			}
+
 			if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
 				return err
 			}
 			// Move stream consumer group sub-keys from old key to new key
-			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+			if snap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 				// Clean up dest groups (in case newKey was also a stream)
-				if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+				if destSnap != nil && destSnap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 					if err := cleanupStreamGroups(cmd, newKey); err != nil {
 						return err
 					}
 				}
+
 				if err := copyStreamGroups(cmd, key, newKey); err != nil {
 					return err
 				}
+
 				return cleanupStreamGroups(cmd, key)
 			}
-			if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+
+			if destSnap != nil && destSnap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 				// Dest was a stream but source isn't — clean up dest's groups
 				return cleanupStreamGroups(cmd, newKey)
 			}
+
 			return nil
 		}(); err != nil {
 			// The tx buffer holds a half-built rename; the post-runner Flush
@@ -538,17 +618,20 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			// client sees an error. Abort so nothing moves.
 			cmd.Context.Abort()
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("renamenx")
+
 		return
 	}
 
@@ -561,29 +644,37 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, tips, err := getAnySnapshotWithTips(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if snap == nil {
 			w.WriteError("ERR no such key")
+
 			return
 		}
 
 		if key == newKey {
 			w.WriteZero()
+
 			return
 		}
 
 		destSnap, destTips, err := getAnySnapshotWithTips(cmd, newKey)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if destSnap != nil {
 			w.WriteZero()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := func() error {
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
@@ -591,6 +682,7 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			}, tips); err != nil {
 				return err
 			}
+
 			if len(destTips) > 0 {
 				if err := cmd.Context.Emit(&pb.Effect{
 					Key:  []byte(newKey),
@@ -603,27 +695,32 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			if err := emitDeleteKey(cmd, key); err != nil {
 				return err
 			}
+
 			if err := emitSnapshotAtKey(cmd, newKey, snap); err != nil {
 				return err
 			}
 			// Move stream consumer group sub-keys from old key to new key
-			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+			if snap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 				if err := copyStreamGroups(cmd, key, newKey); err != nil {
 					return err
 				}
+
 				return cleanupStreamGroups(cmd, key)
 			}
+
 			return nil
 		}(); err != nil {
 			// Same as handleRename: abort so the post-runner Flush can't
 			// commit a half-built rename behind the reported error.
 			cmd.Context.Abort()
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		w.WriteOne()
 	}
+
 	return
 }
 
@@ -632,6 +729,7 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("copy")
+
 		return
 	}
 
@@ -647,23 +745,29 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		case "DB":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			dbIndex, ok := shared.ParseInt64(cmd.Args[i+1])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
 			// There is a single database; only DB 0 is valid.
 			if dbIndex != 0 {
 				w.WriteError("ERR DB index is out of range")
+
 				return
 			}
+
 			i++
 		case "REPLACE":
 			replace = true
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -675,10 +779,13 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, err := getAnySnapshotWithTips(cmd, srcKey)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if snap == nil {
 			w.WriteZero()
+
 			return
 		}
 
@@ -686,10 +793,13 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			destSnap, _, err := getAnySnapshotWithTips(cmd, dstKey)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if destSnap != nil {
 				w.WriteZero()
+
 				return
 			}
 		}
@@ -698,6 +808,7 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		// key plus its stream-group sub-keys, and a partial commit would
 		// surface a replaced destination without its groups (or vice versa).
 		cmd.Context.BeginTx()
+
 		if err := func() error {
 			if replace {
 				// Check dest type before deleting so we can clean up stream groups
@@ -705,10 +816,12 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				if err != nil {
 					return err
 				}
+
 				if err := emitDeleteKey(cmd, dstKey); err != nil {
 					return err
 				}
-				if destSnap != nil && destSnap.TypeTag == pb.ValueType_TYPE_STREAM {
+
+				if destSnap != nil && destSnap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 					if err := cleanupStreamGroups(cmd, dstKey); err != nil {
 						return err
 					}
@@ -719,17 +832,21 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				return err
 			}
 			// Copy stream consumer group sub-keys to dest
-			if snap.TypeTag == pb.ValueType_TYPE_STREAM {
+			if snap.GetTypeTag() == pb.ValueType_TYPE_STREAM {
 				return copyStreamGroups(cmd, srcKey, dstKey)
 			}
+
 			return nil
 		}(); err != nil {
 			cmd.Context.Abort()
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOne()
 	}
+
 	return
 }
 
@@ -740,26 +857,32 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 func handleMove(cmd *shared.Command, w *shared.Writer, _ *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("move")
+
 		return
 	}
 
 	dbIndex, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	if dbIndex != 0 {
 		w.WriteError("ERR DB index is out of range")
+
 		return
 	}
 
 	w.WriteError("ERR source and destination objects are the same")
+
 	return
 }
 
 func handleType(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("type")
+
 		return
 	}
 
@@ -771,13 +894,18 @@ func handleType(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, err := getAnySnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if snap == nil {
 			w.WriteSimpleString("none")
+
 			return
 		}
-		w.WriteSimpleString(typeTagToString(snap.TypeTag))
+
+		w.WriteSimpleString(typeTagToString(snap.GetTypeTag()))
 	}
+
 	return
 }

@@ -65,6 +65,7 @@ func (c *PubSubClient) Send(msg *PubSubMessage) bool {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+
 		return false
 	}
 	c.mu.Unlock()
@@ -75,6 +76,7 @@ func (c *PubSubClient) Send(msg *PubSubMessage) bool {
 	default:
 		// Channel full, drop message
 		c.droppedMessages.Add(1)
+
 		return false
 	}
 }
@@ -90,6 +92,7 @@ func (c *PubSubClient) SetBusy(busy bool) {
 func (c *PubSubClient) IsBusy() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.busy
 }
 
@@ -97,6 +100,7 @@ func (c *PubSubClient) IsBusy() bool {
 func (c *PubSubClient) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if !c.closed {
 		c.closed = true
 		close(c.done)

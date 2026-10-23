@@ -78,9 +78,11 @@ func TestJSON_NumIncrBy(t *testing.T) {
 func TestJSON_NumMultBy(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"a":5,"f":2.0}`)
+
 	if got := h.run(handleJSONNumMultBy, "k", "$.a", "4"); !strings.Contains(got, "[20]") {
 		t.Fatalf("NUMMULTBY $.a 4: %q", got)
 	}
+
 	if got := h.run(handleJSONNumMultBy, "k", ".f", "1.5"); !strings.Contains(got, "\r\n3\r\n") {
 		t.Fatalf("NUMMULTBY .f 1.5: %q", got)
 	}
@@ -97,6 +99,7 @@ func TestJSON_NumByNonNumber(t *testing.T) {
 	if got := h.run(handleJSONNumIncrBy, "k", "$.s", "1"); !strings.Contains(got, "[null]") {
 		t.Fatalf("NUMINCRBY $.s 1 should be [null]: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.s"); !strings.Contains(got, `["x"]`) {
 		t.Fatalf("$.s unchanged: %q", got)
 	}
@@ -108,6 +111,7 @@ func TestJSON_NumByErrors(t *testing.T) {
 	if got := h.run(handleJSONNumIncrBy, "missing", "$.a", "1"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("NUMINCRBY on missing key should error: %q", got)
 	}
+
 	h.run(handleJSONSet, "k", "$", `{"a":1}`)
 	// Non-number delta → error.
 	if got := h.run(handleJSONNumIncrBy, "k", "$.a", "abc"); !strings.Contains(got, "-ERR") {

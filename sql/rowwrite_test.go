@@ -34,12 +34,15 @@ import (
 // exercise Update/DeleteRow directly and inspect lastRowWrites.
 func newTestVTable(t *testing.T, srv *Server, schema *tableSchema) (*swytchVTable, func()) {
 	t.Helper()
+
 	conn, err := sqlite.OpenConn(":memory:")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+
 	if err := conn.SetModule(moduleName, srv.module); err != nil {
 		_ = conn.Close()
+
 		t.Fatalf("register module: %v", err)
 	}
 	// Persist schema via the DDL path so subsequent loadLiveSchema
@@ -47,14 +50,19 @@ func newTestVTable(t *testing.T, srv *Server, schema *tableSchema) (*swytchVTabl
 	ectx := srv.engine.NewContext()
 	if err := emitSchema(ectx, schema); err != nil {
 		_ = conn.Close()
+
 		t.Fatalf("emit schema: %v", err)
 	}
+
 	if err := ectx.Flush(); err != nil {
 		_ = conn.Close()
+
 		t.Fatalf("flush schema: %v", err)
 	}
+
 	if err := registerVTable(conn, schema); err != nil {
 		_ = conn.Close()
+
 		t.Fatalf("register vtable: %v", err)
 	}
 	// After CREATE VIRTUAL TABLE, SQLite has constructed a
@@ -74,6 +82,7 @@ func newTestVTable(t *testing.T, srv *Server, schema *tableSchema) (*swytchVTabl
 			t.Logf("conn close: %v", err)
 		}
 	}
+
 	return vt, cleanup
 }
 
@@ -111,22 +120,28 @@ func TestRowWriteCapturedOnInsert(t *testing.T) {
 	if len(vt.lastRowWrites) != 1 {
 		t.Fatalf("lastRowWrites len=%d, want 1", len(vt.lastRowWrites))
 	}
+
 	rw := vt.lastRowWrites[0]
 	if rw.Table != "users" {
 		t.Errorf("Table=%q, want users", rw.Table)
 	}
+
 	if rw.Kind != WriteInsert {
 		t.Errorf("Kind=%v, want WriteInsert", rw.Kind)
 	}
+
 	if len(rw.Cols) != 3 {
 		t.Fatalf("Cols len=%d, want 3", len(rw.Cols))
 	}
+
 	if rw.Cols[0].Kind != sqlite.TypeInteger || rw.Cols[0].Int != 42 {
 		t.Errorf("col 0 = %+v, want IntVal(42)", rw.Cols[0])
 	}
+
 	if rw.Cols[1].Kind != sqlite.TypeText || rw.Cols[1].Text != "alice" {
 		t.Errorf("col 1 = %+v, want TextVal(alice)", rw.Cols[1])
 	}
+
 	if rw.Cols[2].Kind != sqlite.TypeInteger || rw.Cols[2].Int != 30 {
 		t.Errorf("col 2 = %+v, want IntVal(30)", rw.Cols[2])
 	}
@@ -156,6 +171,7 @@ func TestRowWriteCapturedOnDelete(t *testing.T) {
 
 	// Insert a row, record its rowid.
 	cols := []sqlite.Value{sqlite.IntegerValue(7), sqlite.TextValue("bob")}
+
 	rowid, err := vt.doInsert(cols)
 	if err != nil {
 		t.Fatalf("doInsert: %v", err)
@@ -169,10 +185,12 @@ func TestRowWriteCapturedOnDelete(t *testing.T) {
 	if len(vt.lastRowWrites) != 1 {
 		t.Fatalf("lastRowWrites len=%d, want 1", len(vt.lastRowWrites))
 	}
+
 	rw := vt.lastRowWrites[0]
 	if rw.Kind != WriteDelete {
 		t.Errorf("Kind=%v, want WriteDelete", rw.Kind)
 	}
+
 	if rw.Cols[1].Text != "bob" {
 		t.Errorf("Cols[1]=%q, want bob (pre-deletion state)", rw.Cols[1].Text)
 	}

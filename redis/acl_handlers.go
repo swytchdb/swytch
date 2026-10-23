@@ -35,6 +35,7 @@ const aclSubcommandList = "LIST"
 func (h *Handler) handleAcl(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) == 0 {
 		w.WriteError("ERR wrong number of arguments for 'acl' command")
+
 		return
 	}
 
@@ -75,12 +76,14 @@ func (h *Handler) handleAcl(cmd *shared.Command, w *shared.Writer, conn *shared.
 func (h *Handler) handleAclSetUser(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'acl|setuser' command")
+
 		return
 	}
 
 	username := string(cmd.Args[1])
 
 	h.aclManager.mu.Lock()
+
 	user, exists := h.aclManager.users[username]
 	if !exists {
 		// Create new user with default disabled state
@@ -103,6 +106,7 @@ func (h *Handler) handleAclSetUser(cmd *shared.Command, w *shared.Writer) {
 
 	if err := h.aclManager.applyACLRules(user, rules); err != nil {
 		w.WriteError(fmt.Sprintf("ERR %v", err))
+
 		return
 	}
 
@@ -113,13 +117,16 @@ func (h *Handler) handleAclSetUser(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) != 2 {
 		w.WriteError("ERR wrong number of arguments for 'acl|getuser' command")
+
 		return
 	}
 
 	username := string(cmd.Args[1])
+
 	user := h.aclManager.GetUser(username)
 	if user == nil {
 		w.WriteNullBulkString()
+
 		return
 	}
 
@@ -131,15 +138,19 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 		w.WriteMap(5)
 
 		w.WriteBulkStringStr("flags")
+
 		flags := info["flags"].([]string)
 		w.WriteArray(len(flags))
+
 		for _, f := range flags {
 			w.WriteBulkStringStr(f)
 		}
 
 		w.WriteBulkStringStr("passwords")
+
 		passwords := info["passwords"].([]string)
 		w.WriteArray(len(passwords))
+
 		for _, p := range passwords {
 			w.WriteBulkStringStr(p)
 		}
@@ -148,15 +159,19 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 		w.WriteBulkStringStr(info["commands"].(string))
 
 		w.WriteBulkStringStr("keys")
+
 		keys := info["keys"].([]string)
 		w.WriteArray(len(keys))
+
 		for _, k := range keys {
 			w.WriteBulkStringStr(k)
 		}
 
 		w.WriteBulkStringStr("channels")
+
 		channels := info["channels"].([]string)
 		w.WriteArray(len(channels))
+
 		for _, c := range channels {
 			w.WriteBulkStringStr(c)
 		}
@@ -165,15 +180,19 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 		w.WriteArray(10)
 
 		w.WriteBulkStringStr("flags")
+
 		flags := info["flags"].([]string)
 		w.WriteArray(len(flags))
+
 		for _, f := range flags {
 			w.WriteBulkStringStr(f)
 		}
 
 		w.WriteBulkStringStr("passwords")
+
 		passwords := info["passwords"].([]string)
 		w.WriteArray(len(passwords))
+
 		for _, p := range passwords {
 			w.WriteBulkStringStr(p)
 		}
@@ -182,15 +201,19 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 		w.WriteBulkStringStr(info["commands"].(string))
 
 		w.WriteBulkStringStr("keys")
+
 		keys := info["keys"].([]string)
 		w.WriteArray(len(keys))
+
 		for _, k := range keys {
 			w.WriteBulkStringStr(k)
 		}
 
 		w.WriteBulkStringStr("channels")
+
 		channels := info["channels"].([]string)
 		w.WriteArray(len(channels))
+
 		for _, c := range channels {
 			w.WriteBulkStringStr(c)
 		}
@@ -201,16 +224,19 @@ func (h *Handler) handleAclGetUser(cmd *shared.Command, w *shared.Writer, conn *
 func (h *Handler) handleAclDelUser(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteError("ERR wrong number of arguments for 'acl|deluser' command")
+
 		return
 	}
 
 	count := 0
+
 	for _, arg := range cmd.Args[1:] {
 		username := string(arg)
 		if username == defaultUsername {
 			// Cannot delete default user
 			continue
 		}
+
 		if h.aclManager.DeleteUser(username) {
 			count++
 		}
@@ -225,6 +251,7 @@ func (h *Handler) handleAclList(w *shared.Writer) {
 	sort.Strings(users)
 
 	w.WriteArray(len(users))
+
 	for _, username := range users {
 		user := h.aclManager.GetUser(username)
 		if user != nil {
@@ -240,6 +267,7 @@ func (h *Handler) handleAclUsers(w *shared.Writer) {
 	sort.Strings(users)
 
 	w.WriteArray(len(users))
+
 	for _, username := range users {
 		w.WriteBulkStringStr(username)
 	}
@@ -252,26 +280,32 @@ func (h *Handler) handleAclCat(cmd *shared.Command, w *shared.Writer) {
 		names := shared.GetAllCategoryNames()
 		sort.Strings(names)
 		w.WriteArray(len(names))
+
 		for _, name := range names {
 			w.WriteBulkStringStr(name)
 		}
+
 		return
 	}
 
 	if len(cmd.Args) == 2 {
 		// List commands in category
 		catName := strings.ToLower(string(cmd.Args[1]))
+
 		cat, ok := shared.GetCategoryByName(catName)
 		if !ok {
 			w.WriteError(fmt.Sprintf("ERR unknown category '%s'", catName))
+
 			return
 		}
 
 		cmds := shared.GetCommandsInCategory(cat)
 		w.WriteArray(len(cmds))
+
 		for _, c := range cmds {
 			w.WriteBulkStringStr(c.String())
 		}
+
 		return
 	}
 
@@ -290,18 +324,22 @@ func (h *Handler) handleAclWhoami(w *shared.Writer, conn *shared.Connection) {
 // handleAclGenpass handles ACL GENPASS [bits]
 func (h *Handler) handleAclGenpass(cmd *shared.Command, w *shared.Writer) {
 	bits := 256 // default
+
 	if len(cmd.Args) >= 2 {
 		b, err := strconv.Atoi(string(cmd.Args[1]))
 		if err != nil || b <= 0 || b > 8192 {
 			w.WriteError("ERR ACL GENPASS bits must be between 1 and 8192")
+
 			return
 		}
+
 		bits = b
 	}
 
 	pass, err := GeneratePassword(bits)
 	if err != nil {
 		w.WriteError(fmt.Sprintf("ERR failed to generate password: %v", err))
+
 		return
 	}
 
@@ -312,11 +350,13 @@ func (h *Handler) handleAclGenpass(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleAclLoad(w *shared.Writer) {
 	if h.aclManager.aclFile == "" {
 		w.WriteError("ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (if you have a Redis.conf) to store users in the Redis config file.")
+
 		return
 	}
 
 	if err := h.aclManager.LoadFromFile(h.aclManager.aclFile); err != nil {
 		w.WriteError(fmt.Sprintf("ERR Error loading ACLs: %v", err))
+
 		return
 	}
 
@@ -327,11 +367,13 @@ func (h *Handler) handleAclLoad(w *shared.Writer) {
 func (h *Handler) handleAclSave(w *shared.Writer) {
 	if h.aclManager.aclFile == "" {
 		w.WriteError("ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (if you have a Redis.conf) to store users in the Redis config file.")
+
 		return
 	}
 
 	if err := h.aclManager.SaveToFile(""); err != nil {
 		w.WriteError(fmt.Sprintf("ERR Error saving ACLs: %v", err))
+
 		return
 	}
 
@@ -345,17 +387,20 @@ func (h *Handler) handleAclLog(cmd *shared.Command, w *shared.Writer) {
 		if arg == "RESET" {
 			h.aclManager.ResetLog()
 			w.WriteOK()
+
 			return
 		}
 
 		count, err := strconv.Atoi(string(cmd.Args[1]))
 		if err != nil {
 			w.WriteError("ERR invalid count argument")
+
 			return
 		}
 
 		entries := h.aclManager.GetLog(count)
 		h.writeACLLogEntries(w, entries)
+
 		return
 	}
 
@@ -366,6 +411,7 @@ func (h *Handler) handleAclLog(cmd *shared.Command, w *shared.Writer) {
 
 func (h *Handler) writeACLLogEntries(w *shared.Writer, entries []ACLLogEntry) {
 	w.WriteArray(len(entries))
+
 	for _, entry := range entries {
 		w.WriteMap(8)
 
@@ -399,27 +445,33 @@ func (h *Handler) writeACLLogEntries(w *shared.Writer, entries []ACLLogEntry) {
 func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 3 {
 		w.WriteError("ERR wrong number of arguments for 'acl|dryrun' command")
+
 		return
 	}
 
 	username := string(cmd.Args[1])
+
 	user := h.aclManager.GetUser(username)
 	if user == nil {
 		w.WriteError(fmt.Sprintf("ERR User '%s' not found", username))
+
 		return
 	}
 
 	// Parse the command
 	cmdName := strings.ToUpper(string(cmd.Args[2]))
+
 	cmdType, ok := shared.LookupCommandName(cmdName)
 	if !ok {
 		w.WriteError(fmt.Sprintf("ERR unknown command '%s'", cmdName))
+
 		return
 	}
 
 	// Check command permission first
 	if err := h.aclManager.CheckCommand(user, cmdType); err != nil {
 		w.WriteBulkStringStr(err.Error())
+
 		return
 	}
 
@@ -437,9 +489,11 @@ func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer) {
 	if e := h.cmds.Lookup(cmdType); e != nil {
 		isWrite = e.Flags&shared.FlagWrite != 0
 	}
+
 	for _, key := range keys {
 		if err := h.aclManager.CheckKey(user, key, isWrite); err != nil {
 			w.WriteBulkStringStr(err.Error())
+
 			return
 		}
 	}
@@ -452,6 +506,7 @@ func (h *Handler) handleAclDryrun(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) extractKeysForAcl(cmd *shared.Command) []string {
 	// Create a discard buffer for the null writer
 	var discardBuf bytes.Buffer
+
 	nullWriter := shared.NewWriter(&discardBuf)
 	db := h.dbManager.DB()
 
@@ -470,6 +525,7 @@ func (h *Handler) extractKeysForAcl(cmd *shared.Command) []string {
 	_, extractedKeys, _ := h.dispatchForKeyExtraction(cmd, nullWriter, db)
 
 	keys = extractedKeys
+
 	return keys
 }
 
@@ -527,6 +583,7 @@ func (h *Handler) handleAclHelp(w *shared.Writer) {
 	}
 
 	w.WriteArray(len(help))
+
 	for _, line := range help {
 		w.WriteBulkStringStr(line)
 	}

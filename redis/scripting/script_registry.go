@@ -60,6 +60,7 @@ func (r *ScriptRegistry) Get(sha1Hash string) ([]byte, bool) {
 	defer r.mu.RUnlock(token)
 
 	script, ok := r.scripts[sha1Hash]
+
 	return script, ok
 }
 
@@ -73,6 +74,7 @@ func (r *ScriptRegistry) Exists(sha1Hashes []string) []bool {
 	for i, sha := range sha1Hashes {
 		_, results[i] = r.scripts[sha]
 	}
+
 	return results
 }
 
@@ -96,5 +98,6 @@ func (r *ScriptRegistry) Count() int {
 func computeSHA1(data []byte) string {
 	h := sha1.New()
 	h.Write(data)
+
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -28,6 +28,7 @@ import (
 func handleZRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("zrem")
+
 		return
 	}
 
@@ -39,25 +40,33 @@ func handleZRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		removed := 0
+
 		for _, arg := range cmd.Args[1:] {
 			member := string(arg)
 			if snap.NetAdds != nil {
-				if _, has := snap.NetAdds[member]; has {
+				if _, has := snap.GetNetAdds()[member]; has {
 					removed++
+
 					if err := emitZSetRemove(cmd, key, member); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -66,12 +75,14 @@ func handleZRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		w.WriteInteger(int64(removed))
 	}
+
 	return
 }
 
 func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("zremrangebyscore")
+
 		return
 	}
 
@@ -79,9 +90,11 @@ func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 	keys = []string{key}
 
 	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+
 	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
+
 		return
 	}
 
@@ -90,26 +103,34 @@ func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		removed := 0
+
 		if snap.NetAdds != nil {
-			for member, elem := range snap.NetAdds {
-				score := elem.Data.GetFloatVal()
+			for member, elem := range snap.GetNetAdds() {
+				score := elem.GetData().GetFloatVal()
 				if scoreInRange(score, minScore, maxScore, minEx, maxEx) {
 					if err := emitZSetRemove(cmd, key, member); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
+
 					removed++
 				}
 			}
@@ -117,12 +138,14 @@ func handleZRemRangeByScore(cmd *shared.Command, w *shared.Writer, db *shared.Da
 
 		w.WriteInteger(int64(removed))
 	}
+
 	return
 }
 
 func handleZRemRangeByRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("zremrangebyrank")
+
 		return
 	}
 
@@ -132,11 +155,14 @@ func handleZRemRangeByRank(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 	start, err := strconv.Atoi(string(cmd.Args[1]))
 	if err != nil {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	stop, err := strconv.Atoi(string(cmd.Args[2]))
 	if err != nil {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -145,14 +171,19 @@ func handleZRemRangeByRank(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -164,6 +195,7 @@ func handleZRemRangeByRank(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 		if s < 0 {
 			s = length + s
 		}
+
 		if e < 0 {
 			e = length + e
 		}
@@ -172,32 +204,39 @@ func handleZRemRangeByRank(cmd *shared.Command, w *shared.Writer, db *shared.Dat
 		if s < 0 {
 			s = 0
 		}
+
 		if e >= length {
 			e = length - 1
 		}
 
 		if s > e || s >= length {
 			w.WriteInteger(0)
+
 			return
 		}
 
 		removed := 0
+
 		for i := s; i <= e; i++ {
 			if err := emitZSetRemove(cmd, key, sorted[i].Member); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			removed++
 		}
 
 		w.WriteInteger(int64(removed))
 	}
+
 	return
 }
 
 func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("zremrangebylex")
+
 		return
 	}
 
@@ -205,9 +244,11 @@ func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 	keys = []string{key}
 
 	minBound, ok1 := ParseLexBound(cmd.Args[1])
+
 	maxBound, ok2 := ParseLexBound(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max not valid string range item")
+
 		return
 	}
 
@@ -216,25 +257,33 @@ func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		removed := 0
+
 		if snap.NetAdds != nil {
-			for member := range snap.NetAdds {
+			for member := range snap.GetNetAdds() {
 				if InLexRange(member, minBound, maxBound) {
 					if err := emitZSetRemove(cmd, key, member); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
+
 					removed++
 				}
 			}
@@ -242,5 +291,6 @@ func handleZRemRangeByLex(cmd *shared.Command, w *shared.Writer, db *shared.Data
 
 		w.WriteInteger(int64(removed))
 	}
+
 	return
 }

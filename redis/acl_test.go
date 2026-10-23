@@ -39,15 +39,19 @@ func TestACLManager_DefaultUser(t *testing.T) {
 	if user == nil {
 		t.Fatal("default user should exist")
 	}
+
 	if !user.Enabled {
 		t.Error("default user should be enabled")
 	}
+
 	if !user.NoPass {
 		t.Error("default user should have nopass")
 	}
+
 	if !user.AllCommands {
 		t.Error("default user should have all commands")
 	}
+
 	if !user.AllKeys {
 		t.Error("default user should have all keys")
 	}
@@ -61,6 +65,7 @@ func TestACLManager_Authenticate(t *testing.T) {
 	if err != nil {
 		t.Errorf("should authenticate default user with empty password: %v", err)
 	}
+
 	if user.Name != "default" {
 		t.Errorf("authenticated user should be default, got %s", user.Name)
 	}
@@ -82,6 +87,7 @@ func TestACLManager_Authenticate(t *testing.T) {
 	if err != nil {
 		t.Errorf("should authenticate alice with correct password: %v", err)
 	}
+
 	if user.Name != "alice" {
 		t.Errorf("authenticated user should be alice, got %s", user.Name)
 	}
@@ -100,6 +106,7 @@ func TestACLManager_Authenticate(t *testing.T) {
 
 	// Authenticate disabled user
 	alice.Enabled = false
+
 	_, err = m.Authenticate("alice", "secret123")
 	if err == nil {
 		t.Error("should fail with disabled user")
@@ -167,6 +174,7 @@ func TestACLManager_CheckKey(t *testing.T) {
 	if err := m.CheckKey(user, "app:user:123", false); err != nil {
 		t.Errorf("should allow read app:user:123: %v", err)
 	}
+
 	if err := m.CheckKey(user, "app:user:123", true); err != nil {
 		t.Errorf("should allow write app:user:123: %v", err)
 	}
@@ -175,6 +183,7 @@ func TestACLManager_CheckKey(t *testing.T) {
 	if err := m.CheckKey(user, "readonly:data", false); err != nil {
 		t.Errorf("should allow read readonly:data: %v", err)
 	}
+
 	if err := m.CheckKey(user, "readonly:data", true); err == nil {
 		t.Error("should deny write readonly:data")
 	}
@@ -183,6 +192,7 @@ func TestACLManager_CheckKey(t *testing.T) {
 	if err := m.CheckKey(user, "writeonly:log", true); err != nil {
 		t.Errorf("should allow write writeonly:log: %v", err)
 	}
+
 	if err := m.CheckKey(user, "writeonly:log", false); err == nil {
 		t.Error("should deny read writeonly:log")
 	}
@@ -232,21 +242,27 @@ func TestACLManager_ApplyRules(t *testing.T) {
 	if !user.Enabled {
 		t.Error("user should be enabled")
 	}
+
 	if len(user.PasswordHashes) != 1 {
 		t.Error("user should have one password")
 	}
+
 	if !user.Categories[shared.CatRead] {
 		t.Error("user should have read category")
 	}
+
 	if user.Categories[shared.CatDangerous] {
 		t.Error("user should not have dangerous category")
 	}
+
 	if !user.Commands[shared.CmdSet] {
 		t.Error("user should have SET command")
 	}
+
 	if len(user.KeyPatterns) != 1 || user.KeyPatterns[0].Pattern != "app:*" {
 		t.Error("user should have app:* key pattern")
 	}
+
 	if len(user.ChannelPatterns) != 1 || user.ChannelPatterns[0] != "channel:*" {
 		t.Error("user should have channel:* pattern")
 	}
@@ -282,9 +298,11 @@ user bob off >password ~admin:* +@all
 	if alice == nil {
 		t.Fatal("alice user not loaded")
 	}
+
 	if !alice.Enabled {
 		t.Error("alice should be enabled")
 	}
+
 	if len(alice.PasswordHashes) != 1 {
 		t.Error("alice should have one password")
 	}
@@ -293,12 +311,14 @@ user bob off >password ~admin:* +@all
 	if bob == nil {
 		t.Fatal("bob user not loaded")
 	}
+
 	if bob.Enabled {
 		t.Error("bob should be disabled")
 	}
 
 	// Test save
 	saveFile := filepath.Join(tmpDir, "acl-save.conf")
+
 	m.aclFile = saveFile
 	if err := m.SaveToFile(""); err != nil {
 		t.Fatalf("failed to save ACL file: %v", err)
@@ -370,12 +390,15 @@ func TestACLManager_SecurityLog(t *testing.T) {
 
 	// Find the FLUSHALL entry - it should have count 2 (duplicate)
 	var flushEntry *ACLLogEntry
+
 	for i := range entries {
 		if entries[i].Object == "FLUSHALL" {
 			flushEntry = &entries[i]
+
 			break
 		}
 	}
+
 	if flushEntry == nil {
 		t.Error("FLUSHALL entry not found")
 	} else if flushEntry.Count != 2 {
@@ -384,6 +407,7 @@ func TestACLManager_SecurityLog(t *testing.T) {
 
 	// Reset log
 	m.ResetLog()
+
 	entries = m.GetLog(10)
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries after reset, got %d", len(entries))
@@ -404,40 +428,50 @@ func TestHandler_ACLCommands(t *testing.T) {
 
 	// Test ACL WHOAMI
 	buf.Reset()
+
 	cmd := &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("WHOAMI")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("default")) {
 		t.Errorf("ACL WHOAMI should return default, got %s", buf.String())
 	}
 
 	// Test ACL GENPASS
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("GENPASS")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if buf.Len() < 20 { // Should generate a reasonably long password
 		t.Errorf("ACL GENPASS should return a password, got %s", buf.String())
 	}
 
 	// Test ACL CAT - list categories
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("CAT")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("read")) {
 		t.Errorf("ACL CAT should include 'read' category, got %s", buf.String())
 	}
 
 	// Test ACL SETUSER
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("SETUSER"), []byte("testuser"), []byte("on"), []byte(">testpass"), []byte("~test:*"), []byte("+get")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("+OK")) {
 		t.Errorf("ACL SETUSER should return OK, got %s", buf.String())
 	}
 
 	// Test ACL GETUSER
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("GETUSER"), []byte("testuser")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	resp := buf.String()
 	if !strings.Contains(resp, "flags") {
 		t.Errorf("ACL GETUSER should return user info, got %s", resp)
@@ -445,40 +479,50 @@ func TestHandler_ACLCommands(t *testing.T) {
 
 	// Test ACL USERS
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("USERS")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("default")) || !bytes.Contains(buf.Bytes(), []byte("testuser")) {
 		t.Errorf("ACL USERS should list users, got %s", buf.String())
 	}
 
 	// Test ACL LIST
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("LIST")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("user default")) {
 		t.Errorf("ACL LIST should include user rules, got %s", buf.String())
 	}
 
 	// Test ACL DELUSER
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("DELUSER"), []byte("testuser")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte(":1")) {
 		t.Errorf("ACL DELUSER should return 1, got %s", buf.String())
 	}
 
 	// Verify user was deleted
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("GETUSER"), []byte("testuser")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("$-1")) && !bytes.Contains(buf.Bytes(), []byte("_\r\n")) {
 		t.Errorf("deleted user should return nil, got %s", buf.String())
 	}
 
 	// Test ACL HELP
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAcl, Args: [][]byte{[]byte("HELP")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("SETUSER")) {
 		t.Errorf("ACL HELP should include command info, got %s", buf.String())
 	}
@@ -520,19 +564,24 @@ func TestHandler_Authentication(t *testing.T) {
 
 	// Should reject commands other than AUTH
 	buf.Reset()
+
 	cmd := &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("foo")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("NOAUTH")) {
 		t.Errorf("should require auth, got %s", buf.String())
 	}
 
 	// AUTH with default user
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAuth, Args: [][]byte{[]byte("defaultpass")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("+OK")) {
 		t.Errorf("AUTH should succeed, got %s", buf.String())
 	}
+
 	if conn.User == nil || conn.User.Name != "default" {
 		t.Error("connection should be authenticated as default user")
 	}
@@ -542,20 +591,26 @@ func TestHandler_Authentication(t *testing.T) {
 
 	// AUTH with username and password
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAuth, Args: [][]byte{[]byte("testuser"), []byte("secret")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("+OK")) {
 		t.Errorf("AUTH should succeed, got %s", buf.String())
 	}
+
 	if conn.User == nil || conn.User.Name != "testuser" {
 		t.Error("connection should be authenticated as testuser")
 	}
 
 	// AUTH with wrong password
 	conn.User = nil
+
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdAuth, Args: [][]byte{[]byte("testuser"), []byte("wrongpass")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("WRONGPASS")) {
 		t.Errorf("AUTH should fail with wrong password, got %s", buf.String())
 	}
@@ -589,6 +644,7 @@ func TestHandler_CommandACL(t *testing.T) {
 
 	// Should allow GET (read command)
 	buf.Reset()
+
 	cmd := &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("foo")}}
 	h.ExecuteInto(cmd, w, conn)
 	// GET returns null for non-existent key, not NOPERM
@@ -598,16 +654,20 @@ func TestHandler_CommandACL(t *testing.T) {
 
 	// Should deny SET (write command)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdSet, Args: [][]byte{[]byte("foo"), []byte("bar")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("NOPERM")) {
 		t.Errorf("SET should be denied, got %s", buf.String())
 	}
 
 	// Should deny FLUSHDB (dangerous command)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdFlushDB, Args: nil}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("NOPERM")) {
 		t.Errorf("FLUSHDB should be denied, got %s", buf.String())
 	}
@@ -661,6 +721,7 @@ func TestACLManager_RuleCaseSensitivity_SetUser(t *testing.T) {
 		[]byte("SETUSER"), []byte("mixeduser"), []byte("on"), []byte(">MixedCasePw"), []byte("~KeyPattern:*"),
 	}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if !bytes.Contains(buf.Bytes(), []byte("+OK")) {
 		t.Fatalf("ACL SETUSER should return OK, got %s", buf.String())
 	}
@@ -668,6 +729,7 @@ func TestACLManager_RuleCaseSensitivity_SetUser(t *testing.T) {
 	if _, err := h.aclManager.Authenticate("mixeduser", "MixedCasePw"); err != nil {
 		t.Errorf("should authenticate with original-case password: %v", err)
 	}
+
 	if _, err := h.aclManager.Authenticate("mixeduser", "mixedcasepw"); err == nil {
 		t.Error("lowercased password should not authenticate")
 	}
@@ -696,6 +758,7 @@ func TestACLManager_RuleCaseSensitivity_KeyPatternMatching(t *testing.T) {
 	if err := m.CheckKey(user, "KeyPattern:1", false); err != nil {
 		t.Errorf("should allow access to KeyPattern:1: %v", err)
 	}
+
 	if err := m.CheckKey(user, "keypattern:1", false); err == nil {
 		t.Error("should deny access to keypattern:1 (pattern is case-sensitive)")
 	}
@@ -740,12 +803,15 @@ func TestACLManager_RuleCaseSensitivity_KeywordsStillCaseInsensitive(t *testing.
 	if user == nil {
 		t.Fatal("user x should have been created")
 	}
+
 	if !user.Enabled {
 		t.Error("ON keyword should enable the user regardless of case")
 	}
+
 	if !user.NoPass {
 		t.Error("NOPASS keyword should be honored regardless of case")
 	}
+
 	if !user.AllKeys {
 		t.Error("ALLKEYS keyword should be honored regardless of case")
 	}

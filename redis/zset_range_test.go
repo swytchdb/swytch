@@ -29,6 +29,7 @@ import (
 // seedZSet adds members a-e with scores 1-5 to "myzset" via ZADD.
 func seedZSet(t *testing.T, h *Handler, conn *shared.Connection) {
 	t.Helper()
+
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
 	cmd := &shared.Command{
@@ -43,6 +44,7 @@ func seedZSet(t *testing.T, h *Handler, conn *shared.Connection) {
 		},
 	}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != ":5\r\n" {
 		t.Fatalf("ZADD seed got %q, want %q", got, ":5\r\n")
 	}
@@ -53,6 +55,7 @@ func seedZSet(t *testing.T, h *Handler, conn *shared.Connection) {
 func TestZRange(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 	seedZSet(t, h, conn)
 
@@ -64,6 +67,7 @@ func TestZRange(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("0"), []byte("-1")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -78,6 +82,7 @@ func TestZRange(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("1"), []byte("2")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*2\r\n$1\r\nb\r\n$1\r\nc\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -92,6 +97,7 @@ func TestZRange(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("0"), []byte("-1"), []byte("WITHSCORES")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*10\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\ne\r\n$1\r\n5\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -106,6 +112,7 @@ func TestZRange(t *testing.T) {
 			Args: [][]byte{[]byte("nosuchkey"), []byte("0"), []byte("-1")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*0\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -118,6 +125,7 @@ func TestZRange(t *testing.T) {
 func TestZRevRange(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 	seedZSet(t, h, conn)
 
@@ -129,6 +137,7 @@ func TestZRevRange(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("0"), []byte("-1")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*5\r\n$1\r\ne\r\n$1\r\nd\r\n$1\r\nc\r\n$1\r\nb\r\n$1\r\na\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -143,6 +152,7 @@ func TestZRevRange(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("0"), []byte("-1"), []byte("WITHSCORES")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*10\r\n$1\r\ne\r\n$1\r\n5\r\n$1\r\nd\r\n$1\r\n4\r\n$1\r\nc\r\n$1\r\n3\r\n$1\r\nb\r\n$1\r\n2\r\n$1\r\na\r\n$1\r\n1\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -155,6 +165,7 @@ func TestZRevRange(t *testing.T) {
 func TestZRangeByScore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 	seedZSet(t, h, conn)
 
@@ -166,6 +177,7 @@ func TestZRangeByScore(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("-inf"), []byte("+inf")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -180,6 +192,7 @@ func TestZRangeByScore(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("1"), []byte("3")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)
@@ -243,6 +256,7 @@ func TestZRangeByScore(t *testing.T) {
 func TestZRevRangeByScore(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 	seedZSet(t, h, conn)
 
@@ -254,6 +268,7 @@ func TestZRevRangeByScore(t *testing.T) {
 			Args: [][]byte{[]byte("myzset"), []byte("+inf"), []byte("-inf")},
 		}
 		h.ExecuteInto(cmd, w, conn)
+
 		expected := "*5\r\n$1\r\ne\r\n$1\r\nd\r\n$1\r\nc\r\n$1\r\nb\r\n$1\r\na\r\n"
 		if got := buf.String(); got != expected {
 			t.Errorf("got %q, want %q", got, expected)

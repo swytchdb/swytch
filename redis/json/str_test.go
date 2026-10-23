@@ -39,6 +39,7 @@ func TestJSON_StrLen(t *testing.T) {
 	if got := h.run(handleJSONStrLen, "k", ".n"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("STRLEN .n should error: %q", got)
 	}
+
 	if got := h.run(handleJSONStrLen, "k", "$.n"); !strings.Contains(got, "*1\r\n$-1") {
 		t.Fatalf("STRLEN $.n should be [null]: %q", got)
 	}
@@ -55,6 +56,7 @@ func TestJSON_StrAppend(t *testing.T) {
 	if got := h.run(handleJSONStrAppend, "k", ".s", `" world"`); !strings.Contains(got, ":11\r\n") {
 		t.Fatalf("STRAPPEND .s: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".s"); !strings.Contains(got, `"hello world"`) {
 		t.Fatalf("after append: %q", got)
 	}
@@ -64,6 +66,7 @@ func TestJSON_StrAppend(t *testing.T) {
 	}
 	// Root string with the path omitted.
 	h.run(handleJSONSet, "r", "$", `"ab"`)
+
 	if got := h.run(handleJSONStrAppend, "r", `"cd"`); !strings.Contains(got, "*1\r\n:4") {
 		t.Fatalf("STRAPPEND root no-path: %q", got)
 	}
@@ -73,9 +76,11 @@ func TestJSON_StrAppend(t *testing.T) {
 	}
 	// Non-string target: legacy errors, JSONPath null.
 	h.run(handleJSONSet, "k", "$.n", `7`)
+
 	if got := h.run(handleJSONStrAppend, "k", ".n", `"x"`); !strings.Contains(got, "-ERR") {
 		t.Fatalf("STRAPPEND non-string target should error: %q", got)
 	}
+
 	if got := h.run(handleJSONStrAppend, "k", "$.n", `"x"`); !strings.Contains(got, "*1\r\n$-1") {
 		t.Fatalf("STRAPPEND $.n should be [null]: %q", got)
 	}

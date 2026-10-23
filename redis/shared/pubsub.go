@@ -53,6 +53,7 @@ func GetPubSubBroker() PubSubBroker {
 	if h == nil || h.broker == nil {
 		return nil
 	}
+
 	return h.broker
 }
 

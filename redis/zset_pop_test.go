@@ -29,6 +29,7 @@ import (
 func TestZPopMin(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	tests := []struct {
@@ -106,6 +107,7 @@ func TestZPopMin(t *testing.T) {
 				buf := &bytes.Buffer{}
 				w := shared.NewWriter(buf)
 				h.ExecuteInto(c.cmd, w, conn)
+
 				if got := buf.String(); got != c.expect {
 					t.Errorf("step %d: got %q, want %q", i, got, c.expect)
 				}
@@ -117,6 +119,7 @@ func TestZPopMin(t *testing.T) {
 func TestZPopMax(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	tests := []struct {
@@ -178,6 +181,7 @@ func TestZPopMax(t *testing.T) {
 				buf := &bytes.Buffer{}
 				w := shared.NewWriter(buf)
 				h.ExecuteInto(c.cmd, w, conn)
+
 				if got := buf.String(); got != c.expect {
 					t.Errorf("step %d: got %q, want %q", i, got, c.expect)
 				}
@@ -189,6 +193,7 @@ func TestZPopMax(t *testing.T) {
 func TestZMPop(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	tests := []struct {
@@ -253,6 +258,7 @@ func TestZMPop(t *testing.T) {
 				buf := &bytes.Buffer{}
 				w := shared.NewWriter(buf)
 				h.ExecuteInto(c.cmd, w, conn)
+
 				if got := buf.String(); got != c.expect {
 					t.Errorf("step %d: got %q, want %q", i, got, c.expect)
 				}

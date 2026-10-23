@@ -58,6 +58,7 @@ func (s *Server) newVTabModule() *sqlite.Module {
 			"table", opts.VTableName,
 			"args", opts.Args,
 		)
+
 		colDefs := opts.Args
 		if len(colDefs) == 0 {
 			return nil, nil, fmt.Errorf("swytch vtab %q requires at least one column", opts.VTableName)
@@ -69,6 +70,7 @@ func (s *Server) newVTabModule() *sqlite.Module {
 		}
 
 		declaration := fmt.Sprintf("CREATE TABLE x(%s)", strings.Join(colDefs, ", "))
+
 		return &swytchVTable{
 				server:    s,
 				name:      opts.VTableName,
@@ -163,11 +165,14 @@ type swytchVTable struct {
 // with uncommitted pending tips and miss the schema.
 func (v *swytchVTable) refreshSchema() error {
 	ectx := v.readContext()
+
 	schema, err := loadSchema(ectx, v.name)
 	if err != nil {
 		return fmt.Errorf("refresh schema %q: %w", v.name, err)
 	}
+
 	v.schema = schema
+
 	return nil
 }
 
@@ -180,6 +185,7 @@ func (v *swytchVTable) session() *session {
 	if v.conn == nil {
 		return nil
 	}
+
 	return v.server.sessionForConn(v.conn)
 }
 
@@ -235,6 +241,7 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 	if pkSlots := v.matchPKEquality(in.Constraints); pkSlots != nil {
 		out.ID = sqlite.IndexID{Num: planPKEquality}
 		out.EstimatedCost = 1
+
 		out.EstimatedRows = 1
 		for pkPos, cstrIdx := range pkSlots {
 			out.ConstraintUsage[cstrIdx] = sqlite.IndexConstraintUsage{
@@ -242,6 +249,7 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 				Omit:      true,
 			}
 		}
+
 		return out, nil
 	}
 
@@ -250,10 +258,12 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 	// Eq constraint. First index to fully match wins.
 	for idxI := range v.schema.Indexes {
 		idx := &v.schema.Indexes[idxI]
+
 		slots := v.matchIndexEquality(idx, in.Constraints)
 		if slots == nil {
 			continue
 		}
+
 		out.ID = sqlite.IndexID{Num: planIndexEquality, String: idx.Name}
 		if idx.Unique {
 			out.EstimatedCost = 2
@@ -262,12 +272,14 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 			out.EstimatedCost = 10
 			out.EstimatedRows = 8
 		}
+
 		for pos, cstrIdx := range slots {
 			out.ConstraintUsage[cstrIdx] = sqlite.IndexConstraintUsage{
 				ArgvIndex: pos + 1,
 				Omit:      true,
 			}
 		}
+
 		return out, nil
 	}
 
@@ -280,6 +292,7 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 		out.ID = sqlite.IndexID{Num: planIndexRange, String: res.idx.Name + "|" + code}
 		out.EstimatedCost = 100
 		out.EstimatedRows = 50
+
 		argv := 1
 		for _, cstrIdx := range res.eqSlots {
 			out.ConstraintUsage[cstrIdx] = sqlite.IndexConstraintUsage{
@@ -287,17 +300,20 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 			}
 			argv++
 		}
+
 		if res.lowerI >= 0 {
 			out.ConstraintUsage[res.lowerI] = sqlite.IndexConstraintUsage{
 				ArgvIndex: argv, Omit: false,
 			}
 			argv++
 		}
+
 		if res.upperI >= 0 {
 			out.ConstraintUsage[res.upperI] = sqlite.IndexConstraintUsage{
 				ArgvIndex: argv, Omit: false,
 			}
 		}
+
 		return out, nil
 	}
 
@@ -309,24 +325,30 @@ func (v *swytchVTable) BestIndex(in *sqlite.IndexInputs) (*sqlite.IndexOutputs, 
 // indexed column is missing a Usable Eq constraint.
 func (v *swytchVTable) matchIndexEquality(idx *indexSchema, constraints []sqlite.IndexConstraint) []int {
 	ords := idx.columnIndexes(v.schema)
+
 	slots := make([]int, len(ords))
 	for i := range slots {
 		slots[i] = -1
 	}
+
 	for i, c := range constraints {
 		if !c.Usable || c.Op != sqlite.IndexConstraintEq {
 			continue
 		}
+
 		for pos, ord := range ords {
 			if ord == c.Column && slots[pos] == -1 {
 				slots[pos] = i
+
 				break
 			}
 		}
 	}
+
 	if slices.Contains(slots, -1) {
 		return nil
 	}
+
 	return slots
 }
 
@@ -340,21 +362,26 @@ func (v *swytchVTable) matchPKEquality(constraints []sqlite.IndexConstraint) []i
 	if len(pkCols) == 0 {
 		return nil
 	}
+
 	result := make([]int, len(pkCols))
 	for i := range result {
 		result[i] = -1
 	}
+
 	for i, c := range constraints {
 		if !c.Usable || c.Op != sqlite.IndexConstraintEq {
 			continue
 		}
+
 		for pkPos, col := range pkCols {
 			if c.Column == col && result[pkPos] == -1 {
 				result[pkPos] = i
+
 				break
 			}
 		}
 	}
+
 	if slices.Contains(result, -1) {
 		return nil
 	}
@@ -378,8 +405,10 @@ type rangeMatch struct {
 // Returns nil when no index fits.
 func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 	var best *rangeMatch
+
 	for idxI := range v.schema.Indexes {
 		idx := &v.schema.Indexes[idxI]
+
 		ords := idx.columnIndexes(v.schema)
 		if len(ords) == 0 {
 			continue
@@ -389,30 +418,40 @@ func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 		eqSlots := make([]int, 0, len(ords))
 		for _, ord := range ords[:len(ords)-1] {
 			slot := -1
+
 			for i, c := range in.Constraints {
 				if !c.Usable || c.Op != sqlite.IndexConstraintEq {
 					continue
 				}
+
 				if c.Column == ord {
 					slot = i
+
 					break
 				}
 			}
+
 			if slot < 0 {
 				break
 			}
+
 			eqSlots = append(eqSlots, slot)
 		}
+
 		if len(eqSlots) != len(ords)-1 {
 			continue
 		}
+
 		lastOrd := ords[len(ords)-1]
 		lowerI, upperI := -1, -1
+
 		var lowerInc, upperInc bool
+
 		for i, c := range in.Constraints {
 			if !c.Usable || c.Column != lastOrd {
 				continue
 			}
+
 			// Only range constraints contribute bounds; SQLite evaluates the rest.
 			//exhaustive:ignore
 			switch c.Op {
@@ -434,9 +473,11 @@ func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 				}
 			}
 		}
+
 		if lowerI < 0 && upperI < 0 {
 			continue
 		}
+
 		best = &rangeMatch{
 			idx:      idx,
 			eqSlots:  eqSlots,
@@ -449,6 +490,7 @@ func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 		// bits, so no scoring complexity needed.
 		return best
 	}
+
 	return nil
 }
 
@@ -458,6 +500,7 @@ func (v *swytchVTable) bestRangeIndex(in *sqlite.IndexInputs) *rangeMatch {
 // (inclusive), 'e' (exclusive).
 func rangeCode(hasLower, hasUpper, lowerInc, upperInc bool) string {
 	var l, u byte = 'x', 'x'
+
 	if hasLower {
 		if lowerInc {
 			l = 'i'
@@ -465,6 +508,7 @@ func rangeCode(hasLower, hasUpper, lowerInc, upperInc bool) string {
 			l = 'e'
 		}
 	}
+
 	if hasUpper {
 		if upperInc {
 			u = 'i'
@@ -472,6 +516,7 @@ func rangeCode(hasLower, hasUpper, lowerInc, upperInc bool) string {
 			u = 'e'
 		}
 	}
+
 	return string([]byte{l, u})
 }
 
@@ -496,6 +541,7 @@ func (v *swytchVTable) rowIDForPK(pk string) int64 {
 	if v.schema.integerRowidFastPath() && len(pk) == 8 {
 		return int64(binary.BigEndian.Uint64([]byte(pk)) ^ (1 << 63))
 	}
+
 	return int64(xxh3.HashString(pk))
 }
 
@@ -515,7 +561,9 @@ func (v *swytchVTable) pkForRowID(rowid int64) (string, bool) {
 	if v.schema.integerRowidFastPath() {
 		return string(encodeIndexValue(sqlite.IntegerValue(rowid), affinityInteger)), true
 	}
+
 	pk, ok := v.pkByRowID[rowid]
+
 	return pk, ok
 }
 
@@ -526,6 +574,7 @@ func (v *swytchVTable) forgetRowID(rowid int64) {
 	if v.schema.integerRowidFastPath() {
 		return
 	}
+
 	delete(v.pkByRowID, rowid)
 }
 
@@ -543,6 +592,7 @@ func (v *swytchVTable) Update(params sqlite.VTableUpdateParams) (int64, error) {
 	if params.IsInsert() {
 		return v.doInsert(params.Columns)
 	}
+
 	return v.doUpdate(params)
 }
 
@@ -550,12 +600,16 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 	if !v.schema.hasPK() {
 		return 0, fmt.Errorf("table %q has no primary key", v.name)
 	}
+
 	if len(cols) != len(v.schema.Columns) {
 		return 0, fmt.Errorf("insert column count %d, want %d", len(cols), len(v.schema.Columns))
 	}
 
-	var pkStr string
-	var syntheticRowID int64
+	var (
+		pkStr          string
+		syntheticRowID int64
+	)
+
 	if v.schema.SyntheticPK {
 		seq := v.server.rowIDSeq.Add(1)
 		syntheticRowID = nextSyntheticRowID(time.Now(), v.server.engine.NodeID(), seq)
@@ -563,7 +617,9 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 	} else {
 		pkVals := v.schema.pkValues(cols)
 		pkAffs := v.schema.pkAffinities()
+
 		var err error
+
 		pkStr, err = encodePK(pkVals, pkAffs)
 		if err != nil {
 			return 0, err
@@ -580,6 +636,7 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 		if err != nil {
 			return err
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(v.name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -606,6 +663,7 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 		if _, _, err := ectx.GetSnapshot(key); err != nil {
 			return fmt.Errorf("subscribe row key: %w", err)
 		}
+
 		if v.schema.SyntheticPK {
 			if err := emitSyntheticPKPresence(ectx, key, syntheticRowID); err != nil {
 				return fmt.Errorf("emit synthetic rowid presence: %w", err)
@@ -613,13 +671,16 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 		} else if err := v.emitPKPresence(ectx, key, cols); err != nil {
 			return err
 		}
+
 		for i, col := range tbl.Columns {
 			if tbl.isPKColumn(i) {
 				continue
 			}
+
 			if cols[i].Type() == sqlite.TypeNull {
 				continue
 			}
+
 			eff := &pb.DataEffect{
 				Op:         pb.EffectOp_INSERT_OP,
 				Merge:      pb.MergeRule_LAST_WRITE_WINS,
@@ -629,6 +690,7 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 			if !setEncodedValue(eff, cols[i]) {
 				continue
 			}
+
 			if err := ectx.Emit(&pb.Effect{
 				Key:  []byte(key),
 				Kind: &pb.Effect_Data{Data: eff},
@@ -648,10 +710,13 @@ func (v *swytchVTable) doInsert(cols []sqlite.Value) (int64, error) {
 	if !v.schema.integerRowidFastPath() {
 		v.rememberRowID(rowid, pkStr)
 	}
+
 	v.recordRowWrites(v.rowWriteForTuple(WriteInsert, pkStr, cols))
+
 	if sess := v.session(); sess != nil {
 		sess.markRowDirty(v.name, pkStr)
 	}
+
 	return rowid, nil
 }
 
@@ -663,6 +728,7 @@ func (v *swytchVTable) loadLiveSchema(ectx *effects.Context) (*tableSchema, []ef
 	if err != nil {
 		return nil, nil, fmt.Errorf("read schema for %s: %w", v.name, err)
 	}
+
 	if snap == nil {
 		return nil, nil, fmt.Errorf("%w: %s", ErrNoSuchTable, v.name)
 	}
@@ -673,6 +739,7 @@ func (v *swytchVTable) loadLiveSchema(ectx *effects.Context) (*tableSchema, []ef
 	if err != nil {
 		return nil, nil, err
 	}
+
 	return tbl, tips, nil
 }
 
@@ -686,6 +753,7 @@ func (v *swytchVTable) emitIndexInserts(ectx *effects.Context, tbl *tableSchema,
 		if skip {
 			continue
 		}
+
 		entryKey := indexKey(idx.IndexID, encoded)
 
 		// Pin the entry key as part of the tx, always, so a
@@ -694,6 +762,7 @@ func (v *swytchVTable) emitIndexInserts(ectx *effects.Context, tbl *tableSchema,
 		if err != nil {
 			return fmt.Errorf("read index entry: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(entryKey),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -706,10 +775,12 @@ func (v *swytchVTable) emitIndexInserts(ectx *effects.Context, tbl *tableSchema,
 				return err
 			}
 		}
+
 		if err := emitIndexEntryInsert(ectx, idx.IndexID, encoded, pk); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -722,10 +793,12 @@ func (v *swytchVTable) emitIndexRemoves(ectx *effects.Context, tbl *tableSchema,
 		if skip {
 			continue
 		}
+
 		if err := emitIndexEntryRemove(ectx, idx.IndexID, encoded, pk); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -736,17 +809,21 @@ func (v *swytchVTable) emitIndexRemoves(ectx *effects.Context, tbl *tableSchema,
 func (v *swytchVTable) indexTupleForRow(idx *indexSchema, tbl *tableSchema, vals []sqlite.Value) ([]byte, bool) {
 	ords := idx.columnIndexes(tbl)
 	affs := idx.columnAffinities(tbl)
+
 	compVals := make([]sqlite.Value, len(ords))
 	for i, ord := range ords {
 		if ord < 0 {
 			return nil, true
 		}
+
 		v := vals[ord]
 		if v.Type() == sqlite.TypeNull {
 			return nil, true
 		}
+
 		compVals[i] = v
 	}
+
 	return encodeIndexKeyTuple(compVals, affs), false
 }
 
@@ -771,6 +848,7 @@ func (v *swytchVTable) emitPKPresence(ectx *effects.Context, key string, cols []
 			return fmt.Errorf("emit presence field %s.%s: %w", v.name, colName, err)
 		}
 	}
+
 	return nil
 }
 
@@ -792,6 +870,7 @@ func emitPresenceField(ectx *effects.Context, key, pkColName string, pkVal sqlit
 	if !setEncodedValue(eff, pkVal) {
 		return fmt.Errorf("primary key value cannot be NULL")
 	}
+
 	return ectx.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Data{Data: eff},
@@ -802,11 +881,13 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 	if !v.schema.hasPK() {
 		return 0, fmt.Errorf("table %q has no primary key", v.name)
 	}
+
 	if len(params.Columns) != len(v.schema.Columns) {
 		return 0, fmt.Errorf("update column count %d, want %d", len(params.Columns), len(v.schema.Columns))
 	}
 
 	oldRowID := params.OldRowID.Int64()
+
 	oldPK, ok := v.pkForRowID(oldRowID)
 	if !ok {
 		return 0, fmt.Errorf("update: unknown rowid %d (cursor did not yield it in this session)", oldRowID)
@@ -816,10 +897,13 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 	// immutable from SQL: newPK == oldPK by construction. Skip the
 	// PK-change branch entirely.
 	newPK := oldPK
+
 	if !v.schema.SyntheticPK {
 		newPKVals := v.schema.pkValues(params.Columns)
 		pkAffs := v.schema.pkAffinities()
+
 		var err error
+
 		newPK, err = encodePK(newPKVals, pkAffs)
 		if err != nil {
 			return 0, err
@@ -832,13 +916,17 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 		// serialises this via BeginTx so a concurrent mutation of
 		// the old row causes a retryable abort rather than silent
 		// data loss.
-		var pkChangeNewVals []sqlite.Value
-		var pkChangeOldVals []sqlite.Value
+		var (
+			pkChangeNewVals []sqlite.Value
+			pkChangeOldVals []sqlite.Value
+		)
+
 		if err := v.runWrite("pk-change update", func(ectx *effects.Context) error {
 			newVals, oldVals, err := v.emitPKChange(ectx, oldPK, newPK, params.Columns)
 			if err != nil {
 				return err
 			}
+
 			pkChangeNewVals = newVals
 			pkChangeOldVals = oldVals
 			// Two RowWriteEffects: one for the old row's DELETE,
@@ -848,13 +936,16 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 				v.rowWriteForTuple(WriteDelete, oldPK, oldVals)); err != nil {
 				return err
 			}
+
 			return v.emitRowWriteEffect(ectx,
 				v.rowWriteForTuple(WriteInsert, newPK, newVals))
 		}); err != nil {
 			return 0, err
 		}
+
 		newRowID := v.rowIDForPK(newPK)
 		v.forgetRowID(oldRowID)
+
 		if !v.schema.integerRowidFastPath() {
 			v.rememberRowID(newRowID, newPK)
 		}
@@ -867,10 +958,12 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 			v.rowWriteForTuple(WriteDelete, oldPK, pkChangeOldVals),
 			v.rowWriteForTuple(WriteInsert, newPK, pkChangeNewVals),
 		)
+
 		if sess := v.session(); sess != nil {
 			sess.markRowDirty(v.name, oldPK)
 			sess.markRowDirty(v.name, newPK)
 		}
+
 		return newRowID, nil
 	}
 
@@ -879,11 +972,13 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 	// entries before INSERTing new ones. Wrap in runRMW so a
 	// concurrent update to the same row aborts one of us.
 	var effectiveNewVals []sqlite.Value
+
 	if err := v.runWrite("same-pk update", func(ectx *effects.Context) error {
 		tbl, schemaTips, err := v.loadLiveSchema(ectx)
 		if err != nil {
 			return err
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(v.name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -895,6 +990,7 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 		if err != nil {
 			return fmt.Errorf("read old row for update: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(rowKey(v.schema.TableID, oldPK)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -921,10 +1017,13 @@ func (v *swytchVTable) doUpdate(params sqlite.VTableUpdateParams) (int64, error)
 	}); err != nil {
 		return 0, err
 	}
+
 	v.recordRowWrites(v.rowWriteForTuple(WriteUpdate, newPK, effectiveNewVals))
+
 	if sess := v.session(); sess != nil {
 		sess.markRowDirty(v.name, newPK)
 	}
+
 	return v.rowIDForPK(newPK), nil
 }
 
@@ -939,26 +1038,33 @@ func (v *swytchVTable) mergeSamePKRow(
 	newParams []sqlite.Value,
 ) []sqlite.Value {
 	out := make([]sqlite.Value, len(tbl.Columns))
+
 	pkVals := decodePK(pk, tbl.pkAffinities())
 	for i, col := range tbl.Columns {
 		if pkPos := pkPosition(tbl, i); pkPos >= 0 {
 			out[i] = pkVals[pkPos]
+
 			continue
 		}
+
 		val := newParams[i]
 		if !val.NoChange() {
 			out[i] = val
+
 			continue
 		}
 		// NoChange: pull from the old snapshot, or NULL if absent.
 		if oldSnap != nil {
-			if el, ok := oldSnap.NetAdds[col.Name]; ok && el.Data != nil {
-				out[i] = decodeValue(el.Data, col.Affinity)
+			if el, ok := oldSnap.GetNetAdds()[col.Name]; ok && el.GetData() != nil {
+				out[i] = decodeValue(el.GetData(), col.Affinity)
+
 				continue
 			}
 		}
+
 		out[i] = sqlite.Value{}
 	}
+
 	return out
 }
 
@@ -982,15 +1088,19 @@ func (v *swytchVTable) emitIndexDeltasSamePK(
 		// skip this index — entries are unchanged.
 		stale := false
 		anyChanged := false
+
 		for _, ord := range ords {
 			if ord < 0 {
 				stale = true
+
 				break
 			}
+
 			if !newVals[ord].NoChange() {
 				anyChanged = true
 			}
 		}
+
 		if stale || !anyChanged {
 			continue
 		}
@@ -999,22 +1109,27 @@ func (v *swytchVTable) emitIndexDeltasSamePK(
 		// old entry exists iff every component was non-NULL.
 		oldTuple := make([]sqlite.Value, len(ords))
 		oldAllPresent := true
+
 		if oldSnap != nil {
 			for i, ord := range ords {
-				el, ok := oldSnap.NetAdds[tbl.Columns[ord].Name]
-				if !ok || el.Data == nil {
+				el, ok := oldSnap.GetNetAdds()[tbl.Columns[ord].Name]
+				if !ok || el.GetData() == nil {
 					oldAllPresent = false
+
 					break
 				}
-				oldTuple[i] = decodeValue(el.Data, affs[i])
+
+				oldTuple[i] = decodeValue(el.GetData(), affs[i])
 				if oldTuple[i].Type() == sqlite.TypeNull {
 					oldAllPresent = false
+
 					break
 				}
 			}
 		} else {
 			oldAllPresent = false
 		}
+
 		if oldAllPresent {
 			oldEnc := encodeIndexKeyTuple(oldTuple, affs)
 			if err := emitIndexEntryRemove(ectx, idx.IndexID, oldEnc, pk); err != nil {
@@ -1028,41 +1143,52 @@ func (v *swytchVTable) emitIndexDeltasSamePK(
 		// unreachable).
 		newTuple := make([]sqlite.Value, len(ords))
 		newAllPresent := true
+
 		for i, ord := range ords {
 			nv := newVals[ord]
 			if nv.NoChange() {
 				nv = oldTuple[i]
 			}
+
 			if nv.Type() == sqlite.TypeNull {
 				newAllPresent = false
+
 				break
 			}
+
 			newTuple[i] = nv
 		}
+
 		if !newAllPresent {
 			continue
 		}
+
 		newEnc := encodeIndexKeyTuple(newTuple, affs)
 		entryKey := indexKey(idx.IndexID, newEnc)
+
 		_, tips, err := ectx.GetSnapshot(entryKey)
 		if err != nil {
 			return fmt.Errorf("read index entry for uniqueness: %w", err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(entryKey),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			return fmt.Errorf("pin index entry dep: %w", err)
 		}
+
 		if idx.Unique {
 			if err := checkUniqueBeforeInsert(ectx, idx.IndexID, newEnc, pk); err != nil {
 				return err
 			}
 		}
+
 		if err := emitIndexEntryInsert(ectx, idx.IndexID, newEnc, pk); err != nil {
 			return fmt.Errorf("emit index insert %s: %w", idx.Name, err)
 		}
 	}
+
 	return nil
 }
 
@@ -1074,16 +1200,20 @@ func (v *swytchVTable) emitSamePKUpdate(ectx *effects.Context, pk string, cols [
 		if v.schema.isPKColumn(i) {
 			continue
 		}
+
 		val := cols[i]
 		if val.NoChange() {
 			continue
 		}
+
 		if val.Type() == sqlite.TypeNull {
 			if err := emitKeyedRemove(ectx, key, col.Name); err != nil {
 				return fmt.Errorf("emit remove %s.%s: %w", v.name, col.Name, err)
 			}
+
 			continue
 		}
+
 		eff := &pb.DataEffect{
 			Op:         pb.EffectOp_INSERT_OP,
 			Merge:      pb.MergeRule_LAST_WRITE_WINS,
@@ -1093,6 +1223,7 @@ func (v *swytchVTable) emitSamePKUpdate(ectx *effects.Context, pk string, cols [
 		if !setEncodedValue(eff, val) {
 			continue
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Data{Data: eff},
@@ -1100,6 +1231,7 @@ func (v *swytchVTable) emitSamePKUpdate(ectx *effects.Context, pk string, cols [
 			return fmt.Errorf("emit update %s.%s: %w", v.name, col.Name, err)
 		}
 	}
+
 	return nil
 }
 
@@ -1122,6 +1254,7 @@ func (v *swytchVTable) emitPKChange(
 	if err != nil {
 		return nil, nil, err
 	}
+
 	if err := ectx.Emit(&pb.Effect{
 		Key:  []byte(schemaKey(v.name)),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1130,10 +1263,12 @@ func (v *swytchVTable) emitPKChange(
 	}
 
 	oldKey := rowKey(v.schema.TableID, oldPK)
+
 	oldSnap, tips, err := ectx.GetSnapshot(oldKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read old row for pk-change: %w", err)
 	}
+
 	if err := ectx.Emit(&pb.Effect{
 		Key:  []byte(oldKey),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1165,13 +1300,17 @@ func (v *swytchVTable) emitPKChange(
 	for i, col := range tbl.Columns {
 		val := cols[i]
 		if val.NoChange() && oldSnap != nil {
-			if el, ok := oldSnap.NetAdds[col.Name]; ok && el.Data != nil {
-				newVals[i] = decodeValue(el.Data, col.Affinity)
+			if el, ok := oldSnap.GetNetAdds()[col.Name]; ok && el.GetData() != nil {
+				newVals[i] = decodeValue(el.GetData(), col.Affinity)
+
 				continue
 			}
+
 			newVals[i] = sqlite.Value{}
+
 			continue
 		}
+
 		newVals[i] = val
 	}
 
@@ -1188,17 +1327,21 @@ func (v *swytchVTable) emitPKChange(
 	if _, _, err := ectx.GetSnapshot(newKey); err != nil {
 		return nil, nil, fmt.Errorf("subscribe new row key: %w", err)
 	}
+
 	if err := v.emitPKPresence(ectx, newKey, newVals); err != nil {
 		return nil, nil, err
 	}
+
 	for i, col := range tbl.Columns {
 		if tbl.isPKColumn(i) {
 			continue
 		}
+
 		val := newVals[i]
 		if val.Type() == sqlite.TypeNull {
 			continue
 		}
+
 		eff := &pb.DataEffect{
 			Op:         pb.EffectOp_INSERT_OP,
 			Merge:      pb.MergeRule_LAST_WRITE_WINS,
@@ -1208,6 +1351,7 @@ func (v *swytchVTable) emitPKChange(
 		if !setEncodedValue(eff, val) {
 			continue
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(newKey),
 			Kind: &pb.Effect_Data{Data: eff},
@@ -1215,6 +1359,7 @@ func (v *swytchVTable) emitPKChange(
 			return nil, nil, fmt.Errorf("emit pk-change insert %s.%s: %w", v.name, col.Name, err)
 		}
 	}
+
 	return newVals, oldVals, nil
 }
 
@@ -1225,17 +1370,20 @@ func (v *swytchVTable) emitPKChange(
 // mutating the row aborts one of us.
 func (v *swytchVTable) DeleteRow(rowID sqlite.Value) error {
 	id := rowID.Int64()
+
 	pk, ok := v.pkForRowID(id)
 	if !ok {
 		return fmt.Errorf("delete: unknown rowid %d", id)
 	}
 
 	var deletedVals []sqlite.Value
+
 	if err := v.runWrite("delete row", func(ectx *effects.Context) error {
 		tbl, schemaTips, err := v.loadLiveSchema(ectx)
 		if err != nil {
 			return err
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(schemaKey(v.name)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1247,6 +1395,7 @@ func (v *swytchVTable) DeleteRow(rowID sqlite.Value) error {
 		if err != nil {
 			return fmt.Errorf("read row %s: %w", pk, err)
 		}
+
 		if err := ectx.Emit(&pb.Effect{
 			Key:  []byte(rowKey(v.schema.TableID, pk)),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -1262,19 +1411,24 @@ func (v *swytchVTable) DeleteRow(rowID sqlite.Value) error {
 		} else {
 			deletedVals = make([]sqlite.Value, len(tbl.Columns))
 		}
+
 		if err := v.emitRowDelete(ectx, pk); err != nil {
 			return err
 		}
+
 		return v.emitRowWriteEffect(ectx,
 			v.rowWriteForTuple(WriteDelete, pk, deletedVals))
 	}); err != nil {
 		return err
 	}
+
 	v.forgetRowID(id)
 	v.recordRowWrites(v.rowWriteForTuple(WriteDelete, pk, deletedVals))
+
 	if sess := v.session(); sess != nil {
 		sess.markRowDirty(v.name, pk)
 	}
+
 	return nil
 }
 
@@ -1284,19 +1438,25 @@ func (v *swytchVTable) DeleteRow(rowID sqlite.Value) error {
 // the presence marker). NULL columns become zero Values.
 func (v *swytchVTable) valuesFromSnapshot(tbl *tableSchema, pk string, snap *pb.ReducedEffect) []sqlite.Value {
 	out := make([]sqlite.Value, len(tbl.Columns))
+
 	pkVals := decodePK(pk, tbl.pkAffinities())
 	for i, col := range tbl.Columns {
 		if pos := pkPosition(tbl, i); pos >= 0 {
 			out[i] = pkVals[pos]
+
 			continue
 		}
-		el, ok := snap.NetAdds[col.Name]
-		if !ok || el.Data == nil {
+
+		el, ok := snap.GetNetAdds()[col.Name]
+		if !ok || el.GetData() == nil {
 			out[i] = sqlite.Value{}
+
 			continue
 		}
-		out[i] = decodeValue(el.Data, col.Affinity)
+
+		out[i] = decodeValue(el.GetData(), col.Affinity)
 	}
+
 	return out
 }
 
@@ -1309,20 +1469,25 @@ func (v *swytchVTable) valuesFromSnapshot(tbl *tableSchema, pk string, snap *pb.
 // same Context.
 func (v *swytchVTable) emitRowDelete(ectx *effects.Context, pk string) error {
 	key := rowKey(v.schema.TableID, pk)
+
 	var errs []error
+
 	for _, col := range v.schema.Columns {
 		if err := emitKeyedRemove(ectx, key, col.Name); err != nil {
 			errs = append(errs, fmt.Errorf("emit remove %s.%s: %w", v.name, col.Name, err))
 		}
 	}
+
 	if v.schema.SyntheticPK {
 		if err := emitKeyedRemove(ectx, key, rowFieldSyntheticRowID); err != nil {
 			errs = append(errs, fmt.Errorf("emit remove %s.%s: %w", v.name, rowFieldSyntheticRowID, err))
 		}
 	}
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+
 	return nil
 }
 
@@ -1382,6 +1547,7 @@ func (c *swytchCursor) Filter(id sqlite.IndexID, argv []sqlite.Value) error {
 	if err != nil {
 		return err
 	}
+
 	c.observation = pred
 
 	// Read through the session's txContext when a transaction is
@@ -1443,6 +1609,7 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 		if len(argv) != len(pkCols) {
 			return Predicate{}, fmt.Errorf("pk-equality plan: expected %d args, got %d", len(pkCols), len(argv))
 		}
+
 		if len(pkCols) == 1 {
 			return PCmp(pkCols[0], OpEq, typedValueFromSqlite(argv[0])), nil
 		}
@@ -1451,6 +1618,7 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 		for i, ord := range pkCols {
 			terms[i] = PCmp(ord, OpEq, typedValueFromSqlite(argv[i]))
 		}
+
 		return PAnd(terms...), nil
 
 	case planIndexEquality:
@@ -1458,22 +1626,27 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 		if idx == nil {
 			return Predicate{}, fmt.Errorf("index %q not found in schema", id.String)
 		}
+
 		ords := idx.columnIndexes(c.vt.schema)
 		if len(argv) != len(ords) {
 			return Predicate{}, fmt.Errorf("index-equality plan: expected %d args, got %d", len(ords), len(argv))
 		}
+
 		for i, ord := range ords {
 			if ord < 0 {
 				return Predicate{}, fmt.Errorf("index %q column %d missing from schema", id.String, i)
 			}
 		}
+
 		if len(ords) == 1 {
 			return PCmp(ords[0], OpEq, typedValueFromSqlite(argv[0])), nil
 		}
+
 		terms := make([]Predicate, len(ords))
 		for i, ord := range ords {
 			terms[i] = PCmp(ord, OpEq, typedValueFromSqlite(argv[i]))
 		}
+
 		return PAnd(terms...), nil
 
 	case planIndexRange:
@@ -1481,12 +1654,15 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 		if sep < 0 || sep+3 != len(id.String) {
 			return Predicate{}, fmt.Errorf("malformed range plan tag %q", id.String)
 		}
+
 		name := id.String[:sep]
 		code := id.String[sep+1:]
+
 		idx := c.vt.findIndex(name)
 		if idx == nil {
 			return Predicate{}, fmt.Errorf("index %q not found in schema", name)
 		}
+
 		ords := idx.columnIndexes(c.vt.schema)
 		if len(ords) == 0 {
 			return Predicate{}, fmt.Errorf("index %q has no columns", name)
@@ -1496,18 +1672,23 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 		if len(argv) < eqCount {
 			return Predicate{}, fmt.Errorf("index-range plan: missing equality prefix")
 		}
+
 		terms := make([]Predicate, 0, len(ords)+1)
 		for i := range eqCount {
 			if ords[i] < 0 {
 				return Predicate{}, fmt.Errorf("index %q column %d missing", name, i)
 			}
+
 			terms = append(terms, PCmp(ords[i], OpEq, typedValueFromSqlite(argv[i])))
 		}
+
 		lastOrd := ords[len(ords)-1]
 		if lastOrd < 0 {
 			return Predicate{}, fmt.Errorf("index %q last column missing", name)
 		}
+
 		argPos := eqCount
+
 		switch code[0] { // lower
 		case 'i':
 			terms = append(terms, PCmp(lastOrd, OpGe, typedValueFromSqlite(argv[argPos])))
@@ -1516,18 +1697,22 @@ func (c *swytchCursor) buildObservationPredicate(id sqlite.IndexID, argv []sqlit
 			terms = append(terms, PCmp(lastOrd, OpGt, typedValueFromSqlite(argv[argPos])))
 			argPos++
 		}
+
 		switch code[1] { // upper
 		case 'i':
 			terms = append(terms, PCmp(lastOrd, OpLe, typedValueFromSqlite(argv[argPos])))
 		case 'e':
 			terms = append(terms, PCmp(lastOrd, OpLt, typedValueFromSqlite(argv[argPos])))
 		}
+
 		if len(terms) == 0 {
 			return PTrue(), nil
 		}
+
 		if len(terms) == 1 {
 			return terms[0], nil
 		}
+
 		return PAnd(terms...), nil
 
 	default:
@@ -1543,6 +1728,7 @@ func (v *swytchVTable) rowWriteForTuple(kind WriteKind, pk string, cols []sqlite
 	for i := range cols {
 		tuple[i] = typedValueFromSqlite(cols[i])
 	}
+
 	return RowWrite{
 		Table: v.name,
 		PK:    []byte(pk),
@@ -1583,6 +1769,7 @@ func (v *swytchVTable) runWrite(label string, body func(*effects.Context) error)
 	if sess := v.session(); sess != nil && sess.txContext != nil {
 		return body(sess.txContext)
 	}
+
 	return runRMW(v.server.engine, label, body)
 }
 
@@ -1596,6 +1783,7 @@ func (v *swytchVTable) readContext() *effects.Context {
 	if sess := v.session(); sess != nil && sess.txContext != nil {
 		return sess.txContext
 	}
+
 	return v.server.engine.NewContext()
 }
 
@@ -1624,6 +1812,7 @@ func typedValueFromSqlite(v sqlite.Value) TypedValue {
 	case sqlite.TypeNull:
 		return NullVal()
 	}
+
 	return NullVal()
 }
 
@@ -1632,63 +1821,81 @@ func (c *swytchCursor) filterPKEquality(ectx *effects.Context, argv []sqlite.Val
 	if len(pkCols) == 0 {
 		return fmt.Errorf("table %q has no primary key", c.vt.name)
 	}
+
 	if len(argv) != len(pkCols) {
 		return fmt.Errorf("pk-equality plan expects %d args, got %d", len(pkCols), len(argv))
 	}
+
 	pk, err := encodePK(argv, c.vt.schema.pkAffinities())
 	if err != nil {
 		return err
 	}
+
 	row, err := c.loadRow(ectx, pk)
 	if err != nil {
 		return err
 	}
+
 	if row != nil {
 		c.rows = append(c.rows, *row)
 	}
+
 	return nil
 }
 
 func (c *swytchCursor) filterFullScan(ectx *effects.Context) error {
 	seen := map[string]struct{}{}
-	var pks []string
-	var trieHits, pkMatches int
+
+	var (
+		pks                 []string
+		trieHits, pkMatches int
+	)
 	// Committed rows from the keytrie.
 	c.vt.server.engine.ScanKeys("", rowKeyPattern(c.vt.schema.TableID), func(key string) bool {
 		trieHits++
+
 		if pk, ok := parseRowKey(key, c.vt.schema.TableID); ok {
 			pkMatches++
+
 			if _, dup := seen[pk]; !dup {
 				seen[pk] = struct{}{}
 				pks = append(pks, pk)
 			}
 		}
+
 		return true
 	})
 	// Tx-dirty rows: Emits in the current tx haven't hit the
 	// keytrie yet (updateIndex only runs at Flush). Union them in
 	// so the tx sees its own inserts.
 	dirtyCount := 0
+
 	if sess := c.vt.session(); sess != nil {
 		for _, pk := range sess.dirtyRowPKs(c.vt.name) {
 			dirtyCount++
+
 			if _, dup := seen[pk]; !dup {
 				seen[pk] = struct{}{}
 				pks = append(pks, pk)
 			}
 		}
 	}
+
 	loadedNonNil := 0
+
 	for _, pk := range pks {
 		row, err := c.loadRow(ectx, pk)
 		if err != nil {
 			return err
 		}
+
 		if row != nil {
 			loadedNonNil++
+
 			c.rows = append(c.rows, *row)
 		}
 	}
+
 	c.vt.server.log.Debug("filterFullScan",
 		"table", c.vt.name,
 		"trie_hits", trieHits,
@@ -1697,6 +1904,7 @@ func (c *swytchCursor) filterFullScan(ectx *effects.Context) error {
 		"dirty_pks", dirtyCount,
 		"loaded_rows", loadedNonNil,
 		"pattern", rowKeyPattern(c.vt.schema.TableID))
+
 	return nil
 }
 
@@ -1705,19 +1913,24 @@ func (c *swytchCursor) filterIndexEquality(ectx *effects.Context, indexName stri
 	if idx == nil {
 		return fmt.Errorf("index %q no longer registered on table %q", indexName, c.vt.name)
 	}
+
 	if len(argv) != len(idx.Columns) {
 		return fmt.Errorf("index-equality plan expects %d args, got %d", len(idx.Columns), len(argv))
 	}
+
 	affs := idx.columnAffinities(c.vt.schema)
 	encoded := encodeIndexKeyTuple(argv, affs)
 	entryKey := indexKey(idx.IndexID, encoded)
+
 	snap, _, err := ectx.GetSnapshot(entryKey)
 	if err != nil {
 		return fmt.Errorf("read index entry %s: %w", entryKey, err)
 	}
+
 	if snap == nil {
 		return nil
 	}
+
 	return c.loadRowsForPKs(ectx, netAddPKs(snap))
 }
 
@@ -1727,16 +1940,20 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 	if sep < 0 || sep+3 != len(planTag) {
 		return fmt.Errorf("malformed range plan tag %q", planTag)
 	}
+
 	indexName := planTag[:sep]
 	code := planTag[sep+1:]
+
 	idx := c.vt.findIndex(indexName)
 	if idx == nil {
 		return fmt.Errorf("index %q no longer registered", indexName)
 	}
+
 	affs := idx.columnAffinities(c.vt.schema)
 	if len(affs) == 0 {
 		return fmt.Errorf("index %q has no columns", indexName)
 	}
+
 	eqCount := len(affs) - 1 // all but the last; last takes the range
 	lastAff := affs[len(affs)-1]
 
@@ -1744,20 +1961,29 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 	if len(argv) < eqCount {
 		return fmt.Errorf("range plan missing equality prefix args (need %d)", eqCount)
 	}
+
 	eqArgs := argv[:eqCount]
+
 	var eqPrefix []byte
 	if eqCount > 0 {
 		eqPrefix = encodeIndexKeyPrefix(eqArgs, affs, eqCount)
 	}
+
 	argPos := eqCount
-	var lowerEnc, upperEnc []byte
-	var lowerInc, upperInc bool
+
+	var (
+		lowerEnc, upperEnc []byte
+		lowerInc, upperInc bool
+	)
+
 	lowerSpec := code[0]
 	upperSpec := code[1]
+
 	if lowerSpec != 'x' {
 		if argPos >= len(argv) {
 			return fmt.Errorf("range plan missing lower-bound arg")
 		}
+
 		lowerEnc = encodeTupleComponent(argv[argPos], lastAff)
 		// Strip the trailing terminator for TEXT/BLOB so the
 		// half-tuple comparison is against the raw value ordering.
@@ -1768,17 +1994,21 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 		if len(affs) == 1 && (lastAff == affinityText || lastAff == affinityBlob) {
 			lowerEnc = encodeIndexValue(argv[argPos], lastAff)
 		}
+
 		lowerInc = lowerSpec == 'i'
 		argPos++
 	}
+
 	if upperSpec != 'x' {
 		if argPos >= len(argv) {
 			return fmt.Errorf("range plan missing upper-bound arg")
 		}
+
 		upperEnc = encodeTupleComponent(argv[argPos], lastAff)
 		if len(affs) == 1 && (lastAff == affinityText || lastAff == affinityBlob) {
 			upperEnc = encodeIndexValue(argv[argPos], lastAff)
 		}
+
 		upperInc = upperSpec == 'i'
 	}
 
@@ -1786,16 +2016,19 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 	// straight to the prefix+lower offset. Otherwise start from
 	// the index's own prefix.
 	prefix := indexKeyPrefix(idx.IndexID) + string(eqPrefix)
+
 	start := prefix
 	if lowerEnc != nil && !lowerInc {
 		start = indexKeyPrefix(idx.IndexID) + string(eqPrefix) + string(lowerEnc)
 	}
 
 	pkSet := map[string]struct{}{}
+
 	c.vt.server.engine.ScanKeys(start, glob(prefix), func(key string) bool {
 		if !strings.HasPrefix(key, prefix) {
 			return false
 		}
+
 		valueBytes := key[len(prefix):]
 
 		if lowerEnc != nil && lowerInc {
@@ -1803,6 +2036,7 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 				return true
 			}
 		}
+
 		if upperEnc != nil {
 			cmp := bytes.Compare([]byte(valueBytes), upperEnc)
 			if cmp > 0 || (cmp == 0 && !upperInc) {
@@ -1814,9 +2048,11 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 		if err != nil || snap == nil {
 			return err == nil
 		}
-		for pk := range snap.NetAdds {
+
+		for pk := range snap.GetNetAdds() {
 			pkSet[pk] = struct{}{}
 		}
+
 		return true
 	})
 
@@ -1824,6 +2060,7 @@ func (c *swytchCursor) filterIndexRange(ectx *effects.Context, planTag string, a
 	for pk := range pkSet {
 		pks = append(pks, pk)
 	}
+
 	return c.loadRowsForPKs(ectx, pks)
 }
 
@@ -1835,10 +2072,12 @@ func (c *swytchCursor) loadRowsForPKs(ectx *effects.Context, pks []string) error
 		if err != nil {
 			return err
 		}
+
 		if row != nil {
 			c.rows = append(c.rows, *row)
 		}
 	}
+
 	return nil
 }
 
@@ -1850,21 +2089,24 @@ func (v *swytchVTable) findIndex(name string) *indexSchema {
 			return &v.schema.Indexes[i]
 		}
 	}
+
 	return nil
 }
 
 // netAddPKs collects the field ids (= PKs) from a reduced index
 // entry snapshot.
 func netAddPKs(snap *pb.ReducedEffect) []string {
-	out := make([]string, 0, len(snap.NetAdds))
-	for pk := range snap.NetAdds {
+	out := make([]string, 0, len(snap.GetNetAdds()))
+	for pk := range snap.GetNetAdds() {
 		out = append(out, pk)
 	}
+
 	return out
 }
 
 func (c *swytchCursor) Next() error {
 	c.i++
+
 	return nil
 }
 
@@ -1872,10 +2114,12 @@ func (c *swytchCursor) Column(i int, _ bool) (sqlite.Value, error) {
 	if c.i >= len(c.rows) {
 		return sqlite.Value{}, io.EOF
 	}
+
 	row := c.rows[c.i]
 	if i < 0 || i >= len(row.cols) {
 		return sqlite.Value{}, fmt.Errorf("column %d out of range (have %d)", i, len(row.cols))
 	}
+
 	return row.cols[i], nil
 }
 
@@ -1883,6 +2127,7 @@ func (c *swytchCursor) RowID() (int64, error) {
 	if c.i >= len(c.rows) {
 		return 0, io.EOF
 	}
+
 	pk := c.rows[c.i].pk
 	id := c.vt.rowIDForPK(pk)
 	// Any PK shape that isn't single-column INTEGER uses a hashed
@@ -1891,6 +2136,7 @@ func (c *swytchCursor) RowID() (int64, error) {
 	if !c.vt.schema.integerRowidFastPath() {
 		c.vt.rememberRowID(id, pk)
 	}
+
 	return id, nil
 }
 
@@ -1909,28 +2155,35 @@ func (c *swytchCursor) loadRow(ectx *effects.Context, pk string) (*materialisedR
 	if err != nil {
 		return nil, err
 	}
+
 	if reduced == nil {
 		return nil, nil
 	}
 	// A row with no remaining fields has been fully deleted.
-	if len(reduced.NetAdds) == 0 {
+	if len(reduced.GetNetAdds()) == 0 {
 		return nil, nil
 	}
 
 	cols := make([]sqlite.Value, len(c.vt.schema.Columns))
+
 	pkVals := decodePK(pk, c.vt.schema.pkAffinities())
 	for i, col := range c.vt.schema.Columns {
 		if pos := pkPosition(c.vt.schema, i); pos >= 0 {
 			cols[i] = pkVals[pos]
+
 			continue
 		}
-		el, ok := reduced.NetAdds[col.Name]
-		if !ok || el.Data == nil {
+
+		el, ok := reduced.GetNetAdds()[col.Name]
+		if !ok || el.GetData() == nil {
 			cols[i] = defaultValueToSqlite(col.Default)
+
 			continue
 		}
-		cols[i] = decodeValue(el.Data, col.Affinity)
+
+		cols[i] = decodeValue(el.GetData(), col.Affinity)
 	}
+
 	return &materialisedRow{pk: pk, cols: cols}, nil
 }
 
@@ -1943,6 +2196,7 @@ func defaultValueToSqlite(d *defaultValue) sqlite.Value {
 	if d == nil || d.Kind == defaultKindNull {
 		return sqlite.Value{}
 	}
+
 	switch d.Kind {
 	case defaultKindInt:
 		return sqlite.IntegerValue(d.Int)
@@ -1953,6 +2207,7 @@ func defaultValueToSqlite(d *defaultValue) sqlite.Value {
 	case defaultKindBlob:
 		return sqlite.BlobValue(d.Blob)
 	}
+
 	return sqlite.Value{}
 }
 
@@ -1974,11 +2229,14 @@ const maxRMWRetries = 16
 // read-stale value.
 func runRMW(engine *effects.Engine, label string, body func(*effects.Context) error) error {
 	var lastErr error
+
 	for range maxRMWRetries {
 		ectx := engine.NewContext()
 		ectx.BeginTx()
+
 		if err := body(ectx); err != nil {
 			ectx.Abort()
+
 			return err
 		}
 		// Hold striped per-key locks across Flush. Without this,
@@ -1995,16 +2253,21 @@ func runRMW(engine *effects.Engine, label string, body func(*effects.Context) er
 		// overlap on a subset of keys.
 		unlock := lockEngineKeys(engine, ectx.PendingKeys())
 		err := ectx.Flush()
+
 		unlock()
+
 		if err == nil {
 			return nil
 		}
+
 		if !errors.Is(err, effects.ErrTxnAborted) {
 			return fmt.Errorf("%s flush: %w", label, err)
 		}
+
 		lastErr = err
 		// Loop: reads will pick up fresh state on the next attempt.
 	}
+
 	return fmt.Errorf("%s: exceeded %d retries: %w", label, maxRMWRetries, lastErr)
 }
 
@@ -2022,18 +2285,24 @@ func lockEngineKeys(engine *effects.Engine, keys []string) func() {
 	if len(keys) == 0 {
 		return func() {}
 	}
+
 	sorted := make([]string, len(keys))
 	copy(sorted, keys)
 	sort.Strings(sorted)
+
 	for _, k := range sorted {
 		engine.GetLock(k).Lock()
 	}
+
 	unlocked := false
+
 	return func() {
 		if unlocked {
 			return
 		}
+
 		unlocked = true
+
 		for _, s := range slices.Backward(sorted) {
 			engine.GetLock(s).Unlock()
 		}

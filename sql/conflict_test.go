@@ -51,9 +51,11 @@ func checkConflict(a, b *txn) bool {
 	if aHitsB := writesHitObs(a.writes, b.observations); aHitsB {
 		return true
 	}
+
 	if bHitsA := writesHitObs(b.writes, a.observations); bHitsA {
 		return true
 	}
+
 	return false
 }
 
@@ -62,16 +64,19 @@ func checkConflict(a, b *txn) bool {
 func writesHitObs(writes []RowWrite, obs []observation) bool {
 	for i := range writes {
 		w := &writes[i]
+
 		for j := range obs {
 			o := &obs[j]
 			if w.Table != o.table {
 				continue
 			}
+
 			if Evaluate(&o.pred, w) {
 				return true
 			}
 		}
 	}
+
 	return false
 }
 
@@ -97,6 +102,7 @@ func TestConflictMeetingRoom(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		observations: []observation{
@@ -133,6 +139,7 @@ func TestConflictPhantomInsert(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		// B doesn't care to observe anything; it just inserts.
@@ -165,6 +172,7 @@ func TestConflictAtLeastOneAdmin(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		observations: []observation{
@@ -206,6 +214,7 @@ func TestConflictTemporalOverlap(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		observations: []observation{
@@ -235,6 +244,7 @@ func TestConflictDisjoint(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		observations: []observation{
@@ -264,6 +274,7 @@ func TestConflictDifferentTable(t *testing.T) {
 			}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		observations: []observation{
@@ -292,6 +303,7 @@ func TestConflictFullScanTableLock(t *testing.T) {
 			{Table: "logs", Kind: WriteInsert, Cols: []TypedValue{TextVal("x")}},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		writes: []RowWrite{
@@ -316,6 +328,7 @@ func TestConflictMultipleObservations(t *testing.T) {
 			{table: "people", pred: PCmp(1, OpGt, IntVal(50))},
 		},
 	}
+
 	tb := &txn{
 		name: "B",
 		writes: []RowWrite{
@@ -367,9 +380,11 @@ func TestConflictPairwiseThreeTxns(t *testing.T) {
 	if !checkConflict(ta, tb) {
 		t.Error("(A,B) must conflict")
 	}
+
 	if !checkConflict(tb, tc) {
 		t.Error("(B,C) must conflict")
 	}
+
 	if checkConflict(ta, tc) {
 		t.Error("(A,C) must not conflict — writes hit different tables and no overlapping obs")
 	}

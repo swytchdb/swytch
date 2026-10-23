@@ -32,6 +32,7 @@ func TestJSON_Debug(t *testing.T) {
 	if got := h.run(handleJSONDebug, "MEMORY", "d", ".a"); !strings.HasPrefix(got, ":") {
 		t.Errorf("MEMORY .a = %q, want bare integer", got)
 	}
+
 	if got := h.run(handleJSONDebug, "MEMORY", "d", "$..a"); !strings.HasPrefix(got, "*2\r\n:") {
 		t.Errorf("MEMORY $..a = %q, want 2-element integer array", got)
 	}
@@ -43,6 +44,7 @@ func TestJSON_Debug(t *testing.T) {
 	if got := h.run(handleJSONDebug, "MEMORY", "nokey", ".a"); got != ":0\r\n" {
 		t.Errorf("MEMORY missing legacy = %q", got)
 	}
+
 	if got := h.run(handleJSONDebug, "MEMORY", "nokey", "$.a"); got != "*0\r\n" {
 		t.Errorf("MEMORY missing jsonpath = %q", got)
 	}
@@ -50,6 +52,7 @@ func TestJSON_Debug(t *testing.T) {
 	if got := h.run(handleJSONDebug, "MEMORY", "d", ".nope"); !strings.HasPrefix(got, "-ERR") {
 		t.Errorf("MEMORY .nope = %q", got)
 	}
+
 	if got := h.run(handleJSONDebug, "MEMORY", "d", "$.nope"); got != "*0\r\n" {
 		t.Errorf("MEMORY $.nope = %q", got)
 	}

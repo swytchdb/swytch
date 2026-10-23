@@ -46,6 +46,7 @@ func TestEngineAcceptsObservationEffect(t *testing.T) {
 		PCmp(0, OpEq, IntVal(5)),
 		PNot(PIsNull(1)),
 	)
+
 	obs := &pb.Effect{
 		Key: []byte("s/users"),
 		Kind: &pb.Effect_Observation{Observation: &pb.ObservationEffect{
@@ -55,18 +56,22 @@ func TestEngineAcceptsObservationEffect(t *testing.T) {
 	if err := ctx.Emit(obs); err != nil {
 		t.Fatalf("emit observation: %v", err)
 	}
+
 	if err := ctx.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
 	// After flush the key should be visible to ScanKeys.
 	var found bool
+
 	eng.ScanKeys("", "s/users", func(key string) bool {
 		if key == "s/users" {
 			found = true
 		}
+
 		return true
 	})
+
 	if !found {
 		t.Error("s/users should be in the key index after observation emit")
 	}
@@ -91,6 +96,7 @@ func TestEngineAcceptsRowWriteEffect(t *testing.T) {
 		Kind:  WriteInsert,
 		Cols:  []TypedValue{IntVal(7), TextVal("alice")},
 	}
+
 	eff := &pb.Effect{
 		Key:  []byte("s/users"),
 		Kind: &pb.Effect_RowWrite{RowWrite: rowWriteToProto(rw)},
@@ -98,6 +104,7 @@ func TestEngineAcceptsRowWriteEffect(t *testing.T) {
 	if err := ctx.Emit(eff); err != nil {
 		t.Fatalf("emit row-write: %v", err)
 	}
+
 	if err := ctx.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -128,6 +135,7 @@ func TestWritePathEmitsRowWriteEffect(t *testing.T) {
 	if err := db.QueryRow("SELECT name FROM users WHERE id = 99").Scan(&name); err != nil {
 		t.Fatalf("select: %v", err)
 	}
+
 	if name != "bob" {
 		t.Errorf("got name=%q, want bob", name)
 	}

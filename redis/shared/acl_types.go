@@ -79,12 +79,14 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 	for i, hash := range u.PasswordHashes {
 		passwords[i] = string(hash)
 	}
+
 	info["passwords"] = passwords
 
 	if u.AllCommands {
 		info["commands"] = "+@all"
 	} else {
 		var cmds []string
+
 		for cat, allowed := range u.Categories {
 			name := GetCategoryName(cat)
 			if allowed {
@@ -93,6 +95,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 				cmds = append(cmds, "-@"+name)
 			}
 		}
+
 		for cmd, allowed := range u.Commands {
 			name := cmd.String()
 			if allowed {
@@ -101,6 +104,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 				cmds = append(cmds, "-"+name)
 			}
 		}
+
 		info["commands"] = strings.Join(cmds, " ")
 	}
 
@@ -108,6 +112,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 		info["keys"] = []string{"~*"}
 	} else {
 		var keys []string
+
 		for _, kp := range u.KeyPatterns {
 			switch kp.Type {
 			case KeyPatternReadWrite:
@@ -118,6 +123,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 				keys = append(keys, "%W~"+kp.Pattern)
 			}
 		}
+
 		info["keys"] = keys
 	}
 
@@ -128,6 +134,7 @@ func (u *ACLUser) GetUserForDisplay() map[string]any {
 		for _, cp := range u.ChannelPatterns {
 			chans = append(chans, "&"+cp)
 		}
+
 		info["channels"] = chans
 	}
 
@@ -141,19 +148,24 @@ func (u *ACLUser) getFlags() []string {
 	} else {
 		flags = append(flags, "off")
 	}
+
 	if u.AllKeys {
 		flags = append(flags, "allkeys")
 	}
+
 	if u.AllChannels {
 		flags = append(flags, "allchannels")
 	}
+
 	if u.AllCommands {
 		flags = append(flags, "allcommands")
 	}
+
 	if u.NoPass {
 		flags = append(flags, "nopass")
 	} else if len(u.PasswordHashes) == 0 {
 		flags = append(flags, "nopass")
 	}
+
 	return flags
 }

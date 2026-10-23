@@ -48,6 +48,7 @@ const maxLuaToRESPDepth = 1000
 func luaToRESPWithDepth(val lua.LValue, w *shared.Writer, depth int) {
 	if depth > maxLuaToRESPDepth {
 		w.WriteError("ERR reached lua stack limit")
+
 		return
 	}
 
@@ -75,12 +76,15 @@ func luaToRESPWithDepth(val lua.LValue, w *shared.Writer, depth int) {
 		if errVal := v.RawGetString("err"); errVal != lua.LNil {
 			if errStr, ok := errVal.(lua.LString); ok {
 				w.WriteError(string(errStr))
+
 				return
 			}
 		}
+
 		if okVal := v.RawGetString("ok"); okVal != lua.LNil {
 			if okStr, ok := okVal.(lua.LString); ok {
 				w.WriteSimpleString(string(okStr))
+
 				return
 			}
 		}
@@ -89,6 +93,7 @@ func luaToRESPWithDepth(val lua.LValue, w *shared.Writer, depth int) {
 		if doubleVal := v.RawGetString("double"); doubleVal != lua.LNil {
 			if num, ok := doubleVal.(lua.LNumber); ok {
 				w.WriteDouble(float64(num))
+
 				return
 			}
 		}
@@ -96,6 +101,7 @@ func luaToRESPWithDepth(val lua.LValue, w *shared.Writer, depth int) {
 		// Regular array table
 		length := v.Len()
 		w.WriteArray(length)
+
 		for i := 1; i <= length; i++ {
 			luaToRESPWithDepth(v.RawGetInt(i), w, depth+1)
 		}
@@ -127,6 +133,7 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		// Redis converts status replies to tables with {ok=status}
 		tbl := L.NewTable()
 		tbl.RawSetString("ok", lua.LString(data[1:end]))
+
 		return tbl, end + 2, nil
 
 	case shared.RESPError: // -
@@ -137,6 +144,7 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		// Return as table {err=message}
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString(data[1:end]))
+
 		return tbl, end + 2, nil
 
 	case shared.RESPInteger: // :
@@ -144,10 +152,12 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		n, err := strconv.ParseInt(string(data[1:end]), 10, 64)
 		if err != nil {
 			return lua.LNil, 0, err
 		}
+
 		return lua.LNumber(n), end + 2, nil
 
 	case shared.RESPBulkString: // $
@@ -155,18 +165,22 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		length, err := strconv.Atoi(string(data[1:end]))
 		if err != nil {
 			return lua.LNil, 0, err
 		}
+
 		if length == -1 {
 			// Null bulk string -> false (Redis Lua convention)
 			return lua.LFalse, end + 2, nil
 		}
+
 		start := end + 2
 		if start+length+2 > len(data) {
 			return lua.LNil, 0, nil
 		}
+
 		return lua.LString(data[start : start+length]), start + length + 2, nil
 
 	case shared.RESPArray: // *
@@ -174,25 +188,31 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		count, err := strconv.Atoi(string(data[1:end]))
 		if err != nil {
 			return lua.LNil, 0, err
 		}
+
 		if count == -1 {
 			// Null array -> false (Redis Lua convention)
 			return lua.LFalse, end + 2, nil
 		}
 
 		tbl := L.NewTable()
+
 		offset := end + 2
 		for i := range count {
 			val, consumed, err := respToLua(L, data[offset:])
 			if err != nil {
 				return lua.LNil, 0, err
 			}
+
 			offset += consumed
+
 			tbl.RawSetInt(i+1, val)
 		}
+
 		return tbl, offset, nil
 
 	case shared.RESP3Null: // _
@@ -200,6 +220,7 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		return lua.LFalse, end + 2, nil
 
 	case shared.RESP3Boolean: // #
@@ -207,9 +228,11 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		if len(data) > 1 && data[1] == 't' {
 			return lua.LTrue, end + 2, nil
 		}
+
 		return lua.LFalse, end + 2, nil
 
 	case shared.RESP3Double: // ,
@@ -217,10 +240,12 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		f, err := strconv.ParseFloat(string(data[1:end]), 64)
 		if err != nil {
 			return lua.LNil, 0, err
 		}
+
 		return lua.LNumber(f), end + 2, nil
 
 	case shared.RESP3Map: // %
@@ -228,27 +253,33 @@ func respToLua(L *lua.LState, data []byte) (lua.LValue, int, error) {
 		if end == -1 {
 			return lua.LNil, 0, nil
 		}
+
 		count, err := strconv.Atoi(string(data[1:end]))
 		if err != nil {
 			return lua.LNil, 0, err
 		}
 
 		tbl := L.NewTable()
+
 		offset := end + 2
 		for range count {
 			key, consumed, err := respToLua(L, data[offset:])
 			if err != nil {
 				return lua.LNil, 0, err
 			}
+
 			offset += consumed
 
 			val, consumed, err := respToLua(L, data[offset:])
 			if err != nil {
 				return lua.LNil, 0, err
 			}
+
 			offset += consumed
+
 			tbl.RawSet(key, val)
 		}
+
 		return tbl, offset, nil
 
 	default:
@@ -287,5 +318,6 @@ func luaArgsToBytes(L *lua.LState, startArg int) [][]byte {
 			args[i] = []byte(val.String())
 		}
 	}
+
 	return args
 }

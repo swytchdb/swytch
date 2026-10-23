@@ -53,6 +53,7 @@ func TestInterceptShowSet(t *testing.T) {
 		if ok != tc.want {
 			t.Errorf("interceptShowSet(%q) intercepted=%v, want %v", tc.query, ok, tc.want)
 		}
+
 		if tc.want && stmt == nil {
 			t.Errorf("interceptShowSet(%q) returned nil stmt", tc.query)
 		}
@@ -170,18 +171,22 @@ func TestReadColumnRoundtrip(t *testing.T) {
 	if intVal != 42 {
 		t.Errorf("col 0 = %d, want 42", intVal)
 	}
+
 	floatVal := readColumn(stmt, 1).(float64)
 	if floatVal != 3.14 {
 		t.Errorf("col 1 = %v, want 3.14", floatVal)
 	}
+
 	textVal := readColumn(stmt, 2).(string)
 	if textVal != "hello" {
 		t.Errorf("col 2 = %q, want %q", textVal, "hello")
 	}
+
 	blobVal := readColumn(stmt, 3).([]byte)
 	if string(blobVal) != "\xde\xad\xbe\xef" {
 		t.Errorf("col 3 = %x, want deadbeef", blobVal)
 	}
+
 	if readColumn(stmt, 4) != nil {
 		t.Errorf("col 4 = %v, want nil", readColumn(stmt, 4))
 	}

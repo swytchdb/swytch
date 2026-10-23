@@ -157,21 +157,26 @@ func geoHashDecode(hash uint64) (longitude, latitude float64) {
 	if longitude > GEO_LON_MAX {
 		longitude = GEO_LON_MAX
 	}
+
 	if longitude < GEO_LON_MIN {
 		longitude = GEO_LON_MIN
 	}
+
 	if latitude > GEO_LAT_MAX {
 		latitude = GEO_LAT_MAX
 	}
+
 	if latitude < GEO_LAT_MIN {
 		latitude = GEO_LAT_MIN
 	}
+
 	return
 }
 
 // geoHashToString converts a geohash to base32 string (11 characters for 52 bits)
 func geoHashToString(hash uint64) string {
 	const base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
 	var result [11]byte
 
 	for i := range 11 {
@@ -183,8 +188,10 @@ func geoHashToString(hash uint64) string {
 		} else {
 			idx = int((hash >> (52 - ((i + 1) * 5))) & 0x1f)
 		}
+
 		result[i] = base32[idx]
 	}
+
 	return string(result[:])
 }
 

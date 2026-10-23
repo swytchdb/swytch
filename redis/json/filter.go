@@ -36,6 +36,7 @@ func (f *filterExpr) test(cur *Value) bool {
 	if f == nil || f.root == nil {
 		return false
 	}
+
 	return f.root.test(cur)
 }
 
@@ -61,9 +62,11 @@ func (p existsPred) test(cur *Value) bool {
 	if !ok || v == nil || v.Kind == KindNull {
 		return false
 	}
+
 	if v.Kind == KindBool {
 		return v.Bool
 	}
+
 	return true
 }
 
@@ -76,17 +79,21 @@ type cmpPred struct {
 
 func (p cmpPred) test(cur *Value) bool {
 	lv, lok := p.l.value(cur)
+
 	rv, rok := p.r.value(cur)
 	if p.op == "=~" {
 		if !lok || lv == nil || lv.Kind != KindString || p.re == nil {
 			return false
 		}
+
 		return p.re.MatchString(lv.Str)
 	}
+
 	if !lok || !rok {
 		// A missing operand satisfies only "!=" (present differs from absent).
 		return p.op == "!=" && lok != rok
 	}
+
 	return compareValues(p.op, lv, rv)
 }
 
@@ -104,24 +111,29 @@ func (o pathOperand) value(cur *Value) (*Value, bool) {
 		if v == nil {
 			return nil, false
 		}
+
 		switch s.kind {
 		case segKey:
 			if v.Kind != KindObject {
 				return nil, false
 			}
+
 			cv, ok := v.objGet(s.key)
 			if !ok {
 				return nil, false
 			}
+
 			v = cv
 		case segIndex:
 			if v.Kind != KindArray {
 				return nil, false
 			}
+
 			i, ok := normIndex(s.idx, len(v.Arr))
 			if !ok {
 				return nil, false
 			}
+
 			v = v.Arr[i]
 		case segWildcard, segSlice, segUnion, segRecursive, segFilter:
 			// Filter operands resolve one value, not a set of matches.
@@ -130,6 +142,7 @@ func (o pathOperand) value(cur *Value) (*Value, bool) {
 			return nil, false
 		}
 	}
+
 	return v, v != nil
 }
 
@@ -148,8 +161,10 @@ func compareValues(op string, l, r *Value) bool {
 	case "!=":
 		return !valueEqual(l, r)
 	}
+
 	if isNumber(l) && isNumber(r) {
 		a, b := numAsFloat(l), numAsFloat(r)
+
 		switch op {
 		case "<":
 			return a < b
@@ -160,8 +175,10 @@ func compareValues(op string, l, r *Value) bool {
 		case ">=":
 			return a >= b
 		}
+
 		return false
 	}
+
 	if l.Kind == KindString && r.Kind == KindString {
 		switch op {
 		case "<":
@@ -174,6 +191,7 @@ func compareValues(op string, l, r *Value) bool {
 			return l.Str >= r.Str
 		}
 	}
+
 	return false
 }
 
@@ -186,20 +204,26 @@ func parseFilterBracket(s string, i int) (segment, int, error) {
 	// Scan from the '(' to its matching ')', respecting quotes.
 	open := i + 1
 	depth := 0
+
 	var quote byte
+
 	j := open
 	for ; j < len(s); j++ {
 		c := s[j]
 		if quote != 0 {
 			if c == '\\' && j+1 < len(s) {
 				j++ // an escaped character cannot close the string
+
 				continue
 			}
+
 			if c == quote {
 				quote = 0
 			}
+
 			continue
 		}
+
 		switch c {
 		case '\'', '"':
 			quote = c
@@ -209,20 +233,26 @@ func parseFilterBracket(s string, i int) (segment, int, error) {
 			depth--
 			if depth == 0 {
 				j++
+
 				goto closed
 			}
 		}
 	}
+
 	return segment{}, 0, errBadPath
+
 closed:
 	if j >= len(s) || s[j] != ']' {
 		return segment{}, 0, errBadPath
 	}
+
 	body := s[open+1 : j-1] // inside the outer parens
+
 	expr, err := parseFilter(body)
 	if err != nil {
 		return segment{}, 0, err
 	}
+
 	return segment{kind: segFilter, filter: expr}, j + 1, nil
 }
 
@@ -235,14 +265,18 @@ type filterParser struct {
 
 func parseFilter(s string) (*filterExpr, error) {
 	fp := &filterParser{s: s}
+
 	p, err := fp.parseOr()
 	if err != nil {
 		return nil, err
 	}
+
 	fp.skipSpace()
+
 	if fp.pos != len(fp.s) {
 		return nil, errBadPath
 	}
+
 	return &filterExpr{root: p}, nil
 }
 
@@ -254,10 +288,13 @@ func (fp *filterParser) skipSpace() {
 
 func (fp *filterParser) consume(tok string) bool {
 	fp.skipSpace()
+
 	if strings.HasPrefix(fp.s[fp.pos:], tok) {
 		fp.pos += len(tok)
+
 		return true
 	}
+
 	return false
 }
 
@@ -266,13 +303,16 @@ func (fp *filterParser) parseOr() (predicate, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	for fp.consume("||") {
 		r, err := fp.parseAnd()
 		if err != nil {
 			return nil, err
 		}
+
 		l = orPred{l, r}
 	}
+
 	return l, nil
 }
 
@@ -281,42 +321,53 @@ func (fp *filterParser) parseAnd() (predicate, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	for fp.consume("&&") {
 		r, err := fp.parseTerm()
 		if err != nil {
 			return nil, err
 		}
+
 		l = andPred{l, r}
 	}
+
 	return l, nil
 }
 
 // parseTerm is a parenthesized sub-expression or a comparison/existence test.
 func (fp *filterParser) parseTerm() (predicate, error) {
 	fp.skipSpace()
+
 	if fp.pos < len(fp.s) && fp.s[fp.pos] == '(' {
 		fp.pos++
+
 		p, err := fp.parseOr()
 		if err != nil {
 			return nil, err
 		}
+
 		if !fp.consume(")") {
 			return nil, errBadPath
 		}
+
 		return p, nil
 	}
+
 	l, err := fp.parseOperand()
 	if err != nil {
 		return nil, err
 	}
+
 	op := fp.parseOp()
 	if op == "" {
 		return existsPred{l}, nil
 	}
+
 	r, err := fp.parseOperand()
 	if err != nil {
 		return nil, err
 	}
+
 	pred := cmpPred{op: op, l: l, r: r}
 	if op == "=~" {
 		if lit, ok := r.(litOperand); ok && lit.v.Kind == KindString {
@@ -324,31 +375,38 @@ func (fp *filterParser) parseTerm() (predicate, error) {
 			if err != nil {
 				return nil, errBadPath
 			}
+
 			pred.re = re
 		} else {
 			return nil, errBadPath
 		}
 	}
+
 	return pred, nil
 }
 
 // parseOp reads a comparison operator, or "" if the next token isn't one.
 func (fp *filterParser) parseOp() string {
 	fp.skipSpace()
+
 	for _, op := range []string{"==", "!=", "<=", ">=", "=~", "<", ">"} {
 		if strings.HasPrefix(fp.s[fp.pos:], op) {
 			fp.pos += len(op)
+
 			return op
 		}
 	}
+
 	return ""
 }
 
 func (fp *filterParser) parseOperand() (operand, error) {
 	fp.skipSpace()
+
 	if fp.pos >= len(fp.s) {
 		return nil, errBadPath
 	}
+
 	c := fp.s[fp.pos]
 	switch {
 	case c == '@':
@@ -359,14 +417,18 @@ func (fp *filterParser) parseOperand() (operand, error) {
 		return fp.parseNumberLiteral()
 	case strings.HasPrefix(fp.s[fp.pos:], "true"):
 		fp.pos += 4
+
 		return litOperand{newBool(true)}, nil
 	case strings.HasPrefix(fp.s[fp.pos:], "false"):
 		fp.pos += 5
+
 		return litOperand{newBool(false)}, nil
 	case strings.HasPrefix(fp.s[fp.pos:], "null"):
 		fp.pos += 4
+
 		return litOperand{newNull()}, nil
 	}
+
 	return nil, errBadPath
 }
 
@@ -387,6 +449,7 @@ func (fp *filterParser) parsePathOperand() (operand, error) {
 			for fp.pos < len(fp.s) && !isFilterDelim(fp.s[fp.pos]) {
 				fp.pos++
 			}
+
 			if fp.pos == start {
 				return nil, errBadPath
 			}
@@ -397,6 +460,7 @@ func (fp *filterParser) parsePathOperand() (operand, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			seg, err := classifyBracket(inner)
 			if err != nil || !seg.concrete() {
 				return nil, errBadPath
@@ -418,6 +482,7 @@ func isFilterDelim(c byte) bool {
 	case '.', '[', ']', ' ', '\t', '=', '!', '<', '>', '&', '|', ')', '~':
 		return true
 	}
+
 	return false
 }
 
@@ -425,25 +490,32 @@ func (fp *filterParser) parseStringLiteral(q byte) (operand, error) {
 	fp.pos++ // opening quote
 	start := fp.pos
 	escaped := false
+
 	for fp.pos < len(fp.s) && fp.s[fp.pos] != q {
 		if fp.s[fp.pos] == '\\' && fp.pos+1 < len(fp.s) {
 			escaped = true
 			fp.pos++ // an escaped character cannot close the string
 		}
+
 		fp.pos++
 	}
+
 	if fp.pos >= len(fp.s) {
 		return nil, errBadPath
 	}
+
 	str := fp.s[start:fp.pos]
 	fp.pos++ // closing quote
+
 	if escaped {
 		decoded, ok := decodeFilterString(str, q)
 		if !ok {
 			return nil, errBadPath
 		}
+
 		str = decoded
 	}
+
 	return litOperand{newString(str)}, nil
 }
 
@@ -457,6 +529,7 @@ func decodeFilterString(body string, q byte) (string, bool) {
 		// escape, and a bare " would terminate it early.
 		var sb strings.Builder
 		sb.Grow(len(body))
+
 		for i := 0; i < len(body); i++ {
 			switch {
 			case body[i] == '\\' && i+1 < len(body):
@@ -466,6 +539,7 @@ func decodeFilterString(body string, q byte) (string, bool) {
 					sb.WriteByte('\\')
 					sb.WriteByte(body[i+1])
 				}
+
 				i++
 			case body[i] == '"':
 				sb.WriteString(`\"`)
@@ -473,12 +547,15 @@ func decodeFilterString(body string, q byte) (string, bool) {
 				sb.WriteByte(body[i])
 			}
 		}
+
 		body = sb.String()
 	}
+
 	var s string
 	if err := json.Unmarshal([]byte(`"`+body+`"`), &s); err != nil {
 		return "", false
 	}
+
 	return s, true
 }
 
@@ -488,17 +565,22 @@ func (fp *filterParser) parseNumberLiteral() (operand, error) {
 		c := fp.s[fp.pos]
 		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' {
 			fp.pos++
+
 			continue
 		}
+
 		break
 	}
+
 	tok := fp.s[start:fp.pos]
 	if i, err := strconv.ParseInt(tok, 10, 64); err == nil {
 		return litOperand{newInt(i)}, nil
 	}
+
 	f, err := strconv.ParseFloat(tok, 64)
 	if err != nil {
 		return nil, errBadPath
 	}
+
 	return litOperand{newFloat(f)}, nil
 }

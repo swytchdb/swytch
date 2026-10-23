@@ -29,22 +29,28 @@ import (
 func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("zpopmin")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	count := 1
+
 	hasCount := len(cmd.Args) > 1
 	if hasCount {
 		var err error
+
 		count, err = strconv.Atoi(string(cmd.Args[1]))
 		if err != nil {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		if count < 0 {
 			w.WriteError("ERR value is out of range, must be positive")
+
 			return
 		}
 	}
@@ -54,20 +60,26 @@ func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, tips, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
 		if len(sorted) == 0 {
 			w.WriteArray(0)
+
 			return
 		}
 
@@ -79,6 +91,7 @@ func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
@@ -89,12 +102,14 @@ func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		for _, e := range entries {
 			if err := emitZSetRemove(cmd, key, e.Member); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		if w.Protocol() == shared.RESP3 && hasCount {
 			w.WriteArray(len(entries))
+
 			for _, entry := range entries {
 				w.WriteArray(2)
 				w.WriteBulkStringStr(entry.Member)
@@ -102,34 +117,42 @@ func handleZPopMin(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 		} else {
 			w.WriteArray(len(entries) * 2)
+
 			for _, entry := range entries {
 				w.WriteBulkStringStr(entry.Member)
 				w.WriteScore(entry.Score)
 			}
 		}
 	}
+
 	return
 }
 
 func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("zpopmax")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	count := 1
+
 	hasCount := len(cmd.Args) > 1
 	if hasCount {
 		var err error
+
 		count, err = strconv.Atoi(string(cmd.Args[1]))
 		if err != nil {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		if count < 0 {
 			w.WriteError("ERR value is out of range, must be positive")
+
 			return
 		}
 	}
@@ -139,20 +162,26 @@ func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, tips, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteArray(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
 		if len(sorted) == 0 {
 			w.WriteArray(0)
+
 			return
 		}
 
@@ -164,11 +193,13 @@ func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Take last N (max scores) in reverse order
 		n := min(count, len(sorted))
+
 		entries := make([]shared.ZSetEntry, n)
 		for i := range n {
 			entries[i] = sorted[len(sorted)-1-i]
@@ -177,12 +208,14 @@ func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		for _, e := range entries {
 			if err := emitZSetRemove(cmd, key, e.Member); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		if w.Protocol() == shared.RESP3 && hasCount {
 			w.WriteArray(len(entries))
+
 			for _, entry := range entries {
 				w.WriteArray(2)
 				w.WriteBulkStringStr(entry.Member)
@@ -190,12 +223,14 @@ func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 		} else {
 			w.WriteArray(len(entries) * 2)
+
 			for _, entry := range entries {
 				w.WriteBulkStringStr(entry.Member)
 				w.WriteScore(entry.Score)
 			}
 		}
 	}
+
 	return
 }
 
@@ -203,17 +238,20 @@ func handleZPopMax(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zmpop")
+
 		return
 	}
 
 	numKeys, err := strconv.Atoi(string(cmd.Args[0]))
 	if err != nil || numKeys <= 0 {
 		w.WriteError("ERR numkeys should be greater than 0")
+
 		return
 	}
 
 	if len(cmd.Args) < numKeys+2 {
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -224,7 +262,9 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 	// Parse MIN/MAX
 	directionArg := shared.ToUpper(cmd.Args[1+numKeys])
+
 	var popMin bool
+
 	switch string(directionArg) {
 	case keywordMin:
 		popMin = true
@@ -232,12 +272,14 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		popMin = false
 	default:
 		w.WriteSyntaxError()
+
 		return
 	}
 
 	// Parse optional COUNT
 	count := 1
 	hasCount := false
+
 	argIdx := 2 + numKeys
 	for argIdx < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[argIdx])
@@ -245,22 +287,30 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			if hasCount {
 				// Duplicate COUNT
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			hasCount = true
+
 			argIdx++
 			if argIdx >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			count, err = strconv.Atoi(string(cmd.Args[argIdx]))
 			if err != nil || count <= 0 {
 				w.WriteError("ERR count must be positive")
+
 				return
 			}
+
 			argIdx++
 		} else {
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -272,12 +322,16 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			snap, tips, exists, wrongType, err := getZSetSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !exists {
 				continue
 			}
@@ -295,6 +349,7 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
@@ -313,6 +368,7 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			for _, e := range entries {
 				if err := emitZSetRemove(cmd, key, e.Member); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			}
@@ -321,16 +377,19 @@ func handleZMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			w.WriteArray(2)
 			w.WriteBulkStringStr(key)
 			w.WriteArray(len(entries))
+
 			for _, entry := range entries {
 				w.WriteArray(2)
 				w.WriteBulkStringStr(entry.Member)
 				w.WriteScore(entry.Score)
 			}
+
 			return
 		}
 
 		// No non-empty sorted set found
 		w.WriteNullArray()
 	}
+
 	return
 }

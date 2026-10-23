@@ -49,6 +49,7 @@ func NextHLC() time.Time {
 	if HlcClock == nil {
 		return time.Now()
 	}
+
 	return HlcClock.Now()
 }
 
@@ -57,5 +58,6 @@ func EncodeElementID(hlc time.Time, nodeID pb.NodeID) []byte {
 	id := make([]byte, 16)
 	binary.LittleEndian.PutUint64(id, uint64(hlc.UnixNano()))
 	binary.LittleEndian.PutUint64(id[8:], uint64(nodeID))
+
 	return id
 }

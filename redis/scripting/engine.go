@@ -52,6 +52,7 @@ func NewEngine(executor shared.CommandExecutor) *Engine {
 		executor:         executor,
 	}
 	e.scriptTimeout.Store(int64(DefaultScriptTimeout))
+
 	return e
 }
 
@@ -73,6 +74,7 @@ func (e *Engine) getScriptTimeout() time.Duration {
 // IsScriptTimedOut returns true if there is a running script that has timed out.
 func (e *Engine) IsScriptTimedOut() bool {
 	sc := e.runningScript.Load()
+
 	return sc != nil && sc.IsTimedOut()
 }
 

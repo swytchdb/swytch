@@ -31,14 +31,17 @@ import (
 // marshalling failure aborts the test.
 func roundtripPredicate(t *testing.T, p Predicate) Predicate {
 	t.Helper()
+
 	onWire, err := proto.Marshal(predicateToProto(p))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+
 	var reloaded pb.Predicate
 	if err := proto.Unmarshal(onWire, &reloaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+
 	return predicateFromProto(&reloaded)
 }
 
@@ -49,9 +52,11 @@ func roundtripPredicate(t *testing.T, p Predicate) Predicate {
 // layouts differ at the margins.
 func assertSameEval(t *testing.T, original Predicate, rows []*RowWrite) {
 	t.Helper()
+
 	roundtripped := roundtripPredicate(t, original)
 	for i, row := range rows {
 		want := Evaluate(&original, row)
+
 		got := Evaluate(&roundtripped, row)
 		if want != got {
 			t.Errorf("row %d: original=%v roundtrip=%v", i, want, got)
@@ -88,15 +93,20 @@ func TestProtoRoundtripTypedValues(t *testing.T) {
 	}
 	for _, v := range cases {
 		pb := typedValueToProto(v)
+
 		bytes, err := proto.Marshal(pb)
 		if err != nil {
 			t.Fatalf("marshal %v: %v", v, err)
 		}
-		var back TypedValue
-		var decoded = pb.ProtoReflect().New().Interface()
+
+		var (
+			back    TypedValue
+			decoded = pb.ProtoReflect().New().Interface()
+		)
 		if err := proto.Unmarshal(bytes, decoded); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
+
 		back = typedValueFromProto(decoded.(*typedValueMessage))
 		if back.Kind != v.Kind {
 			t.Errorf("kind drift: %v → %v", v.Kind, back.Kind)
@@ -156,27 +166,34 @@ func TestProtoRoundtripRowWrite(t *testing.T) {
 			FloatVal(3.14),
 		},
 	}
+
 	bytes, err := proto.Marshal(rowWriteToProto(rw))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+
 	var reloaded pb.RowWriteEffect
 	if err := proto.Unmarshal(bytes, &reloaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+
 	back := rowWriteFromProto("users", &reloaded)
 	if back.Table != rw.Table {
 		t.Errorf("Table: %q vs %q", back.Table, rw.Table)
 	}
+
 	if string(back.PK) != string(rw.PK) {
 		t.Errorf("PK: %x vs %x", back.PK, rw.PK)
 	}
+
 	if back.Kind != rw.Kind {
 		t.Errorf("Kind: %v vs %v", back.Kind, rw.Kind)
 	}
+
 	if len(back.Cols) != len(rw.Cols) {
 		t.Fatalf("Cols len: %d vs %d", len(back.Cols), len(rw.Cols))
 	}
+
 	for i := range rw.Cols {
 		if back.Cols[i].Kind != rw.Cols[i].Kind {
 			t.Errorf("col %d Kind drift: %v vs %v", i,

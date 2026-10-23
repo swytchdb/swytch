@@ -42,25 +42,32 @@ func newTestEnv() *testEnv {
 	ctx := eng.NewContext()
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	return &testEnv{eng: eng, ctx: ctx, w: w, buf: buf}
 }
 
 // execHandler runs a standard handler with the effects engine.
 func execHandler(t *testing.T, handler func(*shared.Command, *shared.Writer, *shared.Database) (bool, []string, shared.CommandRunner), env *testEnv, args ...string) string {
 	t.Helper()
+
 	byteArgs := make([][]byte, len(args))
 	for i, a := range args {
 		byteArgs[i] = []byte(a)
 	}
+
 	cmd := &shared.Command{Args: byteArgs, Runtime: env.eng, Context: env.ctx}
+
 	valid, _, runner := handler(cmd, env.w, nil)
 	if !valid {
 		return env.buf.String()
 	}
+
 	if runner != nil {
 		runner()
+
 		_ = env.ctx.Flush()
 	}
+
 	return env.buf.String()
 }
 
@@ -69,6 +76,7 @@ func xadd(t *testing.T, env *testEnv, args ...string) string {
 	t.Helper()
 	result := execHandler(t, handleXAdd, env, args...)
 	env.buf.Reset()
+
 	return result
 }
 
@@ -82,6 +90,7 @@ func TestHandleXAddXLen(t *testing.T) {
 	if !strings.HasPrefix(result, "$") {
 		t.Errorf("XADD should return bulk string, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// XLEN
@@ -89,9 +98,11 @@ func TestHandleXAddXLen(t *testing.T) {
 	if result != ":1\r\n" {
 		t.Errorf("XLEN should return 1, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	xadd(t, env, "mystream", "*", "field2", "value2")
+
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":2\r\n" {
 		t.Errorf("XLEN should return 2, got %q", result)
@@ -105,6 +116,7 @@ func TestHandleXAddNOMKSTREAM(t *testing.T) {
 	if result != "$-1\r\n" {
 		t.Errorf("XADD NOMKSTREAM on non-existent key should return null, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "nostream")
@@ -131,6 +143,7 @@ func TestHandleXAddApproxTrimming(t *testing.T) {
 	env := newTestEnv()
 
 	prev := shared.GetStreamNodeMaxEntries()
+
 	shared.SetStreamNodeMaxEntries(100)
 	defer shared.SetStreamNodeMaxEntries(prev)
 
@@ -151,12 +164,14 @@ func TestHandleXAddHybridID(t *testing.T) {
 	if result != "$7\r\n123-456\r\n" {
 		t.Errorf("XADD with explicit ID should return the ID, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXAdd, env, "mystream", "123-*", "item", "2", "value", "b")
 	if result != "$7\r\n123-457\r\n" {
 		t.Errorf("XADD with hybrid ID should return 123-457, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXAdd, env, "mystream", "42-*", "item", "3", "value", "c")
@@ -173,6 +188,7 @@ func TestHandleXAddWithMINID(t *testing.T) {
 		if j >= 5 {
 			minid = j - 5
 		}
+
 		xadd(t, env, "mystream", "MINID", strconv.Itoa(minid), strconv.Itoa(j), "xitem", strconv.Itoa(j))
 	}
 
@@ -180,9 +196,11 @@ func TestHandleXAddWithMINID(t *testing.T) {
 	if !strings.Contains(result, ":6\r\n") {
 		t.Errorf("Expected XLEN == 6, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "-", "+")
+
 	for expected := 995; expected <= 1000; expected++ {
 		expectedID := strconv.Itoa(expected) + "-0"
 		if !strings.Contains(result, expectedID) {
@@ -200,16 +218,20 @@ func TestHandleXAddWithMINIDSimple(t *testing.T) {
 	if result != ":0\r\n" {
 		t.Errorf("Entry 1 should have been trimmed (ID 1 < MINID 1000), got XLEN=%q", result)
 	}
+
 	env.buf.Reset()
 
 	xadd(t, env, "mystream", "MINID", "1000", "2", "field", "value")
+
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":0\r\n" {
 		t.Errorf("Entry 2 should have been trimmed, got XLEN=%q", result)
 	}
+
 	env.buf.Reset()
 
 	xadd(t, env, "mystream", "MINID", "1000", "1001", "field", "value")
+
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":1\r\n" {
 		t.Errorf("Entry 1001 should remain (ID 1001 >= MINID 1000), got XLEN=%q", result)
@@ -228,6 +250,7 @@ func TestHandleXAddWithMINIDProgressive(t *testing.T) {
 	if !strings.Contains(result, ":6\r\n") {
 		t.Errorf("Expected XLEN == 6, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Trim manually
@@ -248,10 +271,12 @@ func TestHandleXAddWrongNumArgs(t *testing.T) {
 	env := newTestEnv()
 
 	cmd := &shared.Command{Args: [][]byte{}, Runtime: env.eng, Context: env.ctx}
+
 	valid, _, _ := handleXAdd(cmd, env.w, nil)
 	if valid {
 		t.Fatal("expected invalid for no args")
 	}
+
 	if !strings.Contains(env.buf.String(), "ERR") {
 		t.Errorf("expected error, got %q", env.buf.String())
 	}
@@ -271,6 +296,7 @@ func TestHandleXRange(t *testing.T) {
 	if !strings.Contains(result, "1-0") || !strings.Contains(result, "3-0") {
 		t.Errorf("XRANGE - + should contain all entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Range with COUNT
@@ -278,6 +304,7 @@ func TestHandleXRange(t *testing.T) {
 	if !strings.Contains(result, "1-0") || !strings.Contains(result, "2-0") {
 		t.Errorf("XRANGE with COUNT 2 should return first 2 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Range specific
@@ -298,54 +325,64 @@ func TestHandleXRangeExclusiveErrors(t *testing.T) {
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE (- + should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "-", "(+")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE - (+ should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "-", "(0-0")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE - (0-0 should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "(0-0", "+")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE (0-0 + should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "(18446744073709551615-18446744073709551615", "+")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE (max-id + should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "-", "(18446744073709551615-18446744073709551615")
 	if strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE - (max-id should work, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "(1-0", "+")
 	if strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE (1-0 + should work, got %q", result)
 	}
+
 	if !strings.Contains(result, "2-0") {
 		t.Errorf("XRANGE (1-0 + should return 2-0, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRange, env, "mystream", "-", "(3-0")
 	if strings.Contains(result, "ERR") {
 		t.Errorf("XRANGE - (3-0 should work, got %q", result)
 	}
+
 	if !strings.Contains(result, "1-0") || !strings.Contains(result, "2-0") {
 		t.Errorf("XRANGE - (3-0 should return 1-0 and 2-0, got %q", result)
 	}
+
 	if strings.Contains(result, "3-0") {
 		t.Errorf("XRANGE - (3-0 should NOT return 3-0, got %q", result)
 	}
@@ -355,10 +392,12 @@ func TestHandleXRangeWrongNumArgs(t *testing.T) {
 	env := newTestEnv()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("mystream")}, Runtime: env.eng, Context: env.ctx}
+
 	valid, _, _ := handleXRange(cmd, env.w, nil)
 	if valid {
 		t.Fatal("expected invalid")
 	}
+
 	if !strings.Contains(env.buf.String(), "ERR") {
 		t.Errorf("expected error, got %q", env.buf.String())
 	}
@@ -377,6 +416,7 @@ func TestHandleXRevRange(t *testing.T) {
 	if !strings.Contains(result, "3-0") || !strings.Contains(result, "1-0") {
 		t.Errorf("XREVRANGE + - should return all entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXRevRange, env, "mystream", "+", "-", "COUNT", "1")
@@ -399,6 +439,7 @@ func TestHandleXReadNonBlocking(t *testing.T) {
 	if !strings.Contains(result, "1-0") || !strings.Contains(result, "2-0") {
 		t.Errorf("XREAD STREAMS stream1 0 should return all entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Read from specific ID
@@ -406,6 +447,7 @@ func TestHandleXReadNonBlocking(t *testing.T) {
 	if !strings.Contains(result, "2-0") {
 		t.Errorf("XREAD after 1-0 should return entry 2-0, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Read with $
@@ -413,6 +455,7 @@ func TestHandleXReadNonBlocking(t *testing.T) {
 	if result != "*-1\r\n" {
 		t.Errorf("XREAD with $ should return null (no new entries), got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Read with COUNT
@@ -420,6 +463,7 @@ func TestHandleXReadNonBlocking(t *testing.T) {
 	if !strings.Contains(result, "1-0") || strings.Contains(result, "2-0") {
 		t.Errorf("XREAD COUNT 1 should return only first entry, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// Read from non-existent stream
@@ -442,18 +486,21 @@ func TestHandleXTrim(t *testing.T) {
 	if result != ":2\r\n" {
 		t.Errorf("XTRIM MAXLEN 3 should trim 2 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":3\r\n" {
 		t.Errorf("XLEN after XTRIM MAXLEN 3 should be 3, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXTrim, env, "mystream", "MINID", "5-0")
 	if result != ":2\r\n" {
 		t.Errorf("XTRIM MINID 5-0 should trim 2 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
@@ -473,6 +520,7 @@ func TestHandleXTrimWithEquals(t *testing.T) {
 	if result != ":2\r\n" {
 		t.Errorf("XTRIM MAXLEN = 3 should trim 2 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
@@ -492,6 +540,7 @@ func TestHandleXTrimMINIDWithEquals(t *testing.T) {
 	if result != ":2\r\n" {
 		t.Errorf("XTRIM MINID = 3-0 should trim 2 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
@@ -513,6 +562,7 @@ func TestHandleXTrimApprox(t *testing.T) {
 	env := newTestEnv()
 
 	prev := shared.GetStreamNodeMaxEntries()
+
 	shared.SetStreamNodeMaxEntries(10)
 	defer shared.SetStreamNodeMaxEntries(prev)
 
@@ -524,6 +574,7 @@ func TestHandleXTrimApprox(t *testing.T) {
 	if result != ":20\r\n" {
 		t.Errorf("XTRIM MAXLEN ~ 25 with node size 10 should trim 20 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
@@ -543,12 +594,14 @@ func TestHandleXTrimWithLimit(t *testing.T) {
 	if !strings.HasPrefix(result, "-ERR") {
 		t.Errorf("XTRIM MAXLEN 3 LIMIT 2 (without ~) should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXTrim, env, "mystream", "MAXLEN", "~", "3", "LIMIT", "2")
 	if result != ":0\r\n" {
 		t.Errorf("XTRIM MAXLEN ~ 3 LIMIT 2 with NodeSize=100 should trim 0 entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
@@ -572,30 +625,35 @@ func TestHandleXDel(t *testing.T) {
 	if result != ":1\r\n" {
 		t.Errorf("XDEL 3-0 should return 1, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":4\r\n" {
 		t.Errorf("XLEN after XDEL should be 4, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXDel, env, "mystream", "1-0", "5-0")
 	if result != ":2\r\n" {
 		t.Errorf("XDEL 1-0 5-0 should return 2, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":2\r\n" {
 		t.Errorf("XLEN after XDEL should be 2, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXDel, env, "mystream", "99-0")
 	if result != ":0\r\n" {
 		t.Errorf("XDEL non-existent should return 0, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXDel, env, "nostream", "1-0")
@@ -617,21 +675,26 @@ func TestHandleXInfoStream(t *testing.T) {
 	if !strings.Contains(result, "length") {
 		t.Errorf("XINFO STREAM should contain 'length', got %q", result)
 	}
+
 	if !strings.Contains(result, "last-generated-id") {
 		t.Errorf("XINFO STREAM should contain 'last-generated-id', got %q", result)
 	}
+
 	if !strings.Contains(result, "first-entry") {
 		t.Errorf("XINFO STREAM should contain 'first-entry', got %q", result)
 	}
+
 	if !strings.Contains(result, "last-entry") {
 		t.Errorf("XINFO STREAM should contain 'last-entry', got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXInfo, env, "STREAM", "mystream", "FULL")
 	if !strings.Contains(result, "entries") {
 		t.Errorf("XINFO STREAM FULL should contain 'entries', got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXInfo, env, "STREAM", "nostream")
@@ -662,80 +725,94 @@ func TestHandleXSetId(t *testing.T) {
 	if result != "+OK\r\n" {
 		t.Errorf("XSETID should return OK, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXInfo, env, "STREAM", "mystream")
 	if !strings.Contains(result, "5-0") {
 		t.Errorf("XINFO STREAM should show last-generated-id as 5-0, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "10-0", "ENTRIESADDED", "100")
 	if result != "+OK\r\n" {
 		t.Errorf("XSETID with ENTRIESADDED should return OK, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "15-0", "MAXDELETEDID", "5-0")
 	if result != "+OK\r\n" {
 		t.Errorf("XSETID with MAXDELETEDID should return OK, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "20-0", "ENTRIESADDED", "200", "MAXDELETEDID", "10-0")
 	if result != "+OK\r\n" {
 		t.Errorf("XSETID with both options should return OK, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "1-0")
 	if !strings.Contains(result, "ERR") || !strings.Contains(result, "smaller") {
 		t.Errorf("XSETID with ID smaller than top entry should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "nostream", "1-0")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XSETID on non-existent key should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "25-0", "MAXDELETEDID", "30-0")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XSETID with MAXDELETEDID > lastID should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "invalid")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XSETID with invalid ID should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream")
 	if !strings.Contains(result, "ERR") {
 		t.Errorf("XSETID with wrong args should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "30-0", "ENTRIESADDED", "1", "MAXDELETEDID", "0-0")
 	if !strings.Contains(result, "ERR") || !strings.Contains(result, "smaller") {
 		t.Errorf("XSETID with ENTRIESADDED < length should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXSetId, env, "mystream", "30-0", "ENTRIESADDED", "-1", "MAXDELETEDID", "0-0")
 	if !strings.Contains(result, "ERR") || !strings.Contains(result, "positive") {
 		t.Errorf("XSETID with negative ENTRIESADDED should return error, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// XSETID on empty stream
 	xadd(t, env, "emptystream", "MAXLEN", "0", "*", "field", "value")
+
 	result = execHandler(t, handleXSetId, env, "emptystream", "200-0")
 	if result != "+OK\r\n" {
 		t.Errorf("XSETID on empty stream should return OK, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	// XSETID cannot set ID smaller than MaxDeletedID
@@ -780,15 +857,20 @@ func TestStreamIDParsing(t *testing.T) {
 				if err == nil {
 					t.Errorf("Expected error for %q", tt.input)
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Errorf("Unexpected error for %q: %v", tt.input, err)
+
 				return
 			}
+
 			if isSpecial != tt.special {
 				t.Errorf("Input %q: expected special=%v, got %v", tt.input, tt.special, isSpecial)
 			}
+
 			if !tt.special {
 				if id.Ms != tt.expectMs || id.Seq != tt.expectSeq {
 					t.Errorf("Input %q: expected %d-%d, got %d-%d", tt.input, tt.expectMs, tt.expectSeq, id.Ms, id.Seq)
@@ -813,19 +895,23 @@ func TestHandleXDelEx(t *testing.T) {
 	if !strings.Contains(result, ":1") {
 		t.Errorf("XDELEX should delete entries, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	result = execHandler(t, handleXLen, env, "mystream")
 	if result != ":3\r\n" {
 		t.Errorf("XLEN after XDELEX should be 3, got %q", result)
 	}
+
 	env.buf.Reset()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("mystream")}, Runtime: env.eng, Context: env.ctx}
+
 	valid, _, _ := handleXDelEx(cmd, env.w, nil)
 	if valid {
 		t.Fatal("expected invalid for wrong args")
 	}
+
 	if !strings.Contains(env.buf.String(), "ERR") {
 		t.Errorf("expected error, got %q", env.buf.String())
 	}
@@ -837,10 +923,12 @@ func TestHandleXLenWrongNumArgs(t *testing.T) {
 	env := newTestEnv()
 
 	cmd := &shared.Command{Args: [][]byte{}, Runtime: env.eng, Context: env.ctx}
+
 	valid, _, _ := handleXLen(cmd, env.w, nil)
 	if valid {
 		t.Fatal("expected invalid")
 	}
+
 	if !strings.Contains(env.buf.String(), "ERR") {
 		t.Errorf("expected error, got %q", env.buf.String())
 	}

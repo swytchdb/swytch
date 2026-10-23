@@ -69,6 +69,7 @@ func TestProtocolParser(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			parser := shared.NewParser(strings.NewReader(tt.input))
+
 			cmd, err := parser.ReadCommand()
 			if err != nil {
 				t.Fatalf("ReadCommand() error = %v", err)
@@ -209,6 +210,7 @@ func TestListCommands(t *testing.T) {
 
 	// LLEN
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLLen, Args: [][]byte{[]byte("mylist")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -218,6 +220,7 @@ func TestListCommands(t *testing.T) {
 
 	// LRANGE
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdLRange, Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("-1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -245,6 +248,7 @@ func TestHashCommands(t *testing.T) {
 
 	// HGET
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdHGet, Args: [][]byte{[]byte("myhash"), []byte("field1")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -255,6 +259,7 @@ func TestHashCommands(t *testing.T) {
 
 	// HLEN
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdHLen, Args: [][]byte{[]byte("myhash")}}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -281,16 +286,20 @@ func TestExpiration(t *testing.T) {
 
 	// GET should return the value
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("expkey")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != "$8\r\nexpvalue\r\n" {
 		t.Errorf("GET expkey got %q, want expvalue", got)
 	}
 
 	// TTL should be positive
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdTTL, Args: [][]byte{[]byte("expkey")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got == ":-1\r\n" || got == ":-2\r\n" {
 		t.Errorf("expected positive TTL, got %q", got)
 	}
@@ -311,36 +320,42 @@ func TestTransactionMultiExec(t *testing.T) {
 	if got := buf.String(); got != "+OK\r\n" {
 		t.Errorf("MULTI got %q, want +OK\\r\\n", got)
 	}
+
 	if !conn.InTransaction {
 		t.Error("expected InTransaction to be true after MULTI")
 	}
 
 	// SET (should be queued)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdSet, Args: [][]byte{[]byte("txnkey"), []byte("txnvalue")}}
 	h.ExecuteInto(cmd, w, conn)
 
 	if got := buf.String(); got != "+QUEUED\r\n" {
 		t.Errorf("SET during MULTI got %q, want +QUEUED\\r\\n", got)
 	}
+
 	if len(conn.QueuedCmds) != 1 {
 		t.Errorf("expected 1 queued command, got %d", len(conn.QueuedCmds))
 	}
 
 	// GET (should be queued)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("txnkey")}}
 	h.ExecuteInto(cmd, w, conn)
 
 	if got := buf.String(); got != "+QUEUED\r\n" {
 		t.Errorf("GET during MULTI got %q, want +QUEUED\\r\\n", got)
 	}
+
 	if len(conn.QueuedCmds) != 2 {
 		t.Errorf("expected 2 queued commands, got %d", len(conn.QueuedCmds))
 	}
 
 	// EXEC
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdExec}
 	h.ExecuteInto(cmd, w, conn)
 
@@ -349,9 +364,11 @@ func TestTransactionMultiExec(t *testing.T) {
 	if got := buf.String(); got != expected {
 		t.Errorf("EXEC got %q, want %q", got, expected)
 	}
+
 	if conn.InTransaction {
 		t.Error("expected InTransaction to be false after EXEC")
 	}
+
 	if len(conn.QueuedCmds) != 0 {
 		t.Errorf("expected 0 queued commands after EXEC, got %d", len(conn.QueuedCmds))
 	}
@@ -382,17 +399,21 @@ func TestTransactionDiscard(t *testing.T) {
 	if got := buf.String(); got != "+OK\r\n" {
 		t.Errorf("DISCARD got %q, want +OK\\r\\n", got)
 	}
+
 	if conn.InTransaction {
 		t.Error("expected InTransaction to be false after DISCARD")
 	}
+
 	if len(conn.QueuedCmds) != 0 {
 		t.Errorf("expected 0 queued commands after DISCARD, got %d", len(conn.QueuedCmds))
 	}
 
 	// Verify key was not set (GET should return nil)
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("discardkey")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != "$-1\r\n" {
 		t.Errorf("discardkey should not exist after DISCARD, GET returned %q", got)
 	}
@@ -476,6 +497,7 @@ func TestTransactionWatch(t *testing.T) {
 
 	// MULTI
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdMulti}
 	h.ExecuteInto(cmd, w, conn)
 	buf.Reset()
@@ -504,6 +526,7 @@ func TestTransactionWatch(t *testing.T) {
 	if conn.InTransaction {
 		t.Error("expected InTransaction to be false after failed EXEC")
 	}
+
 	if len(conn.WatchedKeys) != 0 {
 		t.Errorf("expected 0 watched keys after EXEC, got %d", len(conn.WatchedKeys))
 	}
@@ -615,6 +638,7 @@ func TestTransactionUnwatch(t *testing.T) {
 	if got := buf.String(); got != "+OK\r\n" {
 		t.Errorf("UNWATCH got %q, want +OK\\r\\n", got)
 	}
+
 	buf.Reset()
 
 	// MULTI
@@ -712,8 +736,10 @@ func TestTransactionSuccessfulExec(t *testing.T) {
 
 	// Verify final value through GET
 	buf.Reset()
+
 	cmd = &shared.Command{Type: shared.CmdGet, Args: [][]byte{[]byte("watchok")}}
 	h.ExecuteInto(cmd, w, conn)
+
 	if got := buf.String(); got != "$7\r\nupdated\r\n" {
 		t.Errorf("expected watchok to be 'updated', got %q", got)
 	}
@@ -745,6 +771,7 @@ func TestParseTLSVersion(t *testing.T) {
 				if err != nil {
 					t.Errorf("unexpected error for version %q: %v", tt.version, err)
 				}
+
 				if result != tt.expected {
 					t.Errorf("parseTLSVersion(%q) = %v, want %v", tt.version, result, tt.expected)
 				}
@@ -782,10 +809,12 @@ func TestTLSEnabled(t *testing.T) {
 
 func TestBuildTLSConfig_NoCert(t *testing.T) {
 	config := ServerConfig{}
+
 	tlsConfig, err := config.buildTLSConfig()
 	if err != nil {
 		t.Errorf("buildTLSConfig() error = %v, want nil", err)
 	}
+
 	if tlsConfig != nil {
 		t.Errorf("buildTLSConfig() = %v, want nil when TLS disabled", tlsConfig)
 	}
@@ -796,6 +825,7 @@ func TestBuildTLSConfig_MissingFiles(t *testing.T) {
 		TLSCertFile: "/nonexistent/cert.pem",
 		TLSKeyFile:  "/nonexistent/key.pem",
 	}
+
 	_, err := config.buildTLSConfig()
 	if err == nil {
 		t.Error("buildTLSConfig() expected error for missing files, got nil")
@@ -809,6 +839,7 @@ func TestBuildTLSConfig_InvalidVersion(t *testing.T) {
 		TLSKeyFile:    "/nonexistent/key.pem",
 		TLSMinVersion: "invalid",
 	}
+
 	_, err := config.buildTLSConfig()
 	if err == nil {
 		t.Error("buildTLSConfig() expected error, got nil")

@@ -48,6 +48,7 @@ func NewDatabaseManager() *DatabaseManager {
 		Subscriptions: NewSubscriptionManager[struct{}](),
 	}
 	dm.db = &Database{manager: dm}
+
 	return dm
 }
 

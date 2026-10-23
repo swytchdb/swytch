@@ -67,10 +67,12 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 		fmt.Fprintf(&info, "arch_bits:%d\r\n", 32<<(^uint(0)>>63))
 		info.WriteString("gcc_version:0.0.0\r\n")
 		fmt.Fprintf(&info, "process_id:%d\r\n", os.Getpid())
+
 		if h.stats != nil {
 			fmt.Fprintf(&info, "uptime_in_seconds:%d\r\n", int(h.stats.Uptime().Seconds()))
 			fmt.Fprintf(&info, "uptime_in_days:%d\r\n", int(h.stats.Uptime().Hours()/24))
 		}
+
 		info.WriteString("tcp_port:6379\r\n")
 		info.WriteString("\r\n")
 	}
@@ -78,6 +80,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	// Clients section
 	if section == "" || section == "CLIENTS" || section == infoSectionAll {
 		info.WriteString("# Clients\r\n")
+
 		if h.stats != nil {
 			fmt.Fprintf(&info, "connected_clients:%d\r\n", h.stats.CurrConnections.Load())
 			fmt.Fprintf(&info, "blocked_clients:%d\r\n", h.stats.BlockedClients.Load())
@@ -110,10 +113,12 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 		if h.engine != nil {
 			maxMemory = h.engine.MemoryTarget()
 		}
+
 		policy := "noeviction"
 		if maxMemory > 0 {
 			policy = "allkeys-lfu"
 		}
+
 		fmt.Fprintf(&info, "maxmemory:%d\r\n", maxMemory)
 		fmt.Fprintf(&info, "maxmemory_human:%s\r\n", formatBytes(uint64(maxMemory)))
 		fmt.Fprintf(&info, "maxmemory_policy:%s\r\n", policy)
@@ -123,6 +128,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	// Stats section
 	if section == "" || section == "STATS" || section == infoSectionAll {
 		info.WriteString("# Stats\r\n")
+
 		if h.stats != nil {
 			fmt.Fprintf(&info, "total_connections_received:%d\r\n", h.stats.TotalConnections.Load())
 			fmt.Fprintf(&info, "total_commands_processed:%d\r\n",
@@ -131,6 +137,7 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 			fmt.Fprintf(&info, "keyspace_misses:%d\r\n", h.stats.CmdGetMisses.Load())
 			fmt.Fprintf(&info, "total_error_replies:%d\r\n", h.stats.TotalErrorReplies.Load())
 		}
+
 		fmt.Fprintf(&info, "evicted_keys:%d\r\n", h.GetCacheEvictions())
 		info.WriteString("\r\n")
 	}
@@ -173,18 +180,21 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 	// Errorstats section
 	if section == "ERRORSTATS" || section == infoSectionAll {
 		info.WriteString("# Errorstats\r\n")
+
 		if h.stats != nil {
 			errorStats := h.stats.GetErrorStats()
 			for prefix, count := range errorStats {
 				fmt.Fprintf(&info, "errorstat_%s:count=%d\r\n", prefix, count)
 			}
 		}
+
 		info.WriteString("\r\n")
 	}
 
 	// Commandstats section
 	if section == "COMMANDSTATS" || section == infoSectionAll {
 		info.WriteString("# Commandstats\r\n")
+
 		if h.stats != nil {
 			cmdStats := h.stats.GetCommandStats()
 			for cmd, stats := range cmdStats {
@@ -192,16 +202,19 @@ func (h *Handler) buildInfoString(args [][]byte) string {
 				if stats.Calls > 0 {
 					usecPerCall = float64(stats.Usec) / float64(stats.Calls)
 				}
+
 				fmt.Fprintf(&info, "cmdstat_%s:calls=%d,usec=%d,usec_per_call=%.2f,rejected_calls=%d,failed_calls=%d\r\n",
 					cmd, stats.Calls, stats.Usec, usecPerCall, stats.RejectedCalls, stats.FailedCalls)
 			}
 		}
+
 		info.WriteString("\r\n")
 	}
 
 	// Keyspace section
 	if section == "" || section == "KEYSPACE" || section == infoSectionAll {
 		info.WriteString("# Keyspace\r\n")
+
 		if h.engine != nil {
 			keyCount := h.engine.KeyCount()
 			if keyCount > 0 {
@@ -218,11 +231,13 @@ func formatBytes(b uint64) string {
 	if b < unit {
 		return fmt.Sprintf("%dB", b)
 	}
+
 	div, exp := uint64(unit), 0
 	for n := b / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.2f%cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
@@ -244,22 +259,27 @@ func (h *Handler) emitFlushEffect(cmd *shared.Command) error {
 	}); err != nil {
 		return err
 	}
+
 	return cmd.Context.Flush()
 }
 
 func (h *Handler) handleFlushDB(cmd *shared.Command, w *shared.Writer) {
 	if err := h.emitFlushEffect(cmd); err != nil {
 		w.WriteError("ERR flush failed: " + err.Error())
+
 		return
 	}
+
 	w.WriteOK()
 }
 
 func (h *Handler) handleFlushAll(cmd *shared.Command, w *shared.Writer) {
 	if err := h.emitFlushEffect(cmd); err != nil {
 		w.WriteError("ERR flush failed: " + err.Error())
+
 		return
 	}
+
 	w.WriteOK()
 }
 
@@ -280,17 +300,21 @@ func (h *Handler) handleTime(w *shared.Writer) {
 func (h *Handler) handleKeys(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("keys")
+
 		return
 	}
 
 	pattern := string(cmd.Args[0])
+
 	if h.engine == nil {
 		w.WriteArray(0)
+
 		return
 	}
 	// KEYS is inherently O(N); snapshot for consistency then match
 	keys := h.engine.MatchKeys(pattern)
 	w.WriteArray(len(keys))
+
 	for _, key := range keys {
 		w.WriteBulkStringStr(key)
 	}
@@ -299,26 +323,35 @@ func (h *Handler) handleKeys(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleRandomKey(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) != 0 {
 		w.WriteWrongNumArguments("randomkey")
+
 		return
 	}
 
 	if h.engine == nil {
 		w.WriteNullBulkString()
+
 		return
 	}
+
 	count := int(h.engine.KeyCount())
 	if count == 0 {
 		w.WriteNullBulkString()
+
 		return
 	}
+
 	target := rand.Intn(count)
 	i := 0
+
 	h.engine.ScanKeys("", "*", func(key string) bool {
 		if i == target {
 			w.WriteBulkStringStr(key)
+
 			return false
 		}
+
 		i++
+
 		return true
 	})
 }
@@ -326,6 +359,7 @@ func (h *Handler) handleRandomKey(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("scan")
+
 		return
 	}
 
@@ -342,8 +376,10 @@ func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 			c, ok := shared.ParseInt64(cmd.Args[i+1])
 			if !ok || c <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			count = int(c)
 		case "TYPE":
 			// Type filtering not implemented yet
@@ -354,12 +390,14 @@ func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 		w.WriteArray(2)
 		w.WriteBulkStringStr("0")
 		w.WriteArray(0)
+
 		return
 	}
 
 	// Stateless cursor: the raw cursor arg is the last key returned.
 	// "0" means start from beginning.
 	cursorStr := string(cmd.Args[0])
+
 	after := ""
 	if cursorStr != "0" {
 		after = cursorStr
@@ -367,8 +405,10 @@ func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 
 	// Collect bounded batch (at most count keys)
 	batch := make([]string, 0, count)
+
 	h.engine.ScanKeys(after, pattern, func(key string) bool {
 		batch = append(batch, key)
+
 		return len(batch) < count
 	})
 
@@ -380,6 +420,7 @@ func (h *Handler) handleScan(cmd *shared.Command, w *shared.Writer) {
 	w.WriteArray(2)
 	w.WriteBulkStringStr(nextCursor)
 	w.WriteArray(len(batch))
+
 	for _, key := range batch {
 		w.WriteBulkStringStr(key)
 	}
@@ -398,8 +439,10 @@ func (h *Handler) handleCommand(cmd *shared.Command, w *shared.Writer) {
 			w.WriteInteger(0)  // first key
 			w.WriteInteger(0)  // last key
 			w.WriteInteger(0)  // step
+
 			return true
 		})
+
 		return
 	}
 
@@ -414,9 +457,12 @@ func (h *Handler) handleCommand(cmd *shared.Command, w *shared.Writer) {
 		// Return info for specified commands
 		if len(cmd.Args) < 2 {
 			w.WriteArray(0)
+
 			return
 		}
+
 		w.WriteArray(len(cmd.Args) - 1)
+
 		for _, cmdName := range cmd.Args[1:] {
 			upper := string(shared.ToUpper(cmdName))
 			if _, exists := shared.LookupCommandName(upper); exists {
@@ -439,6 +485,7 @@ func (h *Handler) handleCommand(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleConfig(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("config")
+
 		return
 	}
 
@@ -447,21 +494,26 @@ func (h *Handler) handleConfig(cmd *shared.Command, w *shared.Writer) {
 	case "GET":
 		if len(cmd.Args) < 2 {
 			w.WriteWrongNumArguments("config get")
+
 			return
 		}
+
 		pattern := string(cmd.Args[1])
 		h.handleConfigGet(pattern, w)
 	case "SET":
 		if len(cmd.Args) < 3 || len(cmd.Args)%2 != 1 {
 			w.WriteWrongNumArguments("config set")
+
 			return
 		}
+
 		h.handleConfigSet(cmd.Args[1:], w)
 	case "RESETSTAT":
 		// Reset stats
 		if h.stats != nil {
 			h.stats.Reset()
 		}
+
 		w.WriteOK()
 	case "REWRITE":
 		w.WriteOK()
@@ -475,14 +527,17 @@ func configMatchPattern(pattern, name string) bool {
 	if pattern == "*" {
 		return true
 	}
+
 	if pattern == name {
 		return true
 	}
 	// Simple prefix matching for patterns like "proto-*"
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '*' {
 		prefix := pattern[:len(pattern)-1]
+
 		return len(name) >= len(prefix) && name[:len(prefix)] == prefix
 	}
+
 	return false
 }
 
@@ -512,6 +567,7 @@ func (h *Handler) handleConfigGet(pattern string, w *shared.Writer) {
 
 	// Write as map (RESP3) or array (RESP2)
 	w.WriteMap(len(results) / 2)
+
 	for i := 0; i < len(results); i += 2 {
 		w.WriteBulkStringStr(results[i])
 		w.WriteBulkStringStr(results[i+1])
@@ -529,29 +585,38 @@ func (h *Handler) handleConfigSet(args [][]byte, w *shared.Writer) {
 			val, err := shared.ParseInt64([]byte(value))
 			if !err {
 				w.WriteError("ERR Invalid argument '" + value + "' for CONFIG SET 'proto-max-bulk-len'")
+
 				return
 			}
+
 			if val < 1024*1024 {
 				w.WriteError("ERR proto-max-bulk-len must be at least 1MB")
+
 				return
 			}
+
 			h.protoMaxBulkLen = val
 			shared.SetProtoMaxBulkLen(val)
 		case "stream-node-max-entries":
 			val, err := shared.ParseInt64([]byte(value))
 			if !err {
 				w.WriteError("ERR Invalid argument '" + value + "' for CONFIG SET 'stream-node-max-entries'")
+
 				return
 			}
+
 			if val < 0 {
 				w.WriteError("ERR stream-node-max-entries must be non-negative")
+
 				return
 			}
+
 			shared.SetStreamNodeMaxEntries(val)
 		case "lua-time-limit":
 			val, err := shared.ParseInt64([]byte(value))
 			if !err {
 				w.WriteError("ERR Invalid argument '" + value + "' for CONFIG SET 'lua-time-limit'")
+
 				return
 			}
 			// Redis accepts 0 to mean no limit, we store it in milliseconds
@@ -560,34 +625,44 @@ func (h *Handler) handleConfigSet(args [][]byte, w *shared.Writer) {
 			val, err := shared.ParseInt64([]byte(value))
 			if !err {
 				w.WriteError("ERR Invalid argument '" + value + "' for CONFIG SET 'stream-idmp-duration'")
+
 				return
 			}
+
 			if val < 1 || val > 86400 {
 				w.WriteError("ERR stream-idmp-duration must be between 1 and 86400")
+
 				return
 			}
+
 			shared.SetDefaultIDMPDuration(val)
 		case "stream-idmp-maxsize":
 			val, err := shared.ParseInt64([]byte(value))
 			if !err {
 				w.WriteError("ERR Invalid argument '" + value + "' for CONFIG SET 'stream-idmp-maxsize'")
+
 				return
 			}
+
 			if val < 1 || val > 10000 {
 				w.WriteError("ERR stream-idmp-maxsize must be between 1 and 10000")
+
 				return
 			}
+
 			shared.SetDefaultIDMPMaxSize(val)
 		default:
 			// Silently accept unknown config options for compatibility
 		}
 	}
+
 	w.WriteOK()
 }
 
 func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("client")
+
 		return
 	}
 
@@ -605,6 +680,7 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 		if len(cmd.Args) >= 2 {
 			conn.ClientName = string(cmd.Args[1])
 		}
+
 		w.WriteOK()
 	case "GETNAME":
 		if conn.ClientName != "" {
@@ -617,18 +693,22 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 		if h.clientRegistry != nil {
 			if info := h.clientRegistry.GetByConn(conn); info != nil {
 				w.WriteInteger(info.ID)
+
 				return
 			}
 		}
+
 		w.WriteInteger(1)
 	case "INFO":
 		// Return info for the current client
 		if h.clientRegistry != nil {
 			if info := h.clientRegistry.GetByConn(conn); info != nil {
 				w.WriteBulkStringStr(h.clientRegistry.formatClientInfo(info))
+
 				return
 			}
 		}
+
 		w.WriteBulkStringStr("id=1 addr=127.0.0.1:0 fd=0 name= age=0 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=client\r\n")
 	case "KILL":
 		w.WriteOK()
@@ -643,15 +723,19 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 	case "UNBLOCK":
 		if len(cmd.Args) < 2 {
 			w.WriteWrongNumArguments("client unblock")
+
 			return
 		}
+
 		clientID, err := strconv.ParseInt(string(cmd.Args[1]), 10, 64)
 		if err != nil {
 			w.WriteError("ERR value is not an integer or out of range")
+
 			return
 		}
 		// Optional TIMEOUT or ERROR argument
 		withError := false
+
 		if len(cmd.Args) > 2 {
 			unblockType := shared.ToUpper(cmd.Args[2])
 			switch string(unblockType) {
@@ -661,9 +745,11 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 				withError = true
 			default:
 				w.WriteError("ERR syntax error")
+
 				return
 			}
 		}
+
 		if h.clientRegistry != nil && h.clientRegistry.Unblock(clientID, withError) {
 			w.WriteOne()
 		} else {
@@ -677,6 +763,7 @@ func (h *Handler) handleClient(cmd *shared.Command, w *shared.Writer, conn *shar
 func (h *Handler) handleDebug(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("debug")
+
 		return
 	}
 
@@ -685,13 +772,17 @@ func (h *Handler) handleDebug(cmd *shared.Command, w *shared.Writer) {
 	case "SLEEP":
 		if len(cmd.Args) < 2 {
 			w.WriteWrongNumArguments("debug sleep")
+
 			return
 		}
+
 		secs, err := strconv.ParseFloat(string(cmd.Args[1]), 64)
 		if err != nil {
 			w.WriteError("ERR invalid sleep time")
+
 			return
 		}
+
 		time.Sleep(time.Duration(secs * float64(time.Second)))
 		w.WriteOK()
 	case "OBJECT":
@@ -706,6 +797,7 @@ func (h *Handler) handleDebug(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("memory")
+
 		return
 	}
 
@@ -714,12 +806,15 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer) {
 	case "USAGE":
 		if len(cmd.Args) < 2 {
 			w.WriteWrongNumArguments("memory usage")
+
 			return
 		}
+
 		key := string(cmd.Args[1])
 
 		if h.engine == nil || cmd.Context == nil {
 			w.WriteNullBulkString()
+
 			return
 		}
 		// Route through Context.GetSnapshot so filterSnapshot drops
@@ -730,12 +825,16 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer) {
 		snap, _, err := cmd.Context.GetSnapshot(key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if snap == nil {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		size := snapshotMemoryUsage(snap, key)
 		w.WriteInteger(size)
 	case "STATS":
@@ -770,9 +869,10 @@ func (h *Handler) handleMemory(cmd *shared.Command, w *shared.Writer) {
 // base overhead (16 bytes on 64-bit) + key length + value data length.
 func snapshotMemoryUsage(snap *pb.ReducedEffect, key string) int64 {
 	const baseOverhead = 16 // SDS header overhead (64-bit)
+
 	size := int64(baseOverhead) + int64(len(key))
 
-	switch snap.Collection {
+	switch snap.GetCollection() {
 	case pb.CollectionKind_SCALAR:
 		size += valueMemorySize(snap.GetScalar())
 	case pb.CollectionKind_KEYED:
@@ -797,7 +897,8 @@ func valueMemorySize(d *pb.DataEffect) int64 {
 	if d == nil {
 		return 0
 	}
-	switch v := d.Value.(type) {
+
+	switch v := d.GetValue().(type) {
 	case *pb.DataEffect_Raw:
 		return int64(len(v.Raw))
 	case *pb.DataEffect_Compressed:
@@ -805,6 +906,7 @@ func valueMemorySize(d *pb.DataEffect) int64 {
 	case *pb.DataEffect_IntVal, *pb.DataEffect_FloatVal:
 		return 8
 	}
+
 	return 0
 }
 
@@ -888,7 +990,6 @@ func (h *Handler) registerServerCommands() {
 			h.handleMemory(cmd, w)
 		},
 	})
-
 }
 
 // registerReplicationStubs registers replication command stubs.

@@ -31,12 +31,14 @@ import (
 // Logger wraps slog.Logger and provides debug mode control
 type Logger struct {
 	*slog.Logger
+
 	debug bool
 }
 
 // NewLogger creates a new logger with the specified debug mode
 func NewLogger(debug bool) *Logger {
 	var handler slog.Handler
+
 	opts := &slog.HandlerOptions{}
 
 	if debug {
@@ -66,10 +68,12 @@ func (l *Logger) LogCommand(cmd *shared.Command, clientAddr string) {
 
 	// Build args representation - show all args
 	var argsPreview strings.Builder
+
 	for i, arg := range cmd.Args {
 		if i > 0 {
 			argsPreview.WriteString(" ")
 		}
+
 		argsPreview.WriteString(string(arg))
 	}
 

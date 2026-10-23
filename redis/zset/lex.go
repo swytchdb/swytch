@@ -45,6 +45,7 @@ func ParseLexBound(s []byte) (LexBound, bool) {
 	if str[0] == '[' {
 		return LexBound{Value: str[1:], Inclusive: true}, true
 	}
+
 	if str[0] == '(' {
 		return LexBound{Value: str[1:], Inclusive: false}, true
 	}
@@ -58,15 +59,19 @@ func CompareLex(member string, bound LexBound) int {
 	if bound.IsMin {
 		return 1 // member is always > negative infinity
 	}
+
 	if bound.IsMax {
 		return -1 // member is always < positive infinity
 	}
+
 	if member < bound.Value {
 		return -1
 	}
+
 	if member > bound.Value {
 		return 1
 	}
+
 	return 0
 }
 
@@ -77,6 +82,7 @@ func InLexRange(member string, minBound, maxBound LexBound) bool {
 	if cmp < 0 {
 		return false
 	}
+
 	if cmp == 0 && !minBound.Inclusive {
 		return false
 	}
@@ -86,6 +92,7 @@ func InLexRange(member string, minBound, maxBound LexBound) bool {
 	if cmp > 0 {
 		return false
 	}
+
 	if cmp == 0 && !maxBound.Inclusive {
 		return false
 	}

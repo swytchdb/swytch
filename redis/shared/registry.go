@@ -74,6 +74,7 @@ func (r *Registry) Register(cmd CommandType, entry *CommandEntry) {
 	if int(cmd) < 0 || int(cmd) >= len(r) {
 		panic("redis: CommandType out of registry bounds; update CmdMax")
 	}
+
 	r[cmd] = entry
 }
 
@@ -82,6 +83,7 @@ func (r *Registry) Lookup(cmd CommandType) *CommandEntry {
 	if int(cmd) >= len(r) {
 		return nil
 	}
+
 	return r[cmd]
 }
 
@@ -100,10 +102,12 @@ func KeysAllButLast(cmd *Command) []string {
 	if len(cmd.Args) < 2 {
 		return nil
 	}
+
 	keys := make([]string, len(cmd.Args)-1)
 	for i := 0; i < len(cmd.Args)-1; i++ {
 		keys[i] = string(cmd.Args[i])
 	}
+
 	return keys
 }
 
@@ -113,18 +117,22 @@ func KeysNumkeysAtOffset(cmd *Command, offset int) []string {
 	if len(cmd.Args) <= offset {
 		return nil
 	}
+
 	numKeys, ok := ParseInt64(cmd.Args[offset])
 	if !ok || numKeys <= 0 {
 		return nil
 	}
+
 	start := offset + 1
 	if int64(len(cmd.Args)-start) < numKeys {
 		return nil
 	}
+
 	keys := make([]string, numKeys)
 	for i := range numKeys {
 		keys[i] = string(cmd.Args[start+int(i)])
 	}
+
 	return keys
 }
 
@@ -134,6 +142,7 @@ func KeysFirstTwo(cmd *Command) []string {
 	if len(cmd.Args) < 2 {
 		return nil
 	}
+
 	return []string{string(cmd.Args[0]), string(cmd.Args[1])}
 }
 
@@ -142,7 +151,9 @@ func KeysFirst(cmd *Command) []string {
 	if len(cmd.Args) < 1 {
 		return nil
 	}
+
 	cmd.SetSingleKey(cmd.Args[0])
+
 	return cmd.SingleKeySlice()
 }
 
@@ -151,24 +162,31 @@ func KeysFirst(cmd *Command) []string {
 func KeysAfterStreams(cmd *Command) []string {
 	// Find STREAMS keyword
 	streamsIdx := -1
+
 	for i, arg := range cmd.Args {
 		if strings.EqualFold(string(arg), "STREAMS") {
 			streamsIdx = i
+
 			break
 		}
 	}
+
 	if streamsIdx < 0 {
 		return nil
 	}
+
 	remaining := cmd.Args[streamsIdx+1:]
 	if len(remaining) == 0 || len(remaining)%2 != 0 {
 		return nil
 	}
+
 	numStreams := len(remaining) / 2
+
 	keys := make([]string, numStreams)
 	for i := range numStreams {
 		keys[i] = string(remaining[i])
 	}
+
 	return keys
 }
 
@@ -198,6 +216,7 @@ func KeysAll(cmd *Command) []string {
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	return keys
 }
 
@@ -207,10 +226,12 @@ func KeysMSetStyle(cmd *Command) []string {
 	if len(cmd.Args) < 2 {
 		return nil
 	}
+
 	keys := make([]string, 0, len(cmd.Args)/2)
 	for i := 0; i < len(cmd.Args); i += 2 {
 		keys = append(keys, string(cmd.Args[i]))
 	}
+
 	return keys
 }
 
@@ -219,13 +240,16 @@ func KeysSortCmd(cmd *Command) []string {
 	if len(cmd.Args) < 1 {
 		return nil
 	}
+
 	keys := []string{string(cmd.Args[0])}
 	// Scan for STORE option
 	for i := 1; i < len(cmd.Args); i++ {
 		if strings.EqualFold(string(cmd.Args[i]), "STORE") && i+1 < len(cmd.Args) {
 			keys = append(keys, string(cmd.Args[i+1]))
+
 			break
 		}
 	}
+
 	return keys
 }

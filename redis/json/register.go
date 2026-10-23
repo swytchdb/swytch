@@ -32,6 +32,7 @@ func keysJSONMSet(cmd *shared.Command) []string {
 	for i := 0; i+2 < len(cmd.Args); i += 3 {
 		keys = append(keys, string(cmd.Args[i]))
 	}
+
 	return keys
 }
 
@@ -41,6 +42,7 @@ func keysJSONDebug(cmd *shared.Command) []string {
 	if len(cmd.Args) >= 2 && strings.EqualFold(string(cmd.Args[0]), "MEMORY") {
 		return []string{string(cmd.Args[1])}
 	}
+
 	return nil
 }
 

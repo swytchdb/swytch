@@ -25,8 +25,10 @@ import "github.com/swytchdb/swytch/redis/shared"
 func handleJSONToggle(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("json.toggle")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -36,13 +38,17 @@ func handleJSONToggle(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			if m.Kind != KindBool {
 				return nil, 0, false
 			}
+
 			nb := !m.Bool
+
 			var n int64
 			if nb {
 				n = 1
 			}
+
 			return newBool(nb), n, true
 		})
 	}
+
 	return
 }

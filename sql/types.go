@@ -50,6 +50,7 @@ func oidForSqliteType(t sqlite.ColumnType) uint32 {
 	case sqlite.TypeNull:
 		return oidText
 	}
+
 	return oidUnknown
 }
 
@@ -68,9 +69,11 @@ func readColumn(stmt *sqlite.Stmt, i int) any {
 		n := stmt.ColumnLen(i)
 		buf := make([]byte, n)
 		stmt.ColumnBytes(i, buf)
+
 		return buf
 	case sqlite.TypeNull:
 		return nil
 	}
+
 	return nil
 }

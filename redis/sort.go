@@ -63,7 +63,9 @@ func parseSortOptions(args [][]byte) (*sortOptions, error) {
 			if i+1 >= len(args) {
 				return nil, errors.New("ERR syntax error")
 			}
+
 			i++
+
 			opts.byPattern = string(args[i])
 			if strings.ToLower(opts.byPattern) == "nosort" {
 				opts.noSort = true
@@ -73,17 +75,21 @@ func parseSortOptions(args [][]byte) (*sortOptions, error) {
 			if i+1 >= len(args) {
 				return nil, errors.New("ERR syntax error")
 			}
+
 			i++
 			opts.getPatterns = append(opts.getPatterns, string(args[i]))
 		case "LIMIT":
 			if i+2 >= len(args) {
 				return nil, errors.New("ERR syntax error")
 			}
+
 			offset, ok1 := shared.ParseInt64(args[i+1])
+
 			count, ok2 := shared.ParseInt64(args[i+2])
 			if !ok1 || !ok2 {
 				return nil, errors.New("ERR value is not an integer or out of range")
 			}
+
 			opts.limit = true
 			opts.offset = int(offset)
 			opts.count = int(count)
@@ -98,11 +104,13 @@ func parseSortOptions(args [][]byte) (*sortOptions, error) {
 			if i+1 >= len(args) {
 				return nil, errors.New("ERR syntax error")
 			}
+
 			i++
 			opts.store = string(args[i])
 		default:
 			return nil, errors.New("ERR syntax error")
 		}
+
 		i++
 	}
 
@@ -135,9 +143,11 @@ func (h *Handler) handleSortRO(cmd *shared.Command, w *shared.Writer) {
 	for i := 1; i < len(cmd.Args); i++ {
 		if strings.EqualFold(string(cmd.Args[i]), "STORE") {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
+
 	h.handleSort(cmd, w)
 }
 
@@ -145,6 +155,7 @@ func (h *Handler) handleSortRO(cmd *shared.Command, w *shared.Writer) {
 func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("sort")
+
 		return
 	}
 
@@ -154,6 +165,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	opts, err := parseSortOptions(cmd.Args[1:])
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
 
@@ -161,42 +173,49 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	snap, _, err := cmd.Context.GetSnapshot(key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		// Key doesn't exist - return empty result
 		if opts.store != "" {
 			// Delete destination if it exists, return 0
 			if err := h.emitSortDelete(cmd, opts.store); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			w.WriteInteger(0)
 		} else {
 			w.WriteArray(0)
 		}
+
 		return
 	}
 
 	// Extract elements based on collection type
 	var elements [][]byte
-	switch snap.Collection {
+
+	switch snap.GetCollection() {
 	case pb.CollectionKind_SCALAR:
 		w.WriteWrongType()
 
 		return
 	case pb.CollectionKind_ORDERED:
 		// Lists
-		for _, elem := range snap.OrderedElements {
-			elements = append(elements, elem.Data.Decompress())
+		for _, elem := range snap.GetOrderedElements() {
+			elements = append(elements, elem.GetData().Decompress())
 		}
 	case pb.CollectionKind_KEYED:
 		// Sets and sorted sets
-		for _, elem := range snap.NetAdds {
-			elements = append(elements, elem.Data.Decompress())
+		for _, elem := range snap.GetNetAdds() {
+			elements = append(elements, elem.GetData().Decompress())
 		}
 	default:
 		w.WriteWrongType()
+
 		return
 	}
 
@@ -204,6 +223,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	items, err := h.buildSortItems(cmd.Context, elements, opts)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
 
@@ -221,6 +241,7 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	results, err := h.buildResults(cmd.Context, items, opts)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
 
@@ -228,11 +249,14 @@ func (h *Handler) handleSort(cmd *shared.Command, w *shared.Writer) {
 	if opts.store != "" {
 		if err := h.storeResults(cmd, opts.store, results); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteInteger(int64(len(results)))
 	} else {
 		w.WriteArray(len(results))
+
 		for _, r := range results {
 			if r == nil {
 				w.WriteNullBulkString()
@@ -254,29 +278,34 @@ func (h *Handler) getExternalValue(ectx *effects.Context, pattern string, elemen
 	if h.engine == nil || ectx == nil {
 		return nil, false, nil
 	}
+
 	snap, _, err := ectx.GetSnapshot(key)
 	if err != nil {
 		return nil, false, err
 	}
+
 	if snap == nil {
 		return nil, false, nil
 	}
 
 	if isHash {
-		if snap.Collection != pb.CollectionKind_KEYED {
+		if snap.GetCollection() != pb.CollectionKind_KEYED {
 			return nil, false, nil
 		}
-		elem, ok := snap.NetAdds[field]
+
+		elem, ok := snap.GetNetAdds()[field]
 		if !ok {
 			return nil, false, nil
 		}
-		return elem.Data.Decompress(), true, nil
+
+		return elem.GetData().Decompress(), true, nil
 	}
 
-	if snap.Scalar == nil {
+	if snap.GetScalar() == nil {
 		return nil, false, nil
 	}
-	return snap.Scalar.Decompress(), true, nil
+
+	return snap.GetScalar().Decompress(), true, nil
 }
 
 // buildSortItems creates sortItems from elements with computed weights
@@ -292,6 +321,7 @@ func (h *Handler) buildSortItems(ectx *effects.Context, elements [][]byte, opts 
 			if err != nil {
 				return nil, err
 			}
+
 			if ok {
 				if opts.alpha {
 					item.strWeight = string(weightData)
@@ -330,9 +360,11 @@ func sortItems(items []sortItem, opts *sortOptions) {
 		} else {
 			less = items[i].weight < items[j].weight
 		}
+
 		if opts.desc {
 			return !less
 		}
+
 		return less
 	})
 }
@@ -342,10 +374,12 @@ func applyLimit(items []sortItem, offset, count int) []sortItem {
 	if offset >= len(items) {
 		return nil
 	}
+
 	items = items[offset:]
 	if count >= 0 && count < len(items) {
 		items = items[:count]
 	}
+
 	return items
 }
 
@@ -357,6 +391,7 @@ func (h *Handler) buildResults(ectx *effects.Context, items []sortItem, opts *so
 		for i, item := range items {
 			results[i] = item.element
 		}
+
 		return results, nil
 	}
 
@@ -372,10 +407,12 @@ func (h *Handler) buildResults(ectx *effects.Context, items []sortItem, opts *so
 				if err != nil {
 					return nil, err
 				}
+
 				results = append(results, val) // nil if not found
 			}
 		}
 	}
+
 	return results, nil
 }
 
@@ -385,6 +422,7 @@ func (h *Handler) emitSortDelete(cmd *shared.Command, key string) error {
 	if err != nil {
 		return err
 	}
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -429,7 +467,9 @@ func (h *Handler) storeResults(cmd *shared.Command, destKey string, results [][]
 		if value == nil {
 			value = []byte{}
 		}
+
 		hlc := shared.NextHLC()
+
 		id := shared.EncodeElementID(hlc, shared.EffectsNodeID)
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key: []byte(destKey),

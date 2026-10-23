@@ -29,10 +29,13 @@ import (
 // collectEffects returns an emitFn that appends to effs.
 func collectEffects() (emitFn, *[]*pb.Effect) {
 	var effs []*pb.Effect
+
 	emit := func(e *pb.Effect) error {
 		effs = append(effs, e)
+
 		return nil
 	}
+
 	return emit, &effs
 }
 
@@ -40,19 +43,24 @@ func collectEffects() (emitFn, *[]*pb.Effect) {
 // reducer, assembles the result back, and checks it matches the canonical input.
 func roundTrip(t *testing.T, in string) {
 	t.Helper()
+
 	v, err := Parse([]byte(in))
 	if err != nil {
 		t.Fatalf("Parse(%s): %v", in, err)
 	}
+
 	emit, effs := collectEffects()
 	if err := encodeRoot(emit, "k", v); err != nil {
 		t.Fatalf("encodeRoot(%s): %v", in, err)
 	}
+
 	root := effects.ReduceBranch(*effs)
+
 	got := assemble(root, "")
 	if got == nil {
 		t.Fatalf("assemble(%s) = nil", in)
 	}
+
 	if out := string(Serialize(got)); out != in {
 		t.Errorf("round-trip(%s) = %s", in, out)
 	}
@@ -85,29 +93,32 @@ func TestTree_RoundTrip(t *testing.T) {
 // direct members, nested objects/arrays live under generated virtual ids.
 func TestTree_PartitionsPerContainer(t *testing.T) {
 	v, _ := Parse([]byte(`{"a":1,"b":{"c":2},"arr":[10,{"d":3}]}`))
+
 	emit, effs := collectEffects()
 	if err := encodeRoot(emit, "k", v); err != nil {
 		t.Fatal(err)
 	}
+
 	root := effects.ReduceBranch(*effs)
 
 	// Root is an object with 3 direct members (a, b, arr) in order.
-	if root.TypeTag != pb.ValueType_TYPE_JSON_OBJECT {
-		t.Fatalf("root TypeTag = %v", root.TypeTag)
+	if root.GetTypeTag() != pb.ValueType_TYPE_JSON_OBJECT {
+		t.Fatalf("root TypeTag = %v", root.GetTypeTag())
 	}
-	if len(root.OrderedElements) != 3 {
-		t.Fatalf("root has %d direct members, want 3", len(root.OrderedElements))
+
+	if len(root.GetOrderedElements()) != 3 {
+		t.Fatalf("root has %d direct members, want 3", len(root.GetOrderedElements()))
 	}
 	// b (object) and arr (array)/its object element are separate partitions:
 	// 1 for b, 1 for arr, 1 for arr's {"d":3} element = 3 non-root partitions.
-	if len(root.Partitions) != 3 {
-		t.Fatalf("got %d non-root partitions, want 3: keys=%v", len(root.Partitions), partitionKinds(root))
+	if len(root.GetPartitions()) != 3 {
+		t.Fatalf("got %d non-root partitions, want 3: keys=%v", len(root.GetPartitions()), partitionKinds(root))
 	}
 	// The scalar member a is inline (no child partition): its value is the raw
 	// variant holding JSON text, not the child variant.
-	for _, el := range root.OrderedElements {
-		if string(el.Data.Id) == "a" {
-			if d := el.Data; len(d.GetChild()) != 0 || string(d.GetRaw()) != "1" {
+	for _, el := range root.GetOrderedElements() {
+		if string(el.GetData().GetId()) == "a" {
+			if d := el.GetData(); len(d.GetChild()) != 0 || string(d.GetRaw()) != "1" {
 				t.Fatalf("member a not inline scalar: child=%q raw=%q", d.GetChild(), d.GetRaw())
 			}
 		}
@@ -116,8 +127,9 @@ func TestTree_PartitionsPerContainer(t *testing.T) {
 
 func partitionKinds(root *pb.ReducedEffect) map[string]pb.ValueType {
 	m := make(map[string]pb.ValueType)
-	for k, p := range root.Partitions {
-		m[k] = p.TypeTag
+	for k, p := range root.GetPartitions() {
+		m[k] = p.GetTypeTag()
 	}
+
 	return m
 }

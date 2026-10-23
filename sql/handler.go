@@ -44,6 +44,7 @@ const (
 // parses + executes once, and prepared statements are single-use.
 func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.PreparedStatements, error) {
 	query := incoming.Query
+
 	sess, err := sessionFromCtx(ctx)
 	if err != nil {
 		return nil, err
@@ -62,6 +63,7 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 		if err != nil {
 			return nil, err
 		}
+
 		return wire.Prepared(stmt), nil
 	}
 
@@ -71,6 +73,7 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 		if err != nil {
 			return nil, err
 		}
+
 		return wire.Prepared(stmt), nil
 	}
 
@@ -115,12 +118,16 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 		if finErr := sqliteStmt.Finalize(); finErr != nil {
 			return nil, errors.Join(stepErr, fmt.Errorf("finalize: %w", finErr))
 		}
+
 		return nil, stepErr
 	}
+
 	exhausted := !hasFirst
 
-	var firstRow []any
-	var cols wire.Columns
+	var (
+		firstRow []any
+		cols     wire.Columns
+	)
 	if colCount > 0 {
 		cols = make(wire.Columns, colCount)
 		for i := range colCount {
@@ -130,12 +137,14 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 			} else {
 				oid = oidUnknown
 			}
+
 			cols[i] = wire.Column{
 				Name:  sqliteStmt.ColumnName(i),
 				Oid:   oid,
 				Width: -1,
 			}
 		}
+
 		if hasFirst {
 			firstRow = make([]any, colCount)
 			for i := range colCount {
@@ -161,31 +170,39 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 		}()
 
 		rowsWritten := uint32(0)
+
 		if firstRow != nil {
 			if err := writer.Row(firstRow); err != nil {
 				return err
 			}
+
 			rowsWritten++
 		}
+
 		if !exhausted {
 			for {
 				has, err := sqliteStmt.Step()
 				if err != nil {
 					return fmt.Errorf("sqlite step: %w", err)
 				}
+
 				if !has {
 					break
 				}
+
 				if colCount == 0 {
 					continue
 				}
+
 				row := make([]any, colCount)
 				for i := range colCount {
 					row[i] = readColumn(sqliteStmt, i)
 				}
+
 				if err := writer.Row(row); err != nil {
 					return err
 				}
+
 				rowsWritten++
 			}
 		}
@@ -195,6 +212,7 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 		if colCount == 0 {
 			tagCount = uint32(sess.conn.Changes() - changesBefore)
 		}
+
 		return writer.Complete(formatTag(tagPrefix, tagCount))
 	}
 
@@ -202,6 +220,7 @@ func (s *Server) handle(ctx context.Context, incoming wire.Query) (wire.Prepared
 	if cols != nil {
 		opts = append(opts, wire.WithColumns(cols))
 	}
+
 	return wire.Prepared(wire.NewStatement(execFn, opts...)), nil
 }
 
@@ -238,14 +257,17 @@ func interceptShowSet(query string) (*wire.PreparedStatement, bool) {
 			if err := writer.Row([]any{dialectValue}); err != nil {
 				return err
 			}
+
 			return writer.Complete("SHOW")
 		}
+
 		return wire.NewStatement(fn, wire.WithColumns(cols)), true
 
 	case matchesSetDialect(upper):
 		fn := func(ctx context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 			return writer.Complete("SET")
 		}
+
 		return wire.NewStatement(fn), true
 
 	case strings.HasPrefix(upper, "SHOW "):
@@ -259,16 +281,20 @@ func interceptShowSet(query string) (*wire.PreparedStatement, bool) {
 			if err := writer.Row([]any{value}); err != nil {
 				return err
 			}
+
 			return writer.Complete("SHOW")
 		}
+
 		return wire.NewStatement(fn, wire.WithColumns(cols)), true
 
 	case strings.HasPrefix(upper, "SET "):
 		fn := func(ctx context.Context, writer wire.DataWriter, _ []wire.Parameter) error {
 			return writer.Complete("SET")
 		}
+
 		return wire.NewStatement(fn), true
 	}
+
 	return nil, false
 }
 
@@ -276,7 +302,9 @@ func matchesShowDialect(upper string) bool {
 	if !strings.HasPrefix(upper, "SHOW") {
 		return false
 	}
+
 	rest := strings.TrimSpace(strings.TrimPrefix(upper, "SHOW"))
+
 	return rest == "SWYTCH.DIALECT"
 }
 
@@ -284,7 +312,9 @@ func matchesSetDialect(upper string) bool {
 	if !strings.HasPrefix(upper, "SET") {
 		return false
 	}
+
 	rest := strings.TrimSpace(strings.TrimPrefix(upper, "SET"))
+
 	return strings.HasPrefix(rest, "SWYTCH.DIALECT")
 }
 
@@ -317,6 +347,7 @@ func showParamResponse(trimmed string) (string, string) {
 	case "INTEGER_DATETIMES":
 		return "integer_datetimes", "on"
 	}
+
 	return name, ""
 }
 
@@ -340,6 +371,7 @@ func showParamResponse(trimmed string) (string, string) {
 func stripPgTypeCasts(query string) string {
 	var b strings.Builder
 	b.Grow(len(query))
+
 	i := 0
 	for i < len(query) {
 		c := query[i]
@@ -348,29 +380,39 @@ func stripPgTypeCasts(query string) string {
 			// Copy through the string literal, including doubled
 			// single quotes `''` which SQL uses as escape.
 			b.WriteByte(c)
+
 			i++
 			for i < len(query) {
 				b.WriteByte(query[i])
+
 				if query[i] == '\'' {
 					i++
 					if i < len(query) && query[i] == '\'' {
 						b.WriteByte('\'')
+
 						i++
+
 						continue
 					}
+
 					break
 				}
+
 				i++
 			}
 		case '"':
 			b.WriteByte(c)
+
 			i++
 			for i < len(query) {
 				b.WriteByte(query[i])
+
 				if query[i] == '"' {
 					i++
+
 					break
 				}
+
 				i++
 			}
 		case ':':
@@ -383,13 +425,16 @@ func stripPgTypeCasts(query string) string {
 				// Optional (N) or (N,M) length/precision.
 				if j < len(query) && query[j] == '(' {
 					depth := 1
+
 					j++
 					for j < len(query) && depth > 0 {
-						if query[j] == '(' {
+						switch query[j] {
+						case '(':
 							depth++
-						} else if query[j] == ')' {
+						case ')':
 							depth--
 						}
+
 						j++
 					}
 				}
@@ -397,16 +442,22 @@ func stripPgTypeCasts(query string) string {
 				for j+1 < len(query) && query[j] == '[' && query[j+1] == ']' {
 					j += 2
 				}
+
 				i = j
+
 				continue
 			}
+
 			b.WriteByte(c)
+
 			i++
 		default:
 			b.WriteByte(c)
+
 			i++
 		}
 	}
+
 	return b.String()
 }
 
@@ -431,20 +482,26 @@ func commandTag(query string) string {
 		nl := strings.IndexByte(trimmed, '\n')
 		if nl < 0 {
 			trimmed = ""
+
 			break
 		}
+
 		trimmed = strings.TrimLeft(trimmed[nl+1:], " \t\r\n")
 	}
+
 	end := len(trimmed)
 	for i, r := range trimmed {
 		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' || r == ';' {
 			end = i
+
 			break
 		}
 	}
+
 	if end == 0 {
 		return ""
 	}
+
 	return strings.ToUpper(trimmed[:end])
 }
 

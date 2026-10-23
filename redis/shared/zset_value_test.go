@@ -58,6 +58,7 @@ func TestZSetValueBasicOperations(t *testing.T) {
 	if removed != 1 {
 		t.Errorf("ZRem: expected 1 removed, got %d", removed)
 	}
+
 	if zset.ZCard() != 2 {
 		t.Errorf("ZCard after ZRem: expected 2, got %d", zset.ZCard())
 	}
@@ -132,12 +133,15 @@ func TestZSetValueRank(t *testing.T) {
 	if rank := zset.ZRank("a"); rank != 0 {
 		t.Errorf("ZRank('a'): expected 0, got %d", rank)
 	}
+
 	if rank := zset.ZRank("b"); rank != 1 {
 		t.Errorf("ZRank('b'): expected 1, got %d", rank)
 	}
+
 	if rank := zset.ZRank("c"); rank != 2 {
 		t.Errorf("ZRank('c'): expected 2, got %d", rank)
 	}
+
 	if rank := zset.ZRank("nonexistent"); rank != -1 {
 		t.Errorf("ZRank('nonexistent'): expected -1, got %d", rank)
 	}
@@ -146,9 +150,11 @@ func TestZSetValueRank(t *testing.T) {
 	if rank := zset.ZRevRank("c"); rank != 0 {
 		t.Errorf("ZRevRank('c'): expected 0, got %d", rank)
 	}
+
 	if rank := zset.ZRevRank("b"); rank != 1 {
 		t.Errorf("ZRevRank('b'): expected 1, got %d", rank)
 	}
+
 	if rank := zset.ZRevRank("a"); rank != 2 {
 		t.Errorf("ZRevRank('a'): expected 2, got %d", rank)
 	}
@@ -169,6 +175,7 @@ func TestZSetValueRange(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("ZRange(1,3): expected 3 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "b" || entries[1].Member != "c" || entries[2].Member != "d" {
 		t.Errorf("ZRange(1,3): unexpected members")
 	}
@@ -178,6 +185,7 @@ func TestZSetValueRange(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ZRange(-2,-1): expected 2 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "d" || entries[1].Member != "e" {
 		t.Errorf("ZRange(-2,-1): expected d,e, got %s,%s", entries[0].Member, entries[1].Member)
 	}
@@ -187,6 +195,7 @@ func TestZSetValueRange(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("ZRange reverse: expected 3 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "e" || entries[1].Member != "d" || entries[2].Member != "c" {
 		t.Errorf("ZRange reverse: unexpected order")
 	}
@@ -207,6 +216,7 @@ func TestZSetValueRangeByScore(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("ZRangeByScore(2,4): expected 3 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "b" || entries[1].Member != "c" || entries[2].Member != "d" {
 		t.Errorf("ZRangeByScore(2,4): unexpected members")
 	}
@@ -216,6 +226,7 @@ func TestZSetValueRangeByScore(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ZRangeByScore((2,4]: expected 2 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "c" || entries[1].Member != "d" {
 		t.Errorf("ZRangeByScore((2,4]: unexpected members")
 	}
@@ -231,6 +242,7 @@ func TestZSetValueRangeByScore(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ZRangeByScore with LIMIT: expected 2 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "b" || entries[1].Member != "c" {
 		t.Errorf("ZRangeByScore with LIMIT: unexpected members")
 	}
@@ -302,9 +314,11 @@ func TestZSetValuePopMin(t *testing.T) {
 	if !ok {
 		t.Fatal("ZPopMin: expected ok=true")
 	}
+
 	if entry.Member != "a" || entry.Score != 1.0 {
 		t.Errorf("ZPopMin: expected (a, 1.0), got (%s, %f)", entry.Member, entry.Score)
 	}
+
 	if zset.ZCard() != 2 {
 		t.Errorf("ZCard after ZPopMin: expected 2, got %d", zset.ZCard())
 	}
@@ -314,9 +328,11 @@ func TestZSetValuePopMin(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ZPopMinN(2): expected 2 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "b" || entries[1].Member != "c" {
 		t.Errorf("ZPopMinN(2): unexpected members")
 	}
+
 	if zset.ZCard() != 0 {
 		t.Errorf("ZCard after ZPopMinN: expected 0, got %d", zset.ZCard())
 	}
@@ -335,6 +351,7 @@ func TestZSetValuePopMax(t *testing.T) {
 	if !ok {
 		t.Fatal("ZPopMax: expected ok=true")
 	}
+
 	if entry.Member != "c" || entry.Score != 3.0 {
 		t.Errorf("ZPopMax: expected (c, 3.0), got (%s, %f)", entry.Member, entry.Score)
 	}
@@ -344,6 +361,7 @@ func TestZSetValuePopMax(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ZPopMaxN(2): expected 2 entries, got %d", len(entries))
 	}
+
 	if entries[0].Member != "b" || entries[1].Member != "a" {
 		t.Errorf("ZPopMaxN(2): unexpected members, got %s, %s", entries[0].Member, entries[1].Member)
 	}
@@ -358,6 +376,7 @@ func TestZSetValueAddWithOptions(t *testing.T) {
 	if added || changed {
 		t.Error("NX on existing member should return (false, false)")
 	}
+
 	if score, _ := zset.ZScore("a"); score != 1.0 {
 		t.Errorf("NX should not change score, got %f", score)
 	}

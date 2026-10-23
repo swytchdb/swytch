@@ -45,12 +45,13 @@ func getStringSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
 	// Pure scalar string
-	if snap.Collection == pb.CollectionKind_SCALAR &&
-		(snap.TypeTag == pb.ValueType_TYPE_STRING || snap.TypeTag == pb.ValueType_TYPE_UNSPECIFIED) {
+	if snap.GetCollection() == pb.CollectionKind_SCALAR &&
+		(snap.GetTypeTag() == pb.ValueType_TYPE_STRING || snap.GetTypeTag() == pb.ValueType_TYPE_UNSPECIFIED) {
 		return snap, tips, true, false, nil
 	}
 	// Try reconstruction (bitmap, HLL, etc.)
@@ -59,10 +60,12 @@ func getStringSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect,
 			Collection: pb.CollectionKind_SCALAR,
 			TypeTag:    pb.ValueType_TYPE_STRING,
 			Scalar:     &pb.DataEffect{Value: &pb.DataEffect_Raw{Raw: data}},
-			ExpiresAt:  snap.ExpiresAt,
+			ExpiresAt:  snap.GetExpiresAt(),
 		}
+
 		return synth, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -106,26 +109,31 @@ func computeExpiresAtMs(expireSeconds, expireMillis, expireAt, expireAtMillis in
 	if expireSeconds > 0 {
 		return timestamppb.New(time.Now().Add(time.Duration(expireSeconds) * time.Second))
 	}
+
 	if expireMillis > 0 {
 		return timestamppb.New(time.Now().Add(time.Duration(expireMillis) * time.Millisecond))
 	}
+
 	if expireAt > 0 {
 		return timestamppb.New(time.Unix(expireAt, 0))
 	}
+
 	if expireAtMillis > 0 {
 		return timestamppb.New(time.UnixMilli(expireAtMillis))
 	}
+
 	return nil
 }
 
 // snapshotToRaw renders any scalar snapshot value back to its byte representation.
 func snapshotToRaw(snap *pb.ReducedEffect) []byte {
-	if snap == nil || snap.Scalar == nil {
+	if snap == nil || snap.GetScalar() == nil {
 		return nil
 	}
-	switch v := snap.Scalar.Value.(type) {
+
+	switch v := snap.GetScalar().GetValue().(type) {
 	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
-		return snap.Scalar.Decompress()
+		return snap.GetScalar().Decompress()
 	case *pb.DataEffect_IntVal:
 		return []byte(strconv.FormatInt(v.IntVal, 10))
 	case *pb.DataEffect_FloatVal:
@@ -136,14 +144,15 @@ func snapshotToRaw(snap *pb.ReducedEffect) []byte {
 }
 
 func snapshotToInt(snap *pb.ReducedEffect) (int64, bool) {
-	if snap == nil || snap.Scalar == nil {
+	if snap == nil || snap.GetScalar() == nil {
 		return 0, true
 	}
-	switch v := snap.Scalar.Value.(type) {
+
+	switch v := snap.GetScalar().GetValue().(type) {
 	case *pb.DataEffect_IntVal:
 		return v.IntVal, true
 	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
-		return shared.ParseInt64(snap.Scalar.Decompress())
+		return shared.ParseInt64(snap.GetScalar().Decompress())
 	case nil:
 		return 0, true
 	default:
@@ -152,14 +161,16 @@ func snapshotToInt(snap *pb.ReducedEffect) (int64, bool) {
 }
 
 func snapshotToFloat(snap *pb.ReducedEffect) (float64, bool) {
-	if snap == nil || snap.Scalar == nil {
+	if snap == nil || snap.GetScalar() == nil {
 		return 0, true
 	}
-	switch v := snap.Scalar.Value.(type) {
+
+	switch v := snap.GetScalar().GetValue().(type) {
 	case *pb.DataEffect_FloatVal:
 		return v.FloatVal, true
 	case *pb.DataEffect_Raw, *pb.DataEffect_Compressed:
-		f, err := strconv.ParseFloat(string(snap.Scalar.Decompress()), 64)
+		f, err := strconv.ParseFloat(string(snap.GetScalar().Decompress()), 64)
+
 		return f, err == nil
 	case *pb.DataEffect_IntVal:
 		return float64(v.IntVal), true
@@ -197,6 +208,7 @@ func emitIncrFloat(cmd *shared.Command, key string, delta float64, tips ...[]eff
 func handleGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("get")
+
 		return
 	}
 
@@ -208,25 +220,32 @@ func handleGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		snap, _, exists, wrongType, err := getStringSnapshot(cmd, cmd.SingleKeyValue())
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		w.WriteBulkString(snapshotToRaw(snap))
 	}
+
 	return
 }
 
 func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("set")
+
 		return
 	}
 
@@ -234,11 +253,13 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	value := cmd.Args[1]
 
 	// Parse options: EX seconds | PX milliseconds | EXAT timestamp | PXAT timestamp | NX | XX | IFEQ | IFNE | IFDEQ | IFDNE | KEEPTTL | GET
-	var expireSeconds, expireMillis int64
-	var expireAt, expireAtMillis int64
-	var nx, xx, keepTTL, getOld bool
-	var ifeq, ifne, ifdeq, ifdne bool
-	var compareValue []byte
+	var (
+		expireSeconds, expireMillis int64
+		expireAt, expireAtMillis    int64
+		nx, xx, keepTTL, getOld     bool
+		ifeq, ifne, ifdeq, ifdne    bool
+		compareValue                []byte
+	)
 
 	i := 2
 	for i < len(cmd.Args) {
@@ -247,66 +268,94 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		case "EX":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			sec, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireSeconds(sec) {
 				w.WriteError("ERR invalid expire time in 'set' command")
+
 				return
 			}
+
 			expireSeconds = sec
 		case "PX":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ms, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireMillis(ms) {
 				w.WriteError("ERR invalid expire time in 'set' command")
+
 				return
 			}
+
 			expireMillis = ms
 		case optionExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ts, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireAtSeconds(ts) {
 				w.WriteError("ERR invalid expire time in 'set' command")
+
 				return
 			}
+
 			expireAt = ts
 		case optionPExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ts, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireAtMillis(ts) {
 				w.WriteError("ERR invalid expire time in 'set' command")
+
 				return
 			}
+
 			expireAtMillis = ts
 		case "NX":
 			nx = true
@@ -315,32 +364,40 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		case optionIfEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
 			ifeq = true
 			compareValue = cmd.Args[i]
 		case optionIfNotEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
 			ifne = true
 			compareValue = cmd.Args[i]
 		case optionIfDigestEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
 			ifdeq = true
 			compareValue = cmd.Args[i]
 		case optionIfDigestNotEqual:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
 			ifdne = true
 			compareValue = cmd.Args[i]
@@ -350,8 +407,10 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			getOld = true
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
+
 		i++
 	}
 
@@ -360,18 +419,23 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	if nx {
 		condCount++
 	}
+
 	if xx {
 		condCount++
 	}
+
 	if ifeq {
 		condCount++
 	}
+
 	if ifne {
 		condCount++
 	}
+
 	if ifdeq {
 		condCount++
 	}
+
 	if ifdne {
 		condCount++
 	}
@@ -379,6 +443,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	// NX, XX, IFEQ, IFNE, IFDEQ, IFDNE are mutually exclusive
 	if condCount > 1 {
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -389,6 +454,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
@@ -398,6 +464,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 				defer w.WriteBulkString(snapshotToRaw(snap))
 			} else if wrongType {
 				w.WriteWrongType()
+
 				return
 			} else {
 				defer w.WriteNullBulkString()
@@ -409,12 +476,15 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			if !getOld {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if xx && !exists {
 			if !getOld {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
@@ -424,16 +494,21 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 				if !getOld {
 					w.WriteNullBulkString()
 				}
+
 				return
 			}
+
 			if wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !bytes.Equal(snapshotToRaw(snap), compareValue) {
 				if !getOld {
 					w.WriteNullBulkString()
 				}
+
 				return
 			}
 		}
@@ -443,12 +518,15 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			if exists {
 				if wrongType {
 					w.WriteWrongType()
+
 					return
 				}
+
 				if bytes.Equal(snapshotToRaw(snap), compareValue) {
 					if !getOld {
 						w.WriteNullBulkString()
 					}
+
 					return
 				}
 			}
@@ -460,21 +538,28 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 				if !getOld {
 					w.WriteNullBulkString()
 				}
+
 				return
 			}
+
 			if wrongType {
 				w.WriteWrongType()
+
 				return
 			}
+
 			if !isValidHexDigest(compareValue) {
 				w.WriteError("ERR digest must be exactly 16 hexadecimal characters")
+
 				return
 			}
+
 			hash := xxh3.Hash(snapshotToRaw(snap))
 			if !digestEquals(hash, compareValue) {
 				if !getOld {
 					w.WriteNullBulkString()
 				}
+
 				return
 			}
 		}
@@ -484,17 +569,22 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			if exists {
 				if wrongType {
 					w.WriteWrongType()
+
 					return
 				}
+
 				if !isValidHexDigest(compareValue) {
 					w.WriteError("ERR digest must be exactly 16 hexadecimal characters")
+
 					return
 				}
+
 				hash := xxh3.Hash(snapshotToRaw(snap))
 				if digestEquals(hash, compareValue) {
 					if !getOld {
 						w.WriteNullBulkString()
 					}
+
 					return
 				}
 			}
@@ -503,19 +593,22 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		// Emit the SET
 		if err := emitStringSet(cmd, key, value, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Compute and emit TTL
 		var expiresAtMs *timestamppb.Timestamp
 		if keepTTL && exists && snap != nil {
-			expiresAtMs = snap.ExpiresAt
+			expiresAtMs = snap.GetExpiresAt()
 		} else {
 			expiresAtMs = computeExpiresAtMs(expireSeconds, expireMillis, expireAt, expireAtMillis)
 		}
+
 		if expiresAtMs != nil {
 			if err := emitStringTTL(cmd, key, expiresAtMs); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -524,6 +617,7 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		if !exists || wrongType {
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -536,12 +630,14 @@ func handleSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			s.CmdSet.Add(1)
 		}
 	}
+
 	return
 }
 
 func handleSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("setnx")
+
 		return
 	}
 
@@ -554,41 +650,56 @@ func handleSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		_, tips, exists, _, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if err := emitStringSet(cmd, key, value, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitStringTypeTag(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOne()
 	}
+
 	return
 }
 
 func handleSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("setex")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	seconds, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	if !validateExpireSeconds(seconds) {
 		w.WriteError("ERR invalid expire time in 'setex' command")
+
 		return
 	}
+
 	value := cmd.Args[2]
 	keys = []string{key}
 	valid = true
@@ -596,37 +707,50 @@ func handleSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	runner = func() {
 		if err := emitStringSet(cmd, key, value); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitStringTTL(cmd, key, computeExpiresAtMs(seconds, 0, 0, 0)); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitStringTypeTag(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handlePSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("psetex")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	millis, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	if !validateExpireMillis(millis) {
 		w.WriteError("ERR invalid expire time in 'psetex' command")
+
 		return
 	}
+
 	value := cmd.Args[2]
 	keys = []string{key}
 	valid = true
@@ -634,24 +758,32 @@ func handlePSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	runner = func() {
 		if err := emitStringSet(cmd, key, value); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitStringTTL(cmd, key, computeExpiresAtMs(0, millis, 0, 0)); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitStringTypeTag(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleGetSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("getset")
+
 		return
 	}
 
@@ -664,10 +796,13 @@ func handleGetSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if exists && wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -678,16 +813,20 @@ func handleGetSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if err := emitStringSet(cmd, key, value); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -698,12 +837,14 @@ func handleGetSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			w.WriteNullBulkString()
 		}
 	}
+
 	return
 }
 
 func handleGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("getdel")
+
 		return
 	}
 
@@ -715,14 +856,19 @@ func handleGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -733,30 +879,36 @@ func handleGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if err := emitDeleteKey(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		w.WriteBulkString(snapshotToRaw(snap))
 	}
+
 	return
 }
 
 func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("getex")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 
 	// Pre-validate options
-	var expireSeconds, expireMillis, expireAt, expireAtMillis int64
-	var persist bool
+	var (
+		expireSeconds, expireMillis, expireAt, expireAtMillis int64
+		persist                                               bool
+	)
 
 	if len(cmd.Args) > 1 {
 		opt := shared.ToUpper(cmd.Args[1])
@@ -764,67 +916,92 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		case "EX":
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			sec, ok := shared.ParseInt64(cmd.Args[2])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireSeconds(sec) {
 				w.WriteError("ERR invalid expire time in 'getex' command")
+
 				return
 			}
+
 			expireSeconds = sec
 		case "PX":
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			ms, ok := shared.ParseInt64(cmd.Args[2])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireMillis(ms) {
 				w.WriteError("ERR invalid expire time in 'getex' command")
+
 				return
 			}
+
 			expireMillis = ms
 		case optionExpireAt:
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			ts, ok := shared.ParseInt64(cmd.Args[2])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireAtSeconds(ts) {
 				w.WriteError("ERR invalid expire time in 'getex' command")
+
 				return
 			}
+
 			expireAt = ts
 		case optionPExpireAt:
 			if len(cmd.Args) != 3 {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			ts, ok := shared.ParseInt64(cmd.Args[2])
 			if !ok {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			if !validateExpireAtMillis(ts) {
 				w.WriteError("ERR invalid expire time in 'getex' command")
+
 				return
 			}
+
 			expireAtMillis = ts
 		case "PERSIST":
 			persist = true
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -836,14 +1013,19 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -857,6 +1039,7 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
@@ -866,20 +1049,24 @@ func handleGetEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			} else {
 				expiresAtMs = computeExpiresAtMs(expireSeconds, expireMillis, expireAt, expireAtMillis)
 			}
+
 			if err := emitStringTTL(cmd, key, expiresAtMs); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteBulkString(snapshotToRaw(snap))
 	}
+
 	return
 }
 
 func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("mget")
+
 		return
 	}
 
@@ -887,6 +1074,7 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	for i, arg := range cmd.Args {
 		keys[i] = string(arg)
 	}
+
 	valid = true
 
 	runner = func() {
@@ -894,31 +1082,37 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			snap *pb.ReducedEffect
 			data []byte
 		}
+
 		results := make([]mgetResult, len(keys))
 		for i, key := range keys {
 			snap, _, err := cmd.Context.GetSnapshot(key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if snap == nil {
 				continue
 			}
 			// Pure scalar string
-			if snap.Collection == pb.CollectionKind_SCALAR &&
-				(snap.TypeTag == pb.ValueType_TYPE_STRING || snap.TypeTag == pb.ValueType_TYPE_UNSPECIFIED) {
+			if snap.GetCollection() == pb.CollectionKind_SCALAR &&
+				(snap.GetTypeTag() == pb.ValueType_TYPE_STRING || snap.GetTypeTag() == pb.ValueType_TYPE_UNSPECIFIED) {
 				results[i].snap = snap
+
 				continue
 			}
 			// Try reconstruction (bitmap, HLL, etc.)
 			if data, ok := shared.ReconstructBytes(snap); ok {
 				results[i].data = data
+
 				continue
 			}
 			// MGET is lenient for WRONGTYPE — null — but read uncertainty is an error.
 		}
 
 		w.WriteArray(len(keys))
+
 		for _, r := range results {
 			if r.snap != nil {
 				w.WriteBulkString(snapshotToRaw(r.snap))
@@ -929,12 +1123,14 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		}
 	}
+
 	return
 }
 
 func handleMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 || len(cmd.Args)%2 != 0 {
 		w.WriteWrongNumArguments("mset")
+
 		return
 	}
 
@@ -942,6 +1138,7 @@ func handleMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	for i := 0; i < len(cmd.Args); i += 2 {
 		keys[i/2] = string(cmd.Args[i])
 	}
+
 	valid = true
 
 	runner = func() {
@@ -951,21 +1148,27 @@ func handleMSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 			if err := emitStringSet(cmd, key, value); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleMSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 || len(cmd.Args)%2 != 0 {
 		w.WriteWrongNumArguments("msetnx")
+
 		return
 	}
 
@@ -973,6 +1176,7 @@ func handleMSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	for i := 0; i < len(cmd.Args); i += 2 {
 		keys[i/2] = string(cmd.Args[i])
 	}
+
 	valid = true
 
 	runner = func() {
@@ -981,19 +1185,24 @@ func handleMSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			key  string
 			tips []effects.Tip
 		}
+
 		infos := make([]keyInfo, 0, len(keys))
 
 		for _, key := range keys {
 			snap, tips, _, _, err := getStringSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if snap != nil {
 				// Key exists — abort
 				w.WriteZero()
+
 				return
 			}
+
 			infos = append(infos, keyInfo{key: key, tips: tips})
 		}
 
@@ -1007,6 +1216,7 @@ func handleMSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, info.tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -1018,16 +1228,20 @@ func handleMSetNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 			if err := emitStringSet(cmd, key, value); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteOne()
 	}
+
 	return
 }
 
@@ -1036,12 +1250,14 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	// Minimum: numkeys + 1 key-value pair = 3 args
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("msetex")
+
 		return
 	}
 
 	numKeys, ok := shared.ParseInt64(cmd.Args[0])
 	if !ok || numKeys <= 0 {
 		w.WriteError("ERR invalid numkeys value")
+
 		return
 	}
 
@@ -1049,6 +1265,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	const maxNumKeys int64 = 2147483647
 	if numKeys > maxNumKeys {
 		w.WriteError("ERR invalid numkeys value")
+
 		return
 	}
 
@@ -1056,13 +1273,17 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	kvEnd := 1 + int(numKeys)*2
 	if len(cmd.Args) < kvEnd {
 		w.WriteError("ERR wrong number of key-value pairs")
+
 		return
 	}
 
 	// Parse options after key-value pairs
-	var expireSeconds, expireMillis int64
-	var expireAt, expireAtMillis int64
-	var nx, xx, keepTTL bool
+	var (
+		expireSeconds, expireMillis int64
+		expireAt, expireAtMillis    int64
+		nx, xx, keepTTL             bool
+	)
+
 	var expireCount int // Track how many expire options are set
 
 	i := kvEnd
@@ -1072,53 +1293,73 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		case "EX":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			sec, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || sec <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			expireSeconds = sec
 			expireCount++
 		case "PX":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ms, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || ms <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			expireMillis = ms
 			expireCount++
 		case optionExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ts, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || ts <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			expireAt = ts
 			expireCount++
 		case optionPExpireAt:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			ts, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || ts <= 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			expireAtMillis = ts
 			expireCount++
 		case "NX":
@@ -1130,20 +1371,24 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			expireCount++
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
+
 		i++
 	}
 
 	// NX and XX are mutually exclusive
 	if nx && xx {
 		w.WriteSyntaxError()
+
 		return
 	}
 
 	// Expiration options are mutually exclusive (EX, PX, EXAT, PXAT, KEEPTTL)
 	if expireCount > 1 {
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -1152,6 +1397,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	for j := 0; j < int(numKeys); j++ {
 		keys[j] = string(cmd.Args[1+j*2])
 	}
+
 	valid = true
 
 	runner = func() {
@@ -1161,14 +1407,17 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			tips []effects.Tip
 			snap *pb.ReducedEffect
 		}
+
 		infos := make([]keyInfo, 0, len(keys))
 
 		for _, key := range keys {
 			snap, tips, _, _, err := getStringSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			infos = append(infos, keyInfo{key: key, tips: tips, snap: snap})
 		}
 
@@ -1177,6 +1426,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			for _, info := range infos {
 				if info.snap != nil {
 					w.WriteZero()
+
 					return
 				}
 			}
@@ -1187,6 +1437,7 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			for _, info := range infos {
 				if info.snap == nil {
 					w.WriteZero()
+
 					return
 				}
 			}
@@ -1195,12 +1446,14 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		// Begin transaction if NX or XX (conditional multi-key write)
 		if nx || xx {
 			cmd.Context.BeginTx()
+
 			for _, info := range infos {
 				if err := cmd.Context.Emit(&pb.Effect{
 					Key:  []byte(info.key),
 					Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 				}, info.tips); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			}
@@ -1216,24 +1469,30 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 			if err := emitStringSet(cmd, key, value); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
 			// Determine TTL
 			ttl := expiresAtMs
 			if keepTTL && infos[idx].snap != nil {
-				ttl = infos[idx].snap.ExpiresAt
+				ttl = infos[idx].snap.GetExpiresAt()
 			}
+
 			if ttl != nil {
 				if err := emitStringTTL(cmd, key, ttl); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			}
+
 			idx++
 		}
 
@@ -1243,12 +1502,14 @@ func handleMSetEX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			w.WriteOK()
 		}
 	}
+
 	return
 }
 
 func handleIncr(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("incr")
+
 		return
 	}
 
@@ -1259,12 +1520,14 @@ func handleIncr(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	runner = func() {
 		incrBy(cmd, key, 1, w)
 	}
+
 	return
 }
 
 func handleDecr(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("decr")
+
 		return
 	}
 
@@ -1275,19 +1538,23 @@ func handleDecr(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 	runner = func() {
 		incrBy(cmd, key, -1, w)
 	}
+
 	return
 }
 
 func handleIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("incrby")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	delta, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -1297,25 +1564,30 @@ func handleIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	runner = func() {
 		incrBy(cmd, key, delta, w)
 	}
+
 	return
 }
 
 func handleDecrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("decrby")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	delta, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
 
 	// Check for overflow when negating: -math.MinInt64 would overflow
 	if delta == math.MinInt64 {
 		w.WriteError("ERR value is out of range")
+
 		return
 	}
 
@@ -1325,6 +1597,7 @@ func handleDecrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	runner = func() {
 		incrBy(cmd, key, -delta, w)
 	}
+
 	return
 }
 
@@ -1332,38 +1605,48 @@ func incrBy(cmd *shared.Command, key string, delta int64, w *shared.Writer) {
 	snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if wrongType {
 		w.WriteWrongType()
+
 		return
 	}
 
 	current, ok := snapshotToInt(snap)
 	if exists && !ok {
 		w.WriteNotInteger()
+
 		return
 	}
 
 	newValue := current + delta
 	if (delta > 0 && newValue < current) || (delta < 0 && newValue > current) {
 		w.WriteError("ERR increment or decrement would overflow")
+
 		return
 	}
 
 	if err := emitIncrInt(cmd, key, delta, tips); err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
-	if exists && snap.ExpiresAt != nil {
-		if err := emitStringTTL(cmd, key, snap.ExpiresAt); err != nil {
+
+	if exists && snap.GetExpiresAt() != nil {
+		if err := emitStringTTL(cmd, key, snap.GetExpiresAt()); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 	}
+
 	if !exists {
 		if err := emitStringTypeTag(cmd, key); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 	}
@@ -1374,20 +1657,24 @@ func incrBy(cmd *shared.Command, key string, delta int64, w *shared.Writer) {
 func handleIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("incrbyfloat")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	deltaStr := string(cmd.Args[1])
+
 	delta, err := strconv.ParseFloat(deltaStr, 64)
 	if err != nil {
 		w.WriteError("ERR value is not a valid float")
+
 		return
 	}
 
 	// Check if delta is NaN or Infinity
 	if math.IsNaN(delta) || math.IsInf(delta, 0) {
 		w.WriteError("ERR increment would produce NaN or Infinity")
+
 		return
 	}
 
@@ -1398,50 +1685,62 @@ func handleIncrByFloat(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		current, ok := snapshotToFloat(snap)
 		if exists && !ok {
 			w.WriteError("ERR value is not a valid float")
+
 			return
 		}
 
 		newValue := current + delta
 		if math.IsNaN(newValue) || math.IsInf(newValue, 0) {
 			w.WriteError("ERR increment would produce NaN or Infinity")
+
 			return
 		}
 
 		if err := emitIncrFloat(cmd, key, delta, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
-		if exists && snap.ExpiresAt != nil {
-			if err := emitStringTTL(cmd, key, snap.ExpiresAt); err != nil {
+
+		if exists && snap.GetExpiresAt() != nil {
+			if err := emitStringTTL(cmd, key, snap.GetExpiresAt()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		if !exists {
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteBulkString([]byte(strconv.FormatFloat(newValue, 'f', -1, 64)))
 	}
+
 	return
 }
 
 func handleAppend(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("append")
+
 		return
 	}
 
@@ -1454,10 +1753,13 @@ func handleAppend(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -1472,29 +1774,36 @@ func handleAppend(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		if err := emitStringSet(cmd, key, newData, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
-		if exists && snap.ExpiresAt != nil {
-			if err := emitStringTTL(cmd, key, snap.ExpiresAt); err != nil {
+
+		if exists && snap.GetExpiresAt() != nil {
+			if err := emitStringTTL(cmd, key, snap.GetExpiresAt()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		if !exists {
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(int64(len(newData)))
 	}
+
 	return
 }
 
 func handleStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("strlen")
+
 		return
 	}
 
@@ -1506,39 +1815,50 @@ func handleStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		w.WriteInteger(int64(len(snapshotToRaw(snap))))
 	}
+
 	return
 }
 
 func handleSetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("setrange")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	offset, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || offset < 0 {
 		w.WriteError("ERR offset is out of range")
+
 		return
 	}
+
 	value := cmd.Args[2]
 
 	// Check offset before any arithmetic to prevent overflow
 	if offset > shared.GetProtoMaxBulkLen() {
 		w.WriteError("ERR string exceeds maximum allowed size (proto-max-bulk-len)")
+
 		return
 	}
 
@@ -1546,6 +1866,7 @@ func handleSetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 	needed := offset + int64(len(value))
 	if needed > shared.GetProtoMaxBulkLen() {
 		w.WriteError("ERR string exceeds maximum allowed size (proto-max-bulk-len)")
+
 		return
 	}
 
@@ -1556,19 +1877,24 @@ func handleSetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, tips, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		if !exists && len(value) == 0 {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		var data []byte
+
 		if exists {
 			raw := snapshotToRaw(snap)
 			data = make([]byte, len(raw))
@@ -1581,41 +1907,51 @@ func handleSetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			copy(newData, data)
 			data = newData
 		}
+
 		copy(data[int(offset):], value)
 
 		if err := emitStringSet(cmd, key, data, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
-		if exists && snap.ExpiresAt != nil {
-			if err := emitStringTTL(cmd, key, snap.ExpiresAt); err != nil {
+
+		if exists && snap.GetExpiresAt() != nil {
+			if err := emitStringTTL(cmd, key, snap.GetExpiresAt()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		if !exists {
 			if err := emitStringTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteInteger(int64(len(data)))
 	}
+
 	return
 }
 
 func handleGetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("getrange")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	start, ok1 := shared.ParseInt64(cmd.Args[1])
+
 	end, ok2 := shared.ParseInt64(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -1626,14 +1962,19 @@ func handleGetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, _, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteBulkString(nil)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -1643,15 +1984,18 @@ func handleGetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		// If both indices are negative and start > end, return empty
 		if start < 0 && end < 0 && start > end {
 			w.WriteBulkString(nil)
+
 			return
 		}
 
 		// Handle negative indices
 		startIdx := start
 		endIdx := end
+
 		if startIdx < 0 {
 			startIdx = length + startIdx
 		}
+
 		if endIdx < 0 {
 			endIdx = length + endIdx
 		}
@@ -1660,26 +2004,31 @@ func handleGetRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		if startIdx < 0 {
 			startIdx = 0
 		}
+
 		if endIdx < 0 {
 			endIdx = 0
 		}
+
 		if endIdx >= length {
 			endIdx = length - 1
 		}
 
 		if startIdx > endIdx || startIdx >= length {
 			w.WriteBulkString(nil)
+
 			return
 		}
 
 		w.WriteBulkString(data[startIdx : endIdx+1])
 	}
+
 	return
 }
 
 func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("lcs")
+
 		return
 	}
 
@@ -1687,8 +2036,10 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	key2 := string(cmd.Args[1])
 
 	// Parse options
-	var wantLen, wantIdx, withMatchLen bool
-	var minMatchLen int64 = 0
+	var (
+		wantLen, wantIdx, withMatchLen bool
+		minMatchLen                    int64 = 0
+	)
 
 	for i := 2; i < len(cmd.Args); i++ {
 		arg := shared.ToUpper(cmd.Args[i])
@@ -1703,16 +2054,21 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			i++
 			if i >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			val, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || val < 0 {
 				w.WriteNotInteger()
+
 				return
 			}
+
 			minMatchLen = val
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -1727,12 +2083,16 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		snap1, _, exists1, wrongType1, err := getStringSnapshot(cmd, key1)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType1 {
 			w.WriteWrongType()
+
 			return
 		}
+
 		if exists1 {
 			data1 = snapshotToRaw(snap1)
 		}
@@ -1740,12 +2100,16 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		snap2, _, exists2, wrongType2, err := getStringSnapshot(cmd, key2)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType2 {
 			w.WriteWrongType()
+
 			return
 		}
+
 		if exists2 {
 			data2 = snapshotToRaw(snap2)
 		}
@@ -1757,12 +2121,14 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 		if wantLen && !wantIdx {
 			// Just return length
 			w.WriteInteger(int64(lcsLen))
+
 			return
 		}
 
 		if wantIdx {
 			// Filter matches by minMatchLen
 			var filteredMatches []lcsMatch
+
 			for _, m := range matches {
 				if m.length >= minMatchLen {
 					filteredMatches = append(filteredMatches, m)
@@ -1774,6 +2140,7 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			w.WriteBulkString([]byte("matches"))
 
 			w.WriteArray(len(filteredMatches))
+
 			for _, m := range filteredMatches {
 				if withMatchLen {
 					w.WriteArray(3)
@@ -1798,18 +2165,21 @@ func handleLcs(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 
 			w.WriteBulkString([]byte("len"))
 			w.WriteInteger(int64(lcsLen))
+
 			return
 		}
 
 		// Default: return LCS string
 		w.WriteBulkString(lcsResult)
 	}
+
 	return
 }
 
 func handleDigest(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("digest")
+
 		return
 	}
 
@@ -1821,14 +2191,19 @@ func handleDigest(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getStringSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -1836,6 +2211,7 @@ func handleDigest(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		// Convert to lowercase hex string (16 characters for 64-bit hash)
 		var hashBytes [8]byte
+
 		hashBytes[0] = byte(hash >> 56)
 		hashBytes[1] = byte(hash >> 48)
 		hashBytes[2] = byte(hash >> 40)
@@ -1848,5 +2224,6 @@ func handleDigest(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		hexStr := hex.EncodeToString(hashBytes[:])
 		w.WriteBulkString([]byte(hexStr))
 	}
+
 	return
 }

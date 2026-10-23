@@ -115,6 +115,7 @@ func HLLHash(data []byte) uint64 {
 	)
 
 	var h1, h2 uint64 = 0, 0
+
 	length := len(data)
 
 	// Process 16-byte blocks
@@ -144,25 +145,33 @@ func HLLHash(data []byte) uint64 {
 
 	// Process remaining bytes
 	tail := data[nblocks*16:]
+
 	var k1, k2 uint64
+
 	switch len(tail) {
 	case 15:
 		k2 ^= uint64(tail[14]) << 48
+
 		fallthrough
 	case 14:
 		k2 ^= uint64(tail[13]) << 40
+
 		fallthrough
 	case 13:
 		k2 ^= uint64(tail[12]) << 32
+
 		fallthrough
 	case 12:
 		k2 ^= uint64(tail[11]) << 24
+
 		fallthrough
 	case 11:
 		k2 ^= uint64(tail[10]) << 16
+
 		fallthrough
 	case 10:
 		k2 ^= uint64(tail[9]) << 8
+
 		fallthrough
 	case 9:
 		k2 ^= uint64(tail[8])
@@ -170,27 +179,35 @@ func HLLHash(data []byte) uint64 {
 		k2 = (k2 << 33) | (k2 >> 31)
 		k2 *= c1
 		h2 ^= k2
+
 		fallthrough
 	case 8:
 		k1 ^= uint64(tail[7]) << 56
+
 		fallthrough
 	case 7:
 		k1 ^= uint64(tail[6]) << 48
+
 		fallthrough
 	case 6:
 		k1 ^= uint64(tail[5]) << 40
+
 		fallthrough
 	case 5:
 		k1 ^= uint64(tail[4]) << 32
+
 		fallthrough
 	case 4:
 		k1 ^= uint64(tail[3]) << 24
+
 		fallthrough
 	case 3:
 		k1 ^= uint64(tail[2]) << 16
+
 		fallthrough
 	case 2:
 		k1 ^= uint64(tail[1]) << 8
+
 		fallthrough
 	case 1:
 		k1 ^= uint64(tail[0])
@@ -228,11 +245,13 @@ func HLLRho(bits uint64) uint8 {
 	if bits == 0 {
 		return 64 // All zeros
 	}
+
 	count := uint8(1)
 	for (bits & 0x8000000000000000) == 0 {
 		count++
 		bits <<= 1
 	}
+
 	return count
 }
 
@@ -256,8 +275,10 @@ func (h *HLLValue) Add(element []byte) bool {
 	// Update register if new value is larger
 	if rho > h.Registers[index] {
 		h.Registers[index] = rho
+
 		return true
 	}
+
 	return false
 }
 
@@ -267,7 +288,9 @@ func (h *HLLValue) Count() int64 {
 
 	// Compute the raw estimate using harmonic mean
 	var sum float64
+
 	zeros := 0
+
 	for _, val := range h.Registers {
 		sum += 1.0 / float64(uint64(1)<<val)
 		if val == 0 {
@@ -296,6 +319,7 @@ func (h *HLLValue) Count() int64 {
 	if estimate < 0 {
 		return 0
 	}
+
 	return int64(estimate + 0.5)
 }
 
@@ -303,6 +327,7 @@ func (h *HLLValue) Count() int64 {
 // This avoids expensive math.Log calls
 var logTable = func() [16385]float64 {
 	var table [16385]float64
+
 	for i := 0; i <= 16384; i++ {
 		if i == 0 {
 			table[i] = 0
@@ -312,6 +337,7 @@ var logTable = func() [16385]float64 {
 			table[i] = -nativeLog(float64(i) / 16384.0)
 		}
 	}
+
 	return table
 }()
 
@@ -320,16 +346,19 @@ func nativeLog(x float64) float64 {
 	if x <= 0 {
 		return -1e308 // Approximate -infinity
 	}
+
 	if x == 1 {
 		return 0
 	}
 
 	// Reduce x to range [0.5, 1.5) using x = m * 2^e
 	var exp int
+
 	for x >= 2 {
 		x /= 2
 		exp++
 	}
+
 	for x < 0.5 {
 		x *= 2
 		exp--
@@ -342,15 +371,18 @@ func nativeLog(x float64) float64 {
 
 	// Taylor series: 2 * (y + y^3/3 + y^5/5 + y^7/7 + ...)
 	result := y
+
 	term := y
 	for i := 3; i < 50; i += 2 {
 		term *= y2
 		result += term / float64(i)
 	}
+
 	result *= 2
 
 	// Add back the exponent: log(m * 2^e) = log(m) + e * log(2)
 	const ln2 = 0.6931471805599453
+
 	return result + float64(exp)*ln2
 }
 
@@ -361,6 +393,7 @@ func (h *HLLValue) Merge(others ...*HLLValue) {
 		if other == nil {
 			continue
 		}
+
 		for i := range h.Registers {
 			if other.Registers[i] > h.Registers[i] {
 				h.Registers[i] = other.Registers[i]

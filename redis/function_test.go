@@ -89,6 +89,7 @@ func TestFunctionList(t *testing.T) {
 		if !strings.Contains(result, "testlib") {
 			t.Errorf("expected result to contain 'testlib', got: %s", result)
 		}
+
 		if !strings.Contains(result, "myfunc") {
 			t.Errorf("expected result to contain 'myfunc', got: %s", result)
 		}
@@ -269,6 +270,7 @@ func TestFunctionStats(t *testing.T) {
 		if !strings.Contains(result, "engines") {
 			t.Errorf("expected 'engines' in result, got: %s", result)
 		}
+
 		if !strings.Contains(result, "LUA") {
 			t.Errorf("expected 'LUA' in result, got: %s", result)
 		}
@@ -290,6 +292,7 @@ redis.register_function{
     flags={'no-writes', 'allow-stale'}
 }
 `
+
 	result := execCmd(h, conn, shared.CmdFunction, "LOAD", libCode)
 	if !strings.Contains(result, "tableformlib") {
 		t.Fatalf("expected successful load, got: %s", result)
@@ -300,6 +303,7 @@ redis.register_function{
 	if !strings.Contains(listResult, "myfunc") {
 		t.Errorf("expected function 'myfunc' in list, got: %s", listResult)
 	}
+
 	if !strings.Contains(listResult, "A test function") {
 		t.Errorf("expected description in list, got: %s", listResult)
 	}
@@ -333,7 +337,9 @@ func TestFunctionDumpRestore(t *testing.T) {
 	if !ok {
 		t.Fatalf("invalid dump format: %s", dumpData)
 	}
+
 	restoreData := after
+
 	endIdx := strings.LastIndex(restoreData, "\r\n")
 	if endIdx > 0 {
 		restoreData = restoreData[:endIdx]
@@ -355,7 +361,12 @@ func TestFcallUnknownCommand(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
 
-	conn := func() *shared.Connection { c := newEffectsConn(h); c.Protocol = shared.RESP2; return c }()
+	conn := func() *shared.Connection {
+		c := newEffectsConn(h)
+		c.Protocol = shared.RESP2
+
+		return c
+	}()
 
 	// Load a library that calls an unknown command
 	libCode := `#!lua name=test
@@ -365,6 +376,7 @@ end)`
 
 	loadResult := execCmd(h, conn, shared.CmdFunction, "LOAD", libCode)
 	t.Logf("FUNCTION LOAD result: %q", loadResult)
+
 	if !strings.Contains(loadResult, "test") {
 		t.Fatalf("FUNCTION LOAD failed: %s", loadResult)
 	}
@@ -375,6 +387,7 @@ end)`
 	if !strings.HasPrefix(result, "-") {
 		t.Errorf("expected RESP error (starting with '-'), got: %q", result)
 	}
+
 	if !strings.Contains(result, "Unknown") {
 		t.Errorf("expected error to contain 'Unknown', got: %q", result)
 	}

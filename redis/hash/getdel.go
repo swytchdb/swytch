@@ -30,6 +30,7 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	// HGETDEL key FIELDS numfields field [field ...]
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("hgetdel")
+
 		return
 	}
 
@@ -38,6 +39,7 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	// Check for FIELDS keyword
 	if strings.ToUpper(string(cmd.Args[1])) != optionFields {
 		w.WriteError("ERR mandatory argument FIELDS is missing, or not at the right position")
+
 		return
 	}
 
@@ -45,6 +47,7 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	numFields, ok := shared.ParseInt64(cmd.Args[2])
 	if !ok || numFields <= 0 {
 		w.WriteError("ERR Number of fields must be a positive integer")
+
 		return
 	}
 
@@ -52,6 +55,7 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	actualFields := len(cmd.Args) - 3
 	if actualFields != int(numFields) {
 		w.WriteError("ERR The `numfields` parameter must match the number of arguments")
+
 		return
 	}
 
@@ -67,18 +71,24 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, tips, exists, wrongType, err := getHashSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			// Return array of nils
 			w.WriteArray(int(numFields))
+
 			for range numFields {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -90,17 +100,21 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		// Get values and emit removes for existing fields
 		w.WriteArray(int(numFields))
+
 		for _, field := range fields {
-			elem, fieldExists := snap.NetAdds[field]
+			elem, fieldExists := snap.GetNetAdds()[field]
 			if fieldExists {
-				w.WriteBulkString(elementValueBytes(elem.Data))
+				w.WriteBulkString(elementValueBytes(elem.GetData()))
+
 				if err := emitHashRemove(cmd, key, []byte(field)); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			} else {
@@ -108,5 +122,6 @@ func handleHGetDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 		}
 	}
+
 	return
 }

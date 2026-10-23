@@ -36,6 +36,7 @@ func BenchmarkHandleGetPrepare(b *testing.B) {
 	w := &shared.Writer{}
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		benchmarkGetValid, benchmarkGetKeys, benchmarkGetRunner = handleGet(cmd, w, nil)
 	}

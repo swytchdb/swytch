@@ -131,12 +131,14 @@ func (c *Connection) Block(timeout float64) (context.Context, func()) {
 	// Add timeout if specified
 	if timeout > 0 {
 		var timeoutCancel context.CancelFunc
+
 		ctx, timeoutCancel = context.WithTimeout(ctx, time.Duration(timeout*float64(time.Second)))
 		cancels = append(cancels, timeoutCancel)
 	}
 
 	// Add cancellable context for CLIENT UNBLOCK support
 	var unblockCancel context.CancelFunc
+
 	ctx, unblockCancel = context.WithCancel(ctx)
 	cancels = append(cancels, unblockCancel)
 
@@ -189,6 +191,7 @@ func (c *Connection) Unblock(withError bool) bool {
 	}
 
 	c.unblockMu.Lock()
+
 	cancel := c.unblockCancel
 	if cancel != nil {
 		c.unblockError = withError
@@ -197,8 +200,10 @@ func (c *Connection) Unblock(withError bool) bool {
 
 	if cancel != nil {
 		cancel()
+
 		return true
 	}
+
 	return false
 }
 
@@ -206,6 +211,7 @@ func (c *Connection) Unblock(withError bool) bool {
 func (c *Connection) WasUnblockedWithError() bool {
 	c.unblockMu.Lock()
 	defer c.unblockMu.Unlock()
+
 	return c.unblockError
 }
 

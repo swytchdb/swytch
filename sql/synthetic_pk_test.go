@@ -49,6 +49,7 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 			t.Errorf("close rows: %v", err)
 		}
 	}()
+
 	var got []struct {
 		a string
 		b int
@@ -61,15 +62,18 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 		if err := rows.Scan(&r.a, &r.b); err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
+
 		got = append(got, r)
 	}
 
 	if err := rows.Err(); err != nil {
 		t.Fatalf("read rows: %v", err)
 	}
+
 	if len(got) != 2 {
 		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)
 	}
+
 	if got[0].a != "hello" || got[0].b != 1 || got[1].a != "world" || got[1].b != 2 {
 		t.Fatalf("unexpected rows: %+v", got)
 	}
@@ -77,10 +81,12 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 	if _, err := db.Exec(`UPDATE nopk SET b = 42 WHERE a = 'hello'`); err != nil {
 		t.Fatalf("UPDATE: %v", err)
 	}
+
 	var b int
 	if err := db.QueryRow(`SELECT b FROM nopk WHERE a = 'hello'`).Scan(&b); err != nil {
 		t.Fatalf("SELECT after UPDATE: %v", err)
 	}
+
 	if b != 42 {
 		t.Fatalf("UPDATE didn't land: b=%d", b)
 	}
@@ -88,10 +94,12 @@ func TestSyntheticPKRoundTrip(t *testing.T) {
 	if _, err := db.Exec(`DELETE FROM nopk WHERE a = 'hello'`); err != nil {
 		t.Fatalf("DELETE: %v", err)
 	}
+
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM nopk`).Scan(&n); err != nil {
 		t.Fatalf("COUNT after DELETE: %v", err)
 	}
+
 	if n != 1 {
 		t.Fatalf("want 1 row after DELETE, got %d", n)
 	}
@@ -107,6 +115,7 @@ func TestSyntheticPKAllNullRow(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE nopk (a TEXT, b INTEGER)`); err != nil {
 		t.Fatalf("CREATE: %v", err)
 	}
+
 	if _, err := db.Exec(`INSERT INTO nopk (a, b) VALUES (NULL, NULL)`); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
@@ -115,6 +124,7 @@ func TestSyntheticPKAllNullRow(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM nopk`).Scan(&n); err != nil {
 		t.Fatalf("COUNT: %v", err)
 	}
+
 	if n != 1 {
 		t.Fatalf("want 1 row, got %d", n)
 	}
@@ -151,10 +161,12 @@ func TestSyntheticPKMySQLDriverDDL(t *testing.T) {
         VALUES ('s1', 'c1', 'col', 1)`); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
+
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM _wp_sqlite_mysql_information_schema_key_column_usage`).Scan(&n); err != nil {
 		t.Fatalf("COUNT: %v", err)
 	}
+
 	if n != 1 {
 		t.Fatalf("want 1 row, got %d", n)
 	}
@@ -174,27 +186,36 @@ func TestSyntheticPKConcurrentInserts(t *testing.T) {
 		t.Fatalf("CREATE: %v", err)
 	}
 
-	const workers = 8
-	const perWorker = 50
+	const (
+		workers   = 8
+		perWorker = 50
+	)
+
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
+
 	errs := make(chan error, workers)
 	wg.Add(workers)
+
 	for w := range workers {
 		go func(w int) {
 			defer wg.Done()
+
 			for i := range perWorker {
 				stmt := fmt.Sprintf(`INSERT INTO nopk (payload) VALUES ('w%d-i%d')`, w, i)
 				if _, err := db.ExecContext(ctx, stmt); err != nil {
 					errs <- fmt.Errorf("worker %d iter %d: %w", w, i, err)
+
 					return
 				}
 			}
 		}(w)
 	}
+
 	wg.Wait()
 	close(errs)
+
 	for err := range errs {
 		t.Errorf("%v", err)
 	}
@@ -203,6 +224,7 @@ func TestSyntheticPKConcurrentInserts(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM nopk`).Scan(&n); err != nil {
 		t.Fatalf("COUNT: %v", err)
 	}
+
 	if n != workers*perWorker {
 		t.Fatalf("rowid collision: want %d rows, got %d", workers*perWorker, n)
 	}

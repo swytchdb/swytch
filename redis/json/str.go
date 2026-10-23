@@ -25,8 +25,10 @@ import "github.com/swytchdb/swytch/redis/shared"
 func handleJSONStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("json.strlen")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -35,13 +37,16 @@ func handleJSONStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		if len(cmd.Args) == 2 {
 			pathStr = string(cmd.Args[1])
 		}
+
 		jsonReadInt(cmd, w, key, pathStr, "a string", func(m *Value) (int64, bool) {
 			if m.Kind != KindString {
 				return 0, false
 			}
+
 			return int64(len(m.Str)), true
 		})
 	}
+
 	return
 }
 
@@ -49,8 +54,10 @@ func handleJSONStrLen(cmd *shared.Command, w *shared.Writer, db *shared.Database
 func handleJSONStrAppend(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 || len(cmd.Args) > 3 {
 		w.WriteWrongNumArguments("json.strappend")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -58,23 +65,30 @@ func handleJSONStrAppend(cmd *shared.Command, w *shared.Writer, db *shared.Datab
 		// The value is always the last argument; the path is optional and
 		// defaults to the root.
 		pathStr := "$"
+
 		valArg := cmd.Args[1]
 		if len(cmd.Args) == 3 {
 			pathStr = string(cmd.Args[1])
 			valArg = cmd.Args[2]
 		}
+
 		suffix, err := Parse(valArg)
 		if err != nil || suffix.Kind != KindString {
 			w.WriteError("ERR value is not a string")
+
 			return
 		}
+
 		scalarIntWrite(cmd, w, key, pathStr, "a string", func(m *Value) (*Value, int64, bool) {
 			if m.Kind != KindString {
 				return nil, 0, false
 			}
+
 			ns := m.Str + suffix.Str
+
 			return newString(ns), int64(len(ns)), true
 		})
 	}
+
 	return
 }

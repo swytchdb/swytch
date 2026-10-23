@@ -30,6 +30,7 @@ import (
 // affinities without running a full server.
 func makeCursor(schema *tableSchema) *swytchCursor {
 	vt := &swytchVTable{name: schema.Name, schema: schema}
+
 	return &swytchCursor{vt: vt}
 }
 
@@ -50,6 +51,7 @@ func intSchema(indexes ...indexSchema) *tableSchema {
 
 func TestObservationCaptureFullScan(t *testing.T) {
 	c := makeCursor(intSchema())
+
 	pred, err := c.buildObservationPredicate(sqlite.IndexID{Num: planFullScan}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +60,7 @@ func TestObservationCaptureFullScan(t *testing.T) {
 	if !Evaluate(&pred, rowOf(IntVal(1), IntVal(2))) {
 		t.Error("full scan predicate should match any row")
 	}
+
 	if !Evaluate(&pred, rowOf(IntVal(-100), NullVal())) {
 		t.Error("full scan predicate should match any row (incl. NULLs)")
 	}
@@ -66,6 +69,7 @@ func TestObservationCaptureFullScan(t *testing.T) {
 func TestObservationCapturePKEquality(t *testing.T) {
 	c := makeCursor(intSchema())
 	argv := []sqlite.Value{sqlite.IntegerValue(42)}
+
 	pred, err := c.buildObservationPredicate(sqlite.IndexID{Num: planPKEquality}, argv)
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +78,7 @@ func TestObservationCapturePKEquality(t *testing.T) {
 	if !Evaluate(&pred, rowOf(IntVal(42), IntVal(999))) {
 		t.Error("pk-equality should match pk=42")
 	}
+
 	if Evaluate(&pred, rowOf(IntVal(43), IntVal(42))) {
 		t.Error("pk-equality should not match pk=43")
 	}
@@ -85,6 +90,7 @@ func TestObservationCaptureIndexEquality(t *testing.T) {
 	})
 	c := makeCursor(schema)
 	argv := []sqlite.Value{sqlite.IntegerValue(7)}
+
 	pred, err := c.buildObservationPredicate(
 		sqlite.IndexID{Num: planIndexEquality, String: "idx_x"}, argv)
 	if err != nil {
@@ -94,6 +100,7 @@ func TestObservationCaptureIndexEquality(t *testing.T) {
 	if !Evaluate(&pred, rowOf(IntVal(1), IntVal(7))) {
 		t.Error("idx eq should match x=7")
 	}
+
 	if Evaluate(&pred, rowOf(IntVal(1), IntVal(8))) {
 		t.Error("idx eq should not match x=8")
 	}
@@ -106,6 +113,7 @@ func TestObservationCaptureIndexRangeInclusive(t *testing.T) {
 	c := makeCursor(schema)
 	// Range plan code "ii" = inclusive lower + inclusive upper.
 	argv := []sqlite.Value{sqlite.IntegerValue(10), sqlite.IntegerValue(20)}
+
 	pred, err := c.buildObservationPredicate(
 		sqlite.IndexID{Num: planIndexRange, String: "idx_x|ii"}, argv)
 	if err != nil {
@@ -133,11 +141,13 @@ func TestObservationCaptureIndexRangeExclusive(t *testing.T) {
 	c := makeCursor(schema)
 	// Code "ee" = exclusive lower + exclusive upper.
 	argv := []sqlite.Value{sqlite.IntegerValue(10), sqlite.IntegerValue(20)}
+
 	pred, err := c.buildObservationPredicate(
 		sqlite.IndexID{Num: planIndexRange, String: "idx_x|ee"}, argv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	cases := []struct {
 		x    int64
 		want bool
@@ -159,17 +169,21 @@ func TestObservationCaptureIndexRangeLowerOnly(t *testing.T) {
 	c := makeCursor(schema)
 	// Code "ix" = inclusive lower, no upper.
 	argv := []sqlite.Value{sqlite.IntegerValue(10)}
+
 	pred, err := c.buildObservationPredicate(
 		sqlite.IndexID{Num: planIndexRange, String: "idx_x|ix"}, argv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !Evaluate(&pred, rowOf(IntVal(0), IntVal(10))) {
 		t.Error("x=10 (inclusive lower) should match")
 	}
+
 	if Evaluate(&pred, rowOf(IntVal(0), IntVal(9))) {
 		t.Error("x=9 (below lower) should not match")
 	}
+
 	if !Evaluate(&pred, rowOf(IntVal(0), IntVal(1000))) {
 		t.Error("x=1000 (above, unbounded upper) should match")
 	}
@@ -182,14 +196,17 @@ func TestObservationCaptureIndexRangeUpperOnly(t *testing.T) {
 	c := makeCursor(schema)
 	// Code "xe" = no lower, exclusive upper.
 	argv := []sqlite.Value{sqlite.IntegerValue(20)}
+
 	pred, err := c.buildObservationPredicate(
 		sqlite.IndexID{Num: planIndexRange, String: "idx_x|xe"}, argv)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !Evaluate(&pred, rowOf(IntVal(0), IntVal(19))) {
 		t.Error("x=19 should match")
 	}
+
 	if Evaluate(&pred, rowOf(IntVal(0), IntVal(20))) {
 		t.Error("x=20 (exclusive upper) should not match")
 	}
@@ -214,6 +231,7 @@ func TestCursorFilterStashesObservation(t *testing.T) {
 		"CREATE TABLE t (pk INTEGER PRIMARY KEY, x INTEGER)"); err != nil {
 		t.Fatal(err)
 	}
+
 	mustExec(t, db, "INSERT INTO t VALUES (1, 10)")
 	mustExec(t, db, "INSERT INTO t VALUES (2, 20)")
 
@@ -225,6 +243,7 @@ func TestCursorFilterStashesObservation(t *testing.T) {
 	if err := db.QueryRow("SELECT x FROM t WHERE pk = 2").Scan(&x); err != nil {
 		t.Fatalf("pk lookup: %v", err)
 	}
+
 	if x != 20 {
 		t.Errorf("got x=%d, want 20", x)
 	}

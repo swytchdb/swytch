@@ -40,9 +40,11 @@ func ParseBlockingTimeout(s string) (float64, string) {
 			return 0, "ERR timeout is not a float or out of range"
 		}
 	}
+
 	if math.IsNaN(timeout) || math.IsInf(timeout, 0) {
 		return 0, "ERR timeout is not a float or out of range"
 	}
+
 	if timeout < 0 {
 		return 0, "ERR timeout is negative"
 	}
@@ -50,5 +52,6 @@ func ParseBlockingTimeout(s string) (float64, string) {
 	if timeout > float64(1<<62)/float64(time.Second) {
 		return 0, "ERR timeout is out of range"
 	}
+
 	return timeout, ""
 }

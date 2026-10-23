@@ -360,7 +360,9 @@ func (c *Command) Reset() {
 			PutDataBuf(arg)
 		}
 	}
+
 	clear(c.Args[:cap(c.Args)])
+
 	if c.RawName != nil {
 		PutDataBuf(c.RawName)
 	}
@@ -376,6 +378,7 @@ func (c *Command) Reset() {
 func (c *Command) SetSingleKey(arg []byte) string {
 	key := unsafe.String(unsafe.SliceData(arg), len(arg))
 	c.keyScratch[0] = key
+
 	return key
 }
 
@@ -393,6 +396,7 @@ func (c *Command) SingleKeySlice() []string {
 // Returns CmdUnknown and false if the name is not recognized.
 func LookupCommandName(name string) (CommandType, bool) {
 	cmd, ok := commandNames[name]
+
 	return cmd, ok
 }
 
@@ -971,6 +975,7 @@ func (c CommandType) String() string {
 	if s, ok := commandStrings[c]; ok {
 		return s
 	}
+
 	return unknownName
 }
 
@@ -983,6 +988,7 @@ var commandStringPtrs = func() [CmdMax]*string {
 		s := c.String()
 		t[c] = &s
 	}
+
 	return t
 }()
 
@@ -991,6 +997,7 @@ func (c CommandType) StringPtr() *string {
 	if c < 0 || c >= CmdMax {
 		c = CmdUnknown
 	}
+
 	return commandStringPtrs[c]
 }
 
@@ -1001,6 +1008,7 @@ func ParseCommandType(name []byte) CommandType {
 	if cmd, ok := commandNames[string(upper)]; ok {
 		return cmd
 	}
+
 	return CmdUnknown
 }
 
@@ -1008,12 +1016,15 @@ func ParseCommandType(name []byte) CommandType {
 // Returns a new slice if conversion is needed (to avoid modifying original).
 func ToUpper(b []byte) []byte {
 	needsConversion := false
+
 	for _, c := range b {
 		if c >= 'a' && c <= 'z' {
 			needsConversion = true
+
 			break
 		}
 	}
+
 	if !needsConversion {
 		return b
 	}
@@ -1026,5 +1037,6 @@ func ToUpper(b []byte) []byte {
 			result[i] = c
 		}
 	}
+
 	return result
 }

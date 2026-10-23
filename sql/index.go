@@ -38,34 +38,41 @@ func loadIndexSchema(ctx *effects.Context, name string) (*indexSchema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sql: read index %q: %w", name, err)
 	}
-	if reduced == nil || len(reduced.NetAdds) == 0 {
+
+	if reduced == nil || len(reduced.GetNetAdds()) == 0 {
 		return nil, ErrNoSuchIndex
 	}
 
 	idx := &indexSchema{Name: name}
-	if el, ok := reduced.NetAdds[indexFieldIndexID]; ok && el.Data != nil {
-		idx.IndexID = el.Data.Decompress()
+	if el, ok := reduced.GetNetAdds()[indexFieldIndexID]; ok && el.GetData() != nil {
+		idx.IndexID = el.GetData().Decompress()
 	}
-	if el, ok := reduced.NetAdds[indexFieldTable]; ok && el.Data != nil {
-		idx.Table = string(el.Data.Decompress())
+
+	if el, ok := reduced.GetNetAdds()[indexFieldTable]; ok && el.GetData() != nil {
+		idx.Table = string(el.GetData().Decompress())
 	}
-	if el, ok := reduced.NetAdds[indexFieldTableID]; ok && el.Data != nil {
-		idx.TableID = el.Data.Decompress()
+
+	if el, ok := reduced.GetNetAdds()[indexFieldTableID]; ok && el.GetData() != nil {
+		idx.TableID = el.GetData().Decompress()
 	}
-	if el, ok := reduced.NetAdds[indexFieldColumns]; ok && el.Data != nil {
-		raw := el.Data.Decompress()
+
+	if el, ok := reduced.GetNetAdds()[indexFieldColumns]; ok && el.GetData() != nil {
+		raw := el.GetData().Decompress()
 		if len(raw) > 0 {
 			for _, part := range splitNUL(raw) {
 				idx.Columns = append(idx.Columns, string(part))
 			}
 		}
 	}
-	if el, ok := reduced.NetAdds[indexFieldUnique]; ok && el.Data != nil {
-		idx.Unique = el.Data.GetIntVal() != 0
+
+	if el, ok := reduced.GetNetAdds()[indexFieldUnique]; ok && el.GetData() != nil {
+		idx.Unique = el.GetData().GetIntVal() != 0
 	}
+
 	if len(idx.IndexID) == 0 {
 		return nil, fmt.Errorf("sql: index %q missing IndexID field", name)
 	}
+
 	return idx, nil
 }
 
@@ -74,14 +81,18 @@ func loadIndexSchema(ctx *effects.Context, name string) (*indexSchema, error) {
 // stored under indexFieldColumns.
 func splitNUL(b []byte) [][]byte {
 	var out [][]byte
+
 	start := 0
+
 	for i, c := range b {
 		if c == 0 {
 			out = append(out, b[start:i])
 			start = i + 1
 		}
 	}
+
 	out = append(out, b[start:])
+
 	return out
 }
 
@@ -91,39 +102,49 @@ func emitIndexMetadata(ctx *effects.Context, idx *indexSchema) error {
 	if len(idx.IndexID) == 0 {
 		return fmt.Errorf("sql: emitIndexMetadata: index %q has no IndexID", idx.Name)
 	}
+
 	if len(idx.TableID) == 0 {
 		return fmt.Errorf("sql: emitIndexMetadata: index %q has no TableID", idx.Name)
 	}
+
 	mkey := indexMetaKey(idx.Name)
 
 	if err := emitRawField(ctx, mkey, indexFieldIndexID, idx.IndexID); err != nil {
 		return err
 	}
+
 	if err := emitRawField(ctx, mkey, indexFieldTable, []byte(idx.Table)); err != nil {
 		return err
 	}
+
 	if err := emitRawField(ctx, mkey, indexFieldTableID, idx.TableID); err != nil {
 		return err
 	}
 	// Columns serialised as a NUL-separated list; single column in
 	// Phase 4 but the format supports composite later.
 	colsBytes := []byte{}
+
 	for i, c := range idx.Columns {
 		if i > 0 {
 			colsBytes = append(colsBytes, 0)
 		}
+
 		colsBytes = append(colsBytes, []byte(c)...)
 	}
+
 	if err := emitRawField(ctx, mkey, indexFieldColumns, colsBytes); err != nil {
 		return err
 	}
+
 	uniq := int64(0)
 	if idx.Unique {
 		uniq = 1
 	}
+
 	if err := emitIntField(ctx, mkey, indexFieldUnique, uniq); err != nil {
 		return err
 	}
+
 	return emitRawField(ctx, indexListKey, idx.Name, []byte{1})
 }
 
@@ -131,6 +152,7 @@ func emitIndexMetadata(ctx *effects.Context, idx *indexSchema) error {
 // plus the list entry. Not flushed.
 func emitIndexMetadataRemove(ctx *effects.Context, name string) error {
 	mkey := indexMetaKey(name)
+
 	fields := []string{
 		indexFieldIndexID, indexFieldTable, indexFieldTableID,
 		indexFieldColumns, indexFieldUnique,
@@ -140,6 +162,7 @@ func emitIndexMetadataRemove(ctx *effects.Context, name string) error {
 			return fmt.Errorf("remove %s.%s: %w", name, f, err)
 		}
 	}
+
 	return emitKeyedRemove(ctx, indexListKey, name)
 }
 
@@ -183,13 +206,16 @@ func checkUniqueBeforeInsert(ctx *effects.Context, indexID []byte, encoded []byt
 	if err != nil {
 		return fmt.Errorf("read unique index entry: %w", err)
 	}
+
 	if snap == nil {
 		return nil
 	}
-	for pk := range snap.NetAdds {
+
+	for pk := range snap.GetNetAdds() {
 		if pk != selfPK {
 			return ErrUniqueViolation
 		}
 	}
+
 	return nil
 }

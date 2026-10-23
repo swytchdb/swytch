@@ -46,15 +46,19 @@ func getZSetSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, t
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_KEYED {
+
+	if snap.GetCollection() == pb.CollectionKind_KEYED {
 		return snap, tips, true, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && (snap.TypeTag == pb.ValueType_TYPE_ZSET || snap.TypeTag == pb.ValueType_TYPE_GEO) {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && (snap.GetTypeTag() == pb.ValueType_TYPE_ZSET || snap.GetTypeTag() == pb.ValueType_TYPE_GEO) {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -116,33 +120,40 @@ func zsetMemberScore(snap *pb.ReducedEffect, member string) (float64, bool) {
 	if snap == nil || snap.NetAdds == nil {
 		return 0, false
 	}
-	elem, ok := snap.NetAdds[member]
+
+	elem, ok := snap.GetNetAdds()[member]
 	if !ok {
 		return 0, false
 	}
-	return elem.Data.GetFloatVal(), true
+
+	return elem.GetData().GetFloatVal(), true
 }
 
 func zsetSortedMembers(snap *pb.ReducedEffect) []shared.ZSetEntry {
 	if snap == nil || snap.NetAdds == nil {
 		return nil
 	}
-	entries := make([]shared.ZSetEntry, 0, len(snap.NetAdds))
-	for member, elem := range snap.NetAdds {
-		entries = append(entries, shared.ZSetEntry{Member: member, Score: elem.Data.GetFloatVal()})
+
+	entries := make([]shared.ZSetEntry, 0, len(snap.GetNetAdds()))
+	for member, elem := range snap.GetNetAdds() {
+		entries = append(entries, shared.ZSetEntry{Member: member, Score: elem.GetData().GetFloatVal()})
 	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Score != entries[j].Score {
 			return entries[i].Score < entries[j].Score
 		}
+
 		return entries[i].Member < entries[j].Member
 	})
+
 	return entries
 }
 
 func handleZAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("zadd")
+
 		return
 	}
 
@@ -151,6 +162,7 @@ func handleZAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 	// Parse options
 	var nx, xx, gt, lt, ch, incr bool
+
 	i := 1
 	for i < len(cmd.Args) {
 		opt := shared.ToUpper(cmd.Args[i])
@@ -182,14 +194,19 @@ parseScoreMembers:
 	// Validate conflicting options
 	if nx && xx {
 		w.WriteError("ERR XX and NX options at the same time are not compatible")
+
 		return
 	}
+
 	if gt && lt {
 		w.WriteError("ERR GT and LT options at the same time are not compatible")
+
 		return
 	}
+
 	if (gt || lt) && nx {
 		w.WriteError("ERR GT/LT and NX options at the same time are not compatible")
+
 		return
 	}
 
@@ -197,12 +214,14 @@ parseScoreMembers:
 	remaining := cmd.Args[i:]
 	if len(remaining) < 2 || len(remaining)%2 != 0 {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	// INCR mode only allows one member
 	if incr && len(remaining) != 2 {
 		w.WriteError("ERR INCR option supports a single increment-element pair")
+
 		return
 	}
 
@@ -211,13 +230,16 @@ parseScoreMembers:
 		score  float64
 		member string
 	}
+
 	pairs := make([]scoreMember, 0, len(remaining)/2)
 	for j := 0; j < len(remaining); j += 2 {
 		score, err := strconv.ParseFloat(string(remaining[j]), 64)
 		if err != nil || math.IsNaN(score) {
 			w.WriteError("ERR value is not a valid float")
+
 			return
 		}
+
 		pairs = append(pairs, scoreMember{score: score, member: string(remaining[j+1])})
 	}
 
@@ -227,10 +249,13 @@ parseScoreMembers:
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
@@ -241,6 +266,7 @@ parseScoreMembers:
 			} else {
 				w.WriteInteger(0)
 			}
+
 			return
 		}
 
@@ -255,36 +281,50 @@ parseScoreMembers:
 				existingScore, memberExists := zsetMemberScore(snap, member)
 				if nx && memberExists {
 					w.WriteNullBulkString()
+
 					return
 				}
+
 				if xx && !memberExists {
 					w.WriteNullBulkString()
+
 					return
 				}
+
 				if memberExists {
 					newScore := existingScore + score
 					if math.IsNaN(newScore) {
 						w.WriteError("ERR resulting score is not a number (NaN)")
+
 						return
 					}
+
 					if gt && newScore <= existingScore {
 						w.WriteNullBulkString()
+
 						return
 					}
+
 					if lt && newScore >= existingScore {
 						w.WriteNullBulkString()
+
 						return
 					}
+
 					if err := emitZSetIncrBy(cmd, key, member, score); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
+
 					w.WriteScore(newScore)
 				} else {
 					if err := emitZSetInsert(cmd, key, member, score); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
+
 					w.WriteScore(score)
 				}
 			} else {
@@ -292,28 +332,36 @@ parseScoreMembers:
 				if nx && memberExists {
 					continue
 				}
+
 				if xx && !memberExists {
 					continue
 				}
+
 				if memberExists {
 					finalScore := score
 					if gt && score <= existingScore {
 						continue
 					}
+
 					if lt && score >= existingScore {
 						continue
 					}
+
 					if finalScore != existingScore {
 						changedCount++
 					}
+
 					if err := emitZSetInsert(cmd, key, member, finalScore); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				} else {
 					addedCount++
+
 					if err := emitZSetInsert(cmd, key, member, score); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -323,6 +371,7 @@ parseScoreMembers:
 		if !exists {
 			if err := emitZSetTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -335,22 +384,27 @@ parseScoreMembers:
 			}
 		}
 	}
+
 	return
 }
 
 func handleZIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("zincrby")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	keys = []string{key}
+
 	increment, err := strconv.ParseFloat(string(cmd.Args[1]), 64)
 	if err != nil || math.IsNaN(increment) {
 		w.WriteError("ERR value is not a valid float")
+
 		return
 	}
+
 	member := string(cmd.Args[2])
 
 	valid = true
@@ -358,41 +412,51 @@ func handleZIncrBy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		existingScore, memberExists := zsetMemberScore(snap, member)
+
 		newScore := existingScore + increment
 		if memberExists && math.IsNaN(newScore) {
 			w.WriteError("ERR resulting score is not a number (NaN)")
+
 			return
 		}
 
 		if memberExists {
 			if err := emitZSetIncrBy(cmd, key, member, increment); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		} else {
 			if err := emitZSetInsert(cmd, key, member, increment); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			newScore = increment
 		}
 
 		if !exists {
 			if err := emitZSetTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		w.WriteScore(newScore)
 	}
+
 	return
 }

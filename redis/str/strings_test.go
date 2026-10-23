@@ -45,11 +45,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -59,11 +62,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -141,6 +147,7 @@ func seedBitmap(ctx *effects.Context, key string, data []byte) {
 			}
 		}
 	}
+
 	_ = ctx.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_BITMAP}},
@@ -208,9 +215,11 @@ func TestHandleMGet(t *testing.T) {
 	if !strings.HasPrefix(got, "*4\r\n") {
 		t.Errorf("got %q, want array of 4", got)
 	}
+
 	if !strings.Contains(got, "$2\r\nv1\r\n") {
 		t.Errorf("got %q, want v1", got)
 	}
+
 	if !strings.Contains(got, "$2\r\nv2\r\n") {
 		t.Errorf("got %q, want v2", got)
 	}
@@ -307,6 +316,7 @@ func TestHandleLcs(t *testing.T) {
 
 	t.Run("wrong type returns WRONGTYPE", func(t *testing.T) {
 		seedHash(ctx, "hashk")
+
 		got := runHandlerWith(eng, ctx, handleLcs, &shared.Command{
 			Type: shared.CmdLcs,
 			Args: [][]byte{[]byte("key1"), []byte("hashk")},
@@ -557,6 +567,7 @@ func seedSet(ctx *effects.Context, key string, members ...string) {
 			}},
 		})
 	}
+
 	_ = ctx.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Meta{Meta: &pb.MetaEffect{TypeTag: pb.ValueType_TYPE_SET}},
@@ -566,7 +577,9 @@ func seedSet(ctx *effects.Context, key string, members ...string) {
 
 func testComputeDigest(data []byte) string {
 	hash := xxh3.Hash(data)
+
 	var hashBytes [8]byte
+
 	hashBytes[0] = byte(hash >> 56)
 	hashBytes[1] = byte(hash >> 48)
 	hashBytes[2] = byte(hash >> 40)
@@ -575,6 +588,7 @@ func testComputeDigest(data []byte) string {
 	hashBytes[5] = byte(hash >> 16)
 	hashBytes[6] = byte(hash >> 8)
 	hashBytes[7] = byte(hash)
+
 	return hex.EncodeToString(hashBytes[:])
 }
 
@@ -719,12 +733,14 @@ func TestSetEX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap == nil || snap.ExpiresAt == nil {
+
+	if snap == nil || snap.GetExpiresAt() == nil {
 		t.Fatal("expected ExpiresAt to be set")
 	}
+
 	now := uint64(time.Now().UnixMilli())
-	if snap.ExpiresAt.AsTime().UnixMilli() < int64(now) || snap.ExpiresAt.AsTime().UnixMilli() > int64(now)+11000 {
-		t.Fatalf("ExpiresAt out of range: %d (now=%d)", snap.ExpiresAt.AsTime().UnixMilli(), now)
+	if snap.GetExpiresAt().AsTime().UnixMilli() < int64(now) || snap.GetExpiresAt().AsTime().UnixMilli() > int64(now)+11000 {
+		t.Fatalf("ExpiresAt out of range: %d (now=%d)", snap.GetExpiresAt().AsTime().UnixMilli(), now)
 	}
 }
 
@@ -744,12 +760,14 @@ func TestPSetEX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap == nil || snap.ExpiresAt == nil {
+
+	if snap == nil || snap.GetExpiresAt() == nil {
 		t.Fatal("expected ExpiresAt to be set")
 	}
+
 	now := uint64(time.Now().UnixMilli())
-	if snap.ExpiresAt.AsTime().UnixMilli() < int64(now) || snap.ExpiresAt.AsTime().UnixMilli() > int64(now)+11000 {
-		t.Fatalf("ExpiresAt out of range: %d (now=%d)", snap.ExpiresAt.AsTime().UnixMilli(), now)
+	if snap.GetExpiresAt().AsTime().UnixMilli() < int64(now) || snap.GetExpiresAt().AsTime().UnixMilli() > int64(now)+11000 {
+		t.Fatalf("ExpiresAt out of range: %d (now=%d)", snap.GetExpiresAt().AsTime().UnixMilli(), now)
 	}
 }
 
@@ -823,13 +841,16 @@ func TestSetEXOptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if snap == nil {
 				t.Fatal("snapshot nil")
 			}
-			if snap.ExpiresAt == nil {
+
+			if snap.GetExpiresAt() == nil {
 				t.Fatal("ExpiresAt not set")
 			}
-			tt.check(t, uint64(snap.ExpiresAt.AsTime().UnixMilli()))
+
+			tt.check(t, uint64(snap.GetExpiresAt().AsTime().UnixMilli()))
 		})
 	}
 }
@@ -853,11 +874,13 @@ func TestSetKEEPTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.ExpiresAt.AsTime().UnixMilli() != int64(futureMs) {
-		t.Fatalf("KEEPTTL: expected ExpiresAt=%d, got %d", futureMs, snap.ExpiresAt.AsTime().UnixMilli())
+
+	if snap.GetExpiresAt().AsTime().UnixMilli() != int64(futureMs) {
+		t.Fatalf("KEEPTTL: expected ExpiresAt=%d, got %d", futureMs, snap.GetExpiresAt().AsTime().UnixMilli())
 	}
-	if string(snap.Scalar.GetRaw()) != "world" {
-		t.Fatalf("KEEPTTL: expected value=world, got %q", string(snap.Scalar.GetRaw()))
+
+	if string(snap.GetScalar().GetRaw()) != "world" {
+		t.Fatalf("KEEPTTL: expected value=world, got %q", string(snap.GetScalar().GetRaw()))
 	}
 }
 
@@ -966,6 +989,7 @@ func TestSetIFDEQ(t *testing.T) {
 	ctx := eng.NewContext()
 
 	seedString(ctx, "mykey", []byte("hello"))
+
 	digest := testComputeDigest([]byte("hello"))
 
 	// IFDEQ with matching digest → OK
@@ -979,6 +1003,7 @@ func TestSetIFDEQ(t *testing.T) {
 
 	// IFDEQ with non-matching digest → null
 	wrongDigest := testComputeDigest([]byte("notthis"))
+
 	res = runHandlerWith(eng, ctx, handleSet, &shared.Command{
 		Type: shared.CmdSet,
 		Args: [][]byte{[]byte("mykey"), []byte("foo"), []byte("IFDEQ"), []byte(wrongDigest)},
@@ -1002,6 +1027,7 @@ func TestSetIFDNE(t *testing.T) {
 	ctx := eng.NewContext()
 
 	seedString(ctx, "mykey", []byte("hello"))
+
 	digest := testComputeDigest([]byte("hello"))
 	wrongDigest := testComputeDigest([]byte("other"))
 
@@ -1325,11 +1351,13 @@ func TestTTLPreservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if snap == nil {
 		t.Fatal("snapshot nil after INCR")
 	}
-	if snap.ExpiresAt.AsTime().UnixMilli() != int64(futureMs) {
-		t.Fatalf("TTL not preserved: expected %d, got %d", futureMs, snap.ExpiresAt.AsTime().UnixMilli())
+
+	if snap.GetExpiresAt().AsTime().UnixMilli() != int64(futureMs) {
+		t.Fatalf("TTL not preserved: expected %d, got %d", futureMs, snap.GetExpiresAt().AsTime().UnixMilli())
 	}
 }
 
@@ -1782,6 +1810,7 @@ func TestHandleMSet(t *testing.T) {
 		if got1 != "$2\r\nv1\r\n" {
 			t.Errorf("GET k1: got %q, want v1", got1)
 		}
+
 		got2 := runHandlerWith(eng, ctx, handleGet, &shared.Command{
 			Type: shared.CmdGet,
 			Args: [][]byte{[]byte("k2")},
@@ -1964,12 +1993,13 @@ func TestHandleExpire(t *testing.T) {
 		}
 
 		snap, _, _, _ := eng.GetSnapshot("mykey")
-		if snap == nil || snap.ExpiresAt == nil {
+		if snap == nil || snap.GetExpiresAt() == nil {
 			t.Fatal("expected ExpiresAt to be set")
 		}
+
 		now := uint64(time.Now().UnixMilli())
-		if snap.ExpiresAt.AsTime().UnixMilli() < int64(now) || snap.ExpiresAt.AsTime().UnixMilli() > int64(now)+11000 {
-			t.Fatalf("ExpiresAt %d out of range (now=%d)", snap.ExpiresAt.AsTime().UnixMilli(), now)
+		if snap.GetExpiresAt().AsTime().UnixMilli() < int64(now) || snap.GetExpiresAt().AsTime().UnixMilli() > int64(now)+11000 {
+			t.Fatalf("ExpiresAt %d out of range (now=%d)", snap.GetExpiresAt().AsTime().UnixMilli(), now)
 		}
 	})
 
@@ -1984,7 +2014,7 @@ func TestHandleExpire(t *testing.T) {
 		}
 
 		snap, _, _, _ := eng.GetSnapshot("mykey")
-		if snap != nil && snap.Op != pb.EffectOp_REMOVE_OP {
+		if snap != nil && snap.GetOp() != pb.EffectOp_REMOVE_OP {
 			t.Fatal("expected key to be deleted")
 		}
 	})
@@ -2092,6 +2122,7 @@ func TestHandleExpireAt(t *testing.T) {
 		seedString(ctx, "mykey", []byte("hello"))
 
 		ts := fmt.Sprintf("%d", time.Now().Unix()+100)
+
 		got := runHandlerWith(eng, ctx, handleExpireAt, &shared.Command{Type: shared.CmdExpireAt, Args: [][]byte{[]byte("mykey"), []byte(ts)}})
 		if got != ":1\r\n" {
 			t.Errorf("got %q, want :1", got)
@@ -2109,7 +2140,7 @@ func TestHandleExpireAt(t *testing.T) {
 		}
 
 		snap, _, _, _ := eng.GetSnapshot("mykey")
-		if snap != nil && snap.Op != pb.EffectOp_REMOVE_OP {
+		if snap != nil && snap.GetOp() != pb.EffectOp_REMOVE_OP {
 			t.Fatal("expected key to be deleted")
 		}
 	})
@@ -2134,7 +2165,7 @@ func TestHandlePExpire(t *testing.T) {
 		}
 
 		snap, _, _, _ := eng.GetSnapshot("mykey")
-		if snap == nil || snap.ExpiresAt == nil {
+		if snap == nil || snap.GetExpiresAt() == nil {
 			t.Fatal("expected ExpiresAt to be set")
 		}
 	})
@@ -2165,6 +2196,7 @@ func TestHandlePExpireAt(t *testing.T) {
 		seedString(ctx, "mykey", []byte("hello"))
 
 		ts := fmt.Sprintf("%d", time.Now().UnixMilli()+100000)
+
 		got := runHandlerWith(eng, ctx, handlePExpireAt, &shared.Command{Type: shared.CmdPExpireAt, Args: [][]byte{[]byte("mykey"), []byte(ts)}})
 		if got != ":1\r\n" {
 			t.Errorf("got %q, want :1", got)
@@ -2216,8 +2248,9 @@ func TestHandlePersist(t *testing.T) {
 		if snap == nil {
 			t.Fatal("expected key to exist")
 		}
-		if snap.ExpiresAt != nil {
-			t.Fatalf("expected ExpiresAt=nil after PERSIST, got %v", snap.ExpiresAt)
+
+		if snap.GetExpiresAt() != nil {
+			t.Fatalf("expected ExpiresAt=nil after PERSIST, got %v", snap.GetExpiresAt())
 		}
 	})
 
@@ -2250,15 +2283,16 @@ func TestHandleRename(t *testing.T) {
 
 		// src should be gone
 		snap, _, _, _ := eng.GetSnapshot("src")
-		if snap != nil && snap.Op != pb.EffectOp_REMOVE_OP {
+		if snap != nil && snap.GetOp() != pb.EffectOp_REMOVE_OP {
 			t.Error("expected src to be deleted")
 		}
 
 		// dst should have the value
 		dstSnap, _, _, _ := eng.GetSnapshot("dst")
-		if dstSnap == nil || dstSnap.Scalar == nil {
+		if dstSnap == nil || dstSnap.GetScalar() == nil {
 			t.Fatal("expected dst to exist")
 		}
+
 		raw := snapshotToRaw(dstSnap)
 		if !bytes.Equal(raw, []byte("hello")) {
 			t.Errorf("dst value: got %q, want hello", raw)
@@ -2295,8 +2329,9 @@ func TestHandleRename(t *testing.T) {
 		if dstSnap == nil {
 			t.Fatal("expected dst to exist")
 		}
-		if dstSnap.ExpiresAt.AsTime().UnixMilli() != int64(expiresAt) {
-			t.Fatalf("expected ExpiresAt=%d, got %d", expiresAt, dstSnap.ExpiresAt.AsTime().UnixMilli())
+
+		if dstSnap.GetExpiresAt().AsTime().UnixMilli() != int64(expiresAt) {
+			t.Fatalf("expected ExpiresAt=%d, got %d", expiresAt, dstSnap.GetExpiresAt().AsTime().UnixMilli())
 		}
 	})
 
@@ -2314,8 +2349,9 @@ func TestHandleRename(t *testing.T) {
 		if dstSnap == nil {
 			t.Fatal("expected hdst to exist")
 		}
-		if dstSnap.TypeTag != pb.ValueType_TYPE_HASH {
-			t.Errorf("expected TYPE_HASH, got %v", dstSnap.TypeTag)
+
+		if dstSnap.GetTypeTag() != pb.ValueType_TYPE_HASH {
+			t.Errorf("expected TYPE_HASH, got %v", dstSnap.GetTypeTag())
 		}
 	})
 }
@@ -2370,12 +2406,15 @@ func TestHandleCopy(t *testing.T) {
 		// Both keys should exist
 		srcSnap, _, _, _ := eng.GetSnapshot("src")
 		dstSnap, _, _, _ := eng.GetSnapshot("dst")
+
 		if srcSnap == nil {
 			t.Error("src should still exist")
 		}
+
 		if dstSnap == nil {
 			t.Fatal("dst should exist")
 		}
+
 		raw := snapshotToRaw(dstSnap)
 		if !bytes.Equal(raw, []byte("hello")) {
 			t.Errorf("dst value: got %q, want hello", raw)
@@ -2406,6 +2445,7 @@ func TestHandleCopy(t *testing.T) {
 		}
 
 		dstSnap, _, _, _ := eng.GetSnapshot("dst")
+
 		raw := snapshotToRaw(dstSnap)
 		if !bytes.Equal(raw, []byte("hello")) {
 			t.Errorf("dst value after REPLACE: got %q, want hello", raw)
@@ -2431,11 +2471,13 @@ func TestHandleCopy(t *testing.T) {
 		if dstSnap == nil {
 			t.Fatal("expected dst to exist")
 		}
-		if dstSnap.TypeTag != pb.ValueType_TYPE_STRING {
-			t.Errorf("expected TYPE_STRING, got %v", dstSnap.TypeTag)
+
+		if dstSnap.GetTypeTag() != pb.ValueType_TYPE_STRING {
+			t.Errorf("expected TYPE_STRING, got %v", dstSnap.GetTypeTag())
 		}
-		if dstSnap.ExpiresAt.AsTime().UnixMilli() != int64(expiresAt) {
-			t.Fatalf("expected ExpiresAt=%d, got %d", expiresAt, dstSnap.ExpiresAt.AsTime().UnixMilli())
+
+		if dstSnap.GetExpiresAt().AsTime().UnixMilli() != int64(expiresAt) {
+			t.Fatalf("expected ExpiresAt=%d, got %d", expiresAt, dstSnap.GetExpiresAt().AsTime().UnixMilli())
 		}
 	})
 
@@ -2453,10 +2495,12 @@ func TestHandleCopy(t *testing.T) {
 		if dstSnap == nil {
 			t.Fatal("expected hdst to exist")
 		}
-		if dstSnap.TypeTag != pb.ValueType_TYPE_HASH {
-			t.Errorf("expected TYPE_HASH, got %v", dstSnap.TypeTag)
+
+		if dstSnap.GetTypeTag() != pb.ValueType_TYPE_HASH {
+			t.Errorf("expected TYPE_HASH, got %v", dstSnap.GetTypeTag())
 		}
-		if len(dstSnap.NetAdds) == 0 {
+
+		if len(dstSnap.GetNetAdds()) == 0 {
 			t.Error("expected hash fields in dst")
 		}
 	})
@@ -2468,6 +2512,7 @@ func TestHandleMove(t *testing.T) {
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
 		valid, _, _ := handleMove(cmd, w, nil)
+
 		return valid, buf.String()
 	}
 
@@ -2476,6 +2521,7 @@ func TestHandleMove(t *testing.T) {
 		if valid {
 			t.Error("expected invalid")
 		}
+
 		if !strings.Contains(got, "not an integer") {
 			t.Errorf("expected not-an-integer error, got %q", got)
 		}
@@ -2486,6 +2532,7 @@ func TestHandleMove(t *testing.T) {
 		if valid {
 			t.Error("expected invalid")
 		}
+
 		if !strings.Contains(got, "out of range") {
 			t.Errorf("expected out-of-range error, got %q", got)
 		}
@@ -2496,6 +2543,7 @@ func TestHandleMove(t *testing.T) {
 		if valid {
 			t.Error("expected invalid")
 		}
+
 		if !strings.Contains(got, "source and destination objects are the same") {
 			t.Errorf("expected same-object error, got %q", got)
 		}

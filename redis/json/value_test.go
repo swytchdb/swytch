@@ -42,6 +42,7 @@ func TestParseSerialize_RoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%s) error: %v", in, err)
 		}
+
 		got := string(Serialize(v))
 		if got != in {
 			t.Errorf("round-trip: Parse+Serialize(%s) = %s", in, got)
@@ -54,10 +55,13 @@ func TestParse_PreservesObjectOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
+
 	want := []string{"z", "a", "m"}
+
 	if len(v.Obj) != 3 {
 		t.Fatalf("got %d members", len(v.Obj))
 	}
+
 	for i, m := range v.Obj {
 		if m.Key != want[i] {
 			t.Fatalf("member %d = %q, want %q (order not preserved)", i, m.Key, want[i])
@@ -70,9 +74,11 @@ func TestParse_DuplicateMemberTakesLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
+
 	if len(v.Obj) != 2 {
 		t.Fatalf("got %d members, want 2: %s", len(v.Obj), Serialize(v))
 	}
+
 	if got := string(Serialize(v)); got != `{"a":2,"b":9}` {
 		t.Fatalf("serialized = %s, want {\"a\":2,\"b\":9}", got)
 	}
@@ -94,13 +100,16 @@ func TestParse_IntVsFloat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse(%s) error: %v", c.in, err)
 		}
+
 		if v.Kind != c.kind {
 			t.Errorf("Parse(%s) kind = %v, want %v", c.in, v.Kind, c.kind)
 		}
+
 		if v.TypeName() != c.name {
 			t.Errorf("Parse(%s) TypeName = %q, want %q", c.in, v.TypeName(), c.name)
 		}
 	}
+
 	v, _ := Parse([]byte(`9007199254740993`))
 	if v.Int != 9007199254740993 {
 		t.Errorf("large int lost precision: %d", v.Int)
@@ -111,6 +120,7 @@ func TestParse_RejectsTrailingGarbage(t *testing.T) {
 	if _, err := Parse([]byte(`1 2`)); err == nil {
 		t.Fatalf("expected error on trailing data")
 	}
+
 	if _, err := Parse([]byte(`{`)); err == nil {
 		t.Fatalf("expected error on truncated object")
 	}
@@ -119,6 +129,7 @@ func TestParse_RejectsTrailingGarbage(t *testing.T) {
 func TestSerializePretty(t *testing.T) {
 	v, _ := Parse([]byte(`{"a":1,"b":[2,3]}`))
 	got := string(SerializePretty(v, PrintOpts{Indent: "  ", Newline: "\n", Space: " "}))
+
 	want := "{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}"
 	if got != want {
 		t.Fatalf("pretty:\n--- got ---\n%s\n--- want ---\n%s", got, want)

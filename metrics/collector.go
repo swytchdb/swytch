@@ -320,53 +320,83 @@ func NewCollector(provider StatsProvider) *Collector {
 // Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.connectionsCurrent
+
 	ch <- c.connectionsTotal
+
 	ch <- c.commandsTotal
+
 	ch <- c.cacheHitsTotal
+
 	ch <- c.cacheMissesTotal
+
 	ch <- c.cacheHitRate
+
 	ch <- c.evictionsTotal
+
 	ch <- c.reclaimedTotal
+
 	ch <- c.itemsCount
+
 	ch <- c.releaseQueueDepth
+
 	ch <- c.memoryBytes
+
 	ch <- c.memoryMaxBytes
+
 	ch <- c.arenaBytes
+
 	ch <- c.vertexCount
+
 	ch <- c.latencySeconds
+
 	ch <- c.adaptiveKThreshold
+
 	ch <- c.graduationRate
+
 	ch <- c.rateLow
+
 	ch <- c.rateHigh
+
 	ch <- c.evictedUnprotected
+
 	ch <- c.evictedProtected
+
 	ch <- c.reachedProtected
+
 	ch <- c.windowHitRate
+
 	ch <- c.ghostCount
+
 	ch <- c.bytesReadTotal
+
 	ch <- c.bytesWrittenTotal
+
 	ch <- c.uptimeSeconds
 
 	// Redis-specific
 	if c.provider.Subsystem() == "redis" {
 		ch <- c.blockedClients
+
 		ch <- c.commandErrorsTotal
 	}
 
 	// Memcached-specific
 	if c.provider.Subsystem() == "memcached" {
 		ch <- c.casHitsTotal
+
 		ch <- c.casMissesTotal
+
 		ch <- c.deleteHitsTotal
+
 		ch <- c.deleteMissesTotal
 	}
-
 }
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// Connection stats
 	ch <- prometheus.MustNewConstMetric(c.connectionsCurrent, prometheus.GaugeValue, float64(c.provider.CurrentConnections()))
+
 	ch <- prometheus.MustNewConstMetric(c.connectionsTotal, prometheus.CounterValue, float64(c.provider.TotalConnections()))
 
 	// Command stats
@@ -376,23 +406,38 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	// Cache stats
 	ch <- prometheus.MustNewConstMetric(c.cacheHitsTotal, prometheus.CounterValue, float64(c.provider.CacheHits()))
+
 	ch <- prometheus.MustNewConstMetric(c.cacheMissesTotal, prometheus.CounterValue, float64(c.provider.CacheMisses()))
+
 	ch <- prometheus.MustNewConstMetric(c.cacheHitRate, prometheus.GaugeValue, c.provider.HitRate())
+
 	ch <- prometheus.MustNewConstMetric(c.evictionsTotal, prometheus.CounterValue, float64(c.provider.Evictions()))
+
 	ch <- prometheus.MustNewConstMetric(c.reclaimedTotal, prometheus.CounterValue, float64(c.provider.Reclaimed()))
+
 	ch <- prometheus.MustNewConstMetric(c.itemsCount, prometheus.GaugeValue, float64(c.provider.ItemCount()))
+
 	ch <- prometheus.MustNewConstMetric(c.releaseQueueDepth, prometheus.GaugeValue, float64(c.provider.ReleaseQueueDepth()))
+
 	ch <- prometheus.MustNewConstMetric(c.memoryBytes, prometheus.GaugeValue, float64(c.provider.MemoryBytes()))
+
 	ch <- prometheus.MustNewConstMetric(c.memoryMaxBytes, prometheus.GaugeValue, float64(c.provider.MaxMemoryBytes()))
+
 	ch <- prometheus.MustNewConstMetric(c.arenaBytes, prometheus.GaugeValue, float64(c.provider.ArenaBytes()))
+
 	ch <- prometheus.MustNewConstMetric(c.vertexCount, prometheus.GaugeValue, float64(c.provider.VertexCount()))
 
 	// Latency stats
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.GetLatencyP50(), "get", "0.5")
+
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.GetLatencyP99(), "get", "0.99")
+
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.SetLatencyP50(), "set", "0.5")
+
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.SetLatencyP99(), "set", "0.99")
+
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.CmdLatencyP50(), "cmd", "0.5")
+
 	ch <- prometheus.MustNewConstMetric(c.latencySeconds, prometheus.GaugeValue, c.provider.CmdLatencyP99(), "cmd", "0.99")
 
 	// Adaptive eviction internals (K plus the graduation-rate / learned-threshold
@@ -400,18 +445,27 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, s := range c.provider.AdaptiveStats() {
 		shard := itoa(s.ShardID)
 		ch <- prometheus.MustNewConstMetric(c.adaptiveKThreshold, prometheus.GaugeValue, float64(s.K), shard)
+
 		ch <- prometheus.MustNewConstMetric(c.graduationRate, prometheus.GaugeValue, s.GraduationRate, shard)
+
 		ch <- prometheus.MustNewConstMetric(c.rateLow, prometheus.GaugeValue, s.LearnedRateLow, shard)
+
 		ch <- prometheus.MustNewConstMetric(c.rateHigh, prometheus.GaugeValue, s.LearnedRateHigh, shard)
+
 		ch <- prometheus.MustNewConstMetric(c.evictedUnprotected, prometheus.GaugeValue, float64(s.EvictedUnprotected), shard)
+
 		ch <- prometheus.MustNewConstMetric(c.evictedProtected, prometheus.GaugeValue, float64(s.EvictedProtected), shard)
+
 		ch <- prometheus.MustNewConstMetric(c.reachedProtected, prometheus.GaugeValue, float64(s.ReachedProtected), shard)
+
 		ch <- prometheus.MustNewConstMetric(c.windowHitRate, prometheus.GaugeValue, s.WindowHitRate, shard)
+
 		ch <- prometheus.MustNewConstMetric(c.ghostCount, prometheus.GaugeValue, float64(s.GhostCount), shard)
 	}
 
 	// Network stats
 	ch <- prometheus.MustNewConstMetric(c.bytesReadTotal, prometheus.CounterValue, float64(c.provider.BytesRead()))
+
 	ch <- prometheus.MustNewConstMetric(c.bytesWrittenTotal, prometheus.CounterValue, float64(c.provider.BytesWritten()))
 
 	// Uptime
@@ -420,6 +474,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// Redis-specific
 	if c.provider.Subsystem() == "redis" {
 		ch <- prometheus.MustNewConstMetric(c.blockedClients, prometheus.GaugeValue, float64(c.provider.BlockedClients()))
+
 		for cmd, count := range c.provider.CommandErrors() {
 			ch <- prometheus.MustNewConstMetric(c.commandErrorsTotal, prometheus.CounterValue, float64(count), cmd)
 		}
@@ -428,11 +483,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// Memcached-specific
 	if c.provider.Subsystem() == "memcached" {
 		ch <- prometheus.MustNewConstMetric(c.casHitsTotal, prometheus.CounterValue, float64(c.provider.CasHits()))
+
 		ch <- prometheus.MustNewConstMetric(c.casMissesTotal, prometheus.CounterValue, float64(c.provider.CasMisses()))
+
 		ch <- prometheus.MustNewConstMetric(c.deleteHitsTotal, prometheus.CounterValue, float64(c.provider.DeleteHits()))
+
 		ch <- prometheus.MustNewConstMetric(c.deleteMissesTotal, prometheus.CounterValue, float64(c.provider.DeleteMisses()))
 	}
-
 }
 
 // itoa converts an int to a string.

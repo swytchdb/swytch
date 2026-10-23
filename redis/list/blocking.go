@@ -44,6 +44,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		} else {
 			w.WriteWrongNumArguments("brpop")
 		}
+
 		return
 	}
 
@@ -51,6 +52,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	timeout, errMsg := shared.ParseBlockingTimeout(string(cmd.Args[len(cmd.Args)-1]))
 	if errMsg != "" {
 		w.WriteError(errMsg)
+
 		return
 	}
 
@@ -59,13 +61,17 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	// Check for WRONGTYPE before blocking
 	for _, key := range keys {
 		keyStr := string(key)
+
 		_, _, exists, wrongType, err := getListSnapshot(cmd, keyStr)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if exists && wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 	}
@@ -73,6 +79,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
 		handleLPopNonBlocking(cmd, w, left)
+
 		return
 	}
 
@@ -84,6 +91,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	reg, err := db.Manager().Subscriptions.Register(ctx, keys...)
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 	defer reg.Cancel()
@@ -93,17 +101,21 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		// Try to pop from each key in order
 		for _, key := range keys {
 			keyStr := string(key)
+
 			elem, found, err := tryPop(cmd, keyStr, left, reg)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if found {
 				reg.Cancel()
 
 				w.WriteArray(2)
 				w.WriteBulkString(key)
 				w.WriteBulkString(elem)
+
 				return
 			}
 		}
@@ -115,6 +127,7 @@ func handleBlockingPop(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			} else {
 				w.WriteNullArray()
 			}
+
 			return
 		}
 		// Woken up, loop back to try pop again
@@ -137,11 +150,13 @@ func tryPop(cmd *shared.Command, key string, left bool, reg *shared.Registration
 	if err != nil {
 		return nil, false, err
 	}
-	if !exists || wrongType || len(snap.OrderedElements) == 0 {
+
+	if !exists || wrongType || len(snap.GetOrderedElements()) == 0 {
 		return nil, false, nil
 	}
 
 	cmd.Context.BeginTx()
+
 	if err := cmd.Context.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -151,16 +166,16 @@ func tryPop(cmd *shared.Command, key string, left bool, reg *shared.Registration
 
 	var elem *pb.ReducedElement
 	if left {
-		elem = snap.OrderedElements[0]
+		elem = snap.GetOrderedElements()[0]
 	} else {
-		elem = snap.OrderedElements[len(snap.OrderedElements)-1]
+		elem = snap.GetOrderedElements()[len(snap.GetOrderedElements())-1]
 	}
 
-	if err := emitListRemove(cmd, key, elem.Data.Id); err != nil {
+	if err := emitListRemove(cmd, key, elem.GetData().GetId()); err != nil {
 		return nil, false, err
 	}
 
-	return elem.Data.Decompress(), true, nil
+	return elem.GetData().Decompress(), true, nil
 }
 
 // handleBRPopLPushNonBlocking handles BRPOPLPUSH inside transactions (non-blocking mode)
@@ -168,6 +183,7 @@ func tryPop(cmd *shared.Command, key string, left bool, reg *shared.Registration
 func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("brpoplpush")
+
 		return
 	}
 
@@ -182,18 +198,23 @@ func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer) (valid b
 		elem, errMsg, ok, err := doLMove(cmd, source, destination, false, true)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !ok {
 			if errMsg != "" {
 				w.WriteError(errMsg)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		w.WriteBulkString(elem)
 	}
+
 	return
 }
 
@@ -202,6 +223,7 @@ func handleBRPopLPushNonBlocking(cmd *shared.Command, w *shared.Writer) (valid b
 func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 5 {
 		w.WriteWrongNumArguments("blmove")
+
 		return
 	}
 
@@ -213,6 +235,7 @@ func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 	keys = []string{source, destination}
 
 	var popLeft, pushLeft bool
+
 	switch string(whereFrom) {
 	case directionLeft:
 		popLeft = true
@@ -220,6 +243,7 @@ func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 		popLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -230,6 +254,7 @@ func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 		pushLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -238,18 +263,23 @@ func handleBLMoveNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 		elem, errMsg, ok, err := doLMove(cmd, source, destination, popLeft, pushLeft)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !ok {
 			if errMsg != "" {
 				w.WriteError(errMsg)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		w.WriteBulkString(elem)
 	}
+
 	return
 }
 
@@ -262,11 +292,13 @@ func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, left bool) (va
 		} else {
 			w.WriteWrongNumArguments("brpop")
 		}
+
 		return
 	}
 
 	// Last arg is timeout (ignored in transaction), rest are keys
 	keyArgs := cmd.Args[:len(cmd.Args)-1]
+
 	keys = make([]string, len(keyArgs))
 	for i, arg := range keyArgs {
 		keys[i] = string(arg)
@@ -278,44 +310,54 @@ func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, left bool) (va
 			snap, tips, exists, wrongType, err := getListSnapshot(cmd, keyStr)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
-			if !exists || len(snap.OrderedElements) == 0 {
+
+			if !exists || len(snap.GetOrderedElements()) == 0 {
 				continue
 			}
 
 			cmd.Context.BeginTx()
+
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(keyStr),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
 			var elem *pb.ReducedElement
 			if left {
-				elem = snap.OrderedElements[0]
+				elem = snap.GetOrderedElements()[0]
 			} else {
-				elem = snap.OrderedElements[len(snap.OrderedElements)-1]
+				elem = snap.GetOrderedElements()[len(snap.GetOrderedElements())-1]
 			}
-			if err := emitListRemove(cmd, keyStr, elem.Data.Id); err != nil {
+
+			if err := emitListRemove(cmd, keyStr, elem.GetData().GetId()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
 			w.WriteArray(2)
 			w.WriteBulkStringStr(keyStr)
-			w.WriteBulkString(elem.Data.Decompress())
+			w.WriteBulkString(elem.GetData().Decompress())
+
 			return
 		}
 
 		w.WriteNullArray()
 	}
+
 	return
 }
 
@@ -325,6 +367,7 @@ func handleLPopNonBlocking(cmd *shared.Command, w *shared.Writer, left bool) (va
 func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("blmpop")
+
 		return
 	}
 
@@ -332,12 +375,14 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 	numKeys, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || numKeys < 1 {
 		w.WriteError("ERR numkeys should be greater than 0")
+
 		return
 	}
 
 	// Check we have enough args: timeout + numkeys + keys + direction
 	if len(cmd.Args) < int(numKeys)+3 {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -350,7 +395,9 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 	// Parse direction (LEFT or RIGHT)
 	dirIdx := int(numKeys) + 2
 	direction := shared.ToUpper(cmd.Args[dirIdx])
+
 	var left bool
+
 	switch string(direction) {
 	case directionLeft:
 		left = true
@@ -358,24 +405,31 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 		left = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	// Parse optional COUNT
 	count := int64(1)
+
 	if len(cmd.Args) > dirIdx+1 {
 		if len(cmd.Args) != dirIdx+3 {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		countArg := shared.ToUpper(cmd.Args[dirIdx+1])
 		if string(countArg) != optionCount {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		count, ok = shared.ParseInt64(cmd.Args[dirIdx+2])
 		if !ok || count < 1 {
 			w.WriteError("ERR count should be greater than 0")
+
 			return
 		}
 	}
@@ -387,10 +441,13 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 			_, _, exists, wrongType, err := getListSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
 		}
@@ -400,39 +457,46 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 			snap, tips, exists, _, err := getListSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
-			if !exists || len(snap.OrderedElements) == 0 {
+
+			if !exists || len(snap.GetOrderedElements()) == 0 {
 				continue
 			}
 
-			elements := snap.OrderedElements
+			elements := snap.GetOrderedElements()
 			n := min(int(count), len(elements))
 
 			cmd.Context.BeginTx()
+
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
 			popped := make([][]byte, n)
 			if left {
 				for i := range n {
-					popped[i] = elements[i].Data.Decompress()
-					if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
+					popped[i] = elements[i].GetData().Decompress()
+					if err := emitListRemove(cmd, key, elements[i].GetData().GetId()); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
 			} else {
 				for i := range n {
 					idx := len(elements) - 1 - i
-					popped[i] = elements[idx].Data.Decompress()
-					if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
+
+					popped[i] = elements[idx].GetData().Decompress()
+					if err := emitListRemove(cmd, key, elements[idx].GetData().GetId()); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -441,14 +505,17 @@ func handleBLMPopNonBlocking(cmd *shared.Command, w *shared.Writer) (valid bool,
 			w.WriteArray(2)
 			w.WriteBulkStringStr(key)
 			w.WriteArray(len(popped))
+
 			for _, elem := range popped {
 				w.WriteBulkString(elem)
 			}
+
 			return
 		}
 
 		w.WriteNullArray()
 	}
+
 	return
 }
 
@@ -458,11 +525,13 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
 		handleBLMPopNonBlocking(cmd, w)
+
 		return
 	}
 
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("blmpop")
+
 		return
 	}
 
@@ -470,6 +539,7 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	timeout, errMsg := shared.ParseBlockingTimeout(string(cmd.Args[0]))
 	if errMsg != "" {
 		w.WriteError(errMsg)
+
 		return
 	}
 
@@ -477,12 +547,14 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	numKeys, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok || numKeys < 1 {
 		w.WriteError("ERR numkeys should be greater than 0")
+
 		return
 	}
 
 	// Check we have enough args: timeout + numkeys + keys + direction
 	if len(cmd.Args) < int(numKeys)+3 {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -495,7 +567,9 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	// Parse direction (LEFT or RIGHT)
 	dirIdx := int(numKeys) + 2
 	direction := shared.ToUpper(cmd.Args[dirIdx])
+
 	var left bool
+
 	switch string(direction) {
 	case directionLeft:
 		left = true
@@ -503,25 +577,33 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 		left = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	// Parse optional COUNT
 	count := int64(1)
+
 	if len(cmd.Args) > dirIdx+1 {
 		if len(cmd.Args) != dirIdx+3 {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		countArg := shared.ToUpper(cmd.Args[dirIdx+1])
 		if string(countArg) != optionCount {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		var ok bool
+
 		count, ok = shared.ParseInt64(cmd.Args[dirIdx+2])
 		if !ok || count < 1 {
 			w.WriteError("ERR count should be greater than 0")
+
 			return
 		}
 	}
@@ -531,10 +613,13 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 		_, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if exists && wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 	}
@@ -553,6 +638,7 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	reg, err := db.Manager().Subscriptions.Register(ctx, keyBytes...)
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 	defer reg.Cancel()
@@ -564,17 +650,21 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 			elements, found, err := tryMultiPop(cmd, key, left, int(count), reg)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if found {
 				reg.Cancel()
 
 				w.WriteArray(2)
 				w.WriteBulkStringStr(key)
 				w.WriteArray(len(elements))
+
 				for _, elem := range elements {
 					w.WriteBulkString(elem)
 				}
+
 				return
 			}
 		}
@@ -586,6 +676,7 @@ func handleBLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 			} else {
 				w.WriteNullArray()
 			}
+
 			return
 		}
 		// Woken up, loop back to try pop again
@@ -608,14 +699,16 @@ func tryMultiPop(cmd *shared.Command, key string, left bool, count int, reg *sha
 	if err != nil {
 		return nil, false, err
 	}
-	if !exists || wrongType || len(snap.OrderedElements) == 0 {
+
+	if !exists || wrongType || len(snap.GetOrderedElements()) == 0 {
 		return nil, false, nil
 	}
 
-	elements := snap.OrderedElements
+	elements := snap.GetOrderedElements()
 	n := min(count, len(elements))
 
 	cmd.Context.BeginTx()
+
 	if err := cmd.Context.Emit(&pb.Effect{
 		Key:  []byte(key),
 		Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
@@ -626,16 +719,17 @@ func tryMultiPop(cmd *shared.Command, key string, left bool, count int, reg *sha
 	popped := make([][]byte, n)
 	if left {
 		for i := range n {
-			popped[i] = elements[i].Data.Decompress()
-			if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
+			popped[i] = elements[i].GetData().Decompress()
+			if err := emitListRemove(cmd, key, elements[i].GetData().GetId()); err != nil {
 				return nil, false, err
 			}
 		}
 	} else {
 		for i := range n {
 			idx := len(elements) - 1 - i
-			popped[i] = elements[idx].Data.Decompress()
-			if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
+
+			popped[i] = elements[idx].GetData().Decompress()
+			if err := emitListRemove(cmd, key, elements[idx].GetData().GetId()); err != nil {
 				return nil, false, err
 			}
 		}
@@ -650,11 +744,13 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
 		handleBLMoveNonBlocking(cmd, w)
+
 		return
 	}
 
 	if len(cmd.Args) != 5 {
 		w.WriteWrongNumArguments("blmove")
+
 		return
 	}
 
@@ -667,11 +763,13 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	timeout, errMsg := shared.ParseBlockingTimeout(string(cmd.Args[4]))
 	if errMsg != "" {
 		w.WriteError(errMsg)
+
 		return
 	}
 
 	// Parse directions
 	var popLeft, pushLeft bool
+
 	switch string(whereFrom) {
 	case directionLeft:
 		popLeft = true
@@ -679,8 +777,10 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 		popLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
+
 	switch string(whereTo) {
 	case directionLeft:
 		pushLeft = true
@@ -688,6 +788,7 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 		pushLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -699,6 +800,7 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 	reg, err := db.Manager().Subscriptions.Register(ctx, []byte(source))
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 	defer reg.Cancel()
@@ -708,18 +810,22 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 		elem, errMsg, ok, emitErr := doLMove(cmd, source, destination, popLeft, pushLeft)
 		if emitErr != nil {
 			w.WriteError(emitErr.Error())
+
 			return
 		}
+
 		if ok {
 			reg.Cancel()
 
 			w.WriteBulkString(elem)
+
 			return
 		} else if errMsg != "" {
 			// Element was not consumed (e.g. WRONGTYPE on destination).
 			// Re-notify so the next blocked client gets a chance.
 			reg.CancelAndRenotify()
 			w.WriteError(errMsg)
+
 			return
 		}
 
@@ -730,6 +836,7 @@ func handleBLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database, co
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 	}
@@ -741,11 +848,13 @@ func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	// In script context, use non-blocking behavior (same as transactions)
 	if conn.InScript {
 		handleBRPopLPushNonBlocking(cmd, w)
+
 		return
 	}
 
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("brpoplpush")
+
 		return
 	}
 
@@ -756,6 +865,7 @@ func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	timeout, errMsg := shared.ParseBlockingTimeout(string(cmd.Args[2]))
 	if errMsg != "" {
 		w.WriteError(errMsg)
+
 		return
 	}
 
@@ -768,6 +878,7 @@ func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database
 	reg, err := db.Manager().Subscriptions.Register(ctx, []byte(source))
 	if err != nil {
 		w.WriteError("ERR " + err.Error())
+
 		return
 	}
 	defer reg.Cancel()
@@ -777,18 +888,22 @@ func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		elem, errMsg, ok, emitErr := doLMove(cmd, source, destination, false, true)
 		if emitErr != nil {
 			w.WriteError(emitErr.Error())
+
 			return
 		}
+
 		if ok {
 			reg.Cancel()
 
 			w.WriteBulkString(elem)
+
 			return
 		} else if errMsg != "" {
 			// Element was not consumed (e.g. WRONGTYPE on destination).
 			// Re-notify so the next blocked client gets a chance.
 			reg.CancelAndRenotify()
 			w.WriteError(errMsg)
+
 			return
 		}
 
@@ -799,6 +914,7 @@ func handleBRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 	}

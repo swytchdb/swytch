@@ -39,9 +39,11 @@ func ReconstructBytes(snap *pb.ReducedEffect) ([]byte, bool) {
 	if snap == nil {
 		return nil, false
 	}
-	fn, ok := bytesReconstructors[snap.TypeTag]
+
+	fn, ok := bytesReconstructors[snap.GetTypeTag()]
 	if !ok {
 		return nil, false
 	}
+
 	return fn(snap), true
 }

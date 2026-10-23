@@ -37,11 +37,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -51,11 +54,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -74,6 +80,7 @@ func seedList(ctx *effects.Context, key string, values ...string) {
 			}},
 		})
 	}
+
 	_ = ctx.Flush()
 }
 
@@ -110,6 +117,7 @@ func TestHandleLLen(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLLen, &shared.Command{Args: [][]byte{[]byte("mylist")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -120,6 +128,7 @@ func TestHandleLLen(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLLen, &shared.Command{Args: [][]byte{[]byte("myhash")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -140,6 +149,7 @@ func TestHandleLRange(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("-1")}})
+
 		expect := "*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -151,6 +161,7 @@ func TestHandleLRange(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "d")
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("1"), []byte("2")}})
+
 		expect := "*2\r\n$1\r\nb\r\n$1\r\nc\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -162,6 +173,7 @@ func TestHandleLRange(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "d")
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-3"), []byte("-2")}})
+
 		expect := "*2\r\n$1\r\nb\r\n$1\r\nc\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -173,6 +185,7 @@ func TestHandleLRange(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b")
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("100")}})
+
 		expect := "*2\r\n$1\r\na\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -183,6 +196,7 @@ func TestHandleLRange(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("2"), []byte("0")}})
 		if resp != "*0\r\n" {
 			t.Fatalf("expected *0\\r\\n, got %q", resp)
@@ -193,6 +207,7 @@ func TestHandleLRange(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLRange, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("0"), []byte("-1")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -212,6 +227,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("0")}})
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
@@ -222,6 +238,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("2")}})
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
@@ -232,6 +249,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-1")}})
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
@@ -242,6 +260,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-3")}})
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
@@ -252,6 +271,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("10")}})
 		if resp != "$-1\r\n" {
 			t.Fatalf("expected null bulk string, got %q", resp)
@@ -262,6 +282,7 @@ func TestHandleLIndex(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLIndex, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("0")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -288,6 +309,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "b", "d")
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b")}})
 		if resp != ":1\r\n" {
 			t.Fatalf("expected :1\\r\\n, got %q", resp)
@@ -298,6 +320,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("z")}})
 		if resp != "$-1\r\n" {
 			t.Fatalf("expected null bulk string, got %q", resp)
@@ -308,6 +331,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "b", "d")
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b"), []byte("RANK"), []byte("2")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -318,6 +342,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "b", "d")
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b"), []byte("RANK"), []byte("-1")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -329,6 +354,7 @@ func TestHandleLPos(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "b", "d")
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b"), []byte("COUNT"), []byte("0")}})
+
 		expect := "*2\r\n:1\r\n:3\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -340,6 +366,7 @@ func TestHandleLPos(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "b", "d", "b")
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b"), []byte("COUNT"), []byte("2")}})
+
 		expect := "*2\r\n:1\r\n:3\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -361,6 +388,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("b"), []byte("RANK"), []byte("0")}})
 		if resp != "-ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list\r\n" {
 			t.Fatalf("expected RANK error, got %q", resp)
@@ -371,6 +399,7 @@ func TestHandleLPos(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLPos, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -382,13 +411,14 @@ func TestHandleLPush(t *testing.T) {
 	t.Run("new key", func(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
+
 		resp := runHandlerWith(eng, ctx, handleLPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a"), []byte("b"), []byte("c")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
 		}
 		// Verify snapshot has 3 elements
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 elements in snapshot, got %v", snap)
 		}
 	})
@@ -397,6 +427,7 @@ func TestHandleLPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x", "y")
+
 		resp := runHandlerWith(eng, ctx, handleLPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -407,6 +438,7 @@ func TestHandleLPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLPush, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -416,6 +448,7 @@ func TestHandleLPush(t *testing.T) {
 	t.Run("multiple elements order", func(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
+
 		resp := runHandlerWith(eng, ctx, handleLPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a"), []byte("b"), []byte("c")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -425,12 +458,14 @@ func TestHandleLPush(t *testing.T) {
 		if snap == nil {
 			t.Fatal("expected snapshot")
 		}
-		elems := snap.OrderedElements
+
+		elems := snap.GetOrderedElements()
 		if len(elems) != 3 {
 			t.Fatalf("expected 3 elements, got %d", len(elems))
 		}
-		if string(elems[0].Data.GetRaw()) != "c" || string(elems[1].Data.GetRaw()) != "b" || string(elems[2].Data.GetRaw()) != "a" {
-			t.Fatalf("expected [c b a], got [%s %s %s]", elems[0].Data.GetRaw(), elems[1].Data.GetRaw(), elems[2].Data.GetRaw())
+
+		if string(elems[0].GetData().GetRaw()) != "c" || string(elems[1].GetData().GetRaw()) != "b" || string(elems[2].GetData().GetRaw()) != "a" {
+			t.Fatalf("expected [c b a], got [%s %s %s]", elems[0].GetData().GetRaw(), elems[1].GetData().GetRaw(), elems[2].GetData().GetRaw())
 		}
 	})
 
@@ -438,12 +473,14 @@ func TestHandleLPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		runHandlerWith(eng, ctx, handleLPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
 		if snap == nil {
 			t.Fatal("expected snapshot")
 		}
-		if snap.TypeTag != pb.ValueType_TYPE_LIST {
-			t.Fatalf("expected TYPE_LIST tag, got %v", snap.TypeTag)
+
+		if snap.GetTypeTag() != pb.ValueType_TYPE_LIST {
+			t.Fatalf("expected TYPE_LIST tag, got %v", snap.GetTypeTag())
 		}
 	})
 }
@@ -460,6 +497,7 @@ func TestHandleLPushX(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x", "y")
+
 		resp := runHandlerWith(eng, ctx, handleLPushX, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -470,6 +508,7 @@ func TestHandleLPushX(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLPushX, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -481,6 +520,7 @@ func TestHandleRPush(t *testing.T) {
 	t.Run("new key", func(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
+
 		resp := runHandlerWith(eng, ctx, handleRPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a"), []byte("b"), []byte("c")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -490,12 +530,14 @@ func TestHandleRPush(t *testing.T) {
 		if snap == nil {
 			t.Fatal("expected snapshot")
 		}
-		elems := snap.OrderedElements
+
+		elems := snap.GetOrderedElements()
 		if len(elems) != 3 {
 			t.Fatalf("expected 3 elements, got %d", len(elems))
 		}
-		if string(elems[0].Data.GetRaw()) != "a" || string(elems[1].Data.GetRaw()) != "b" || string(elems[2].Data.GetRaw()) != "c" {
-			t.Fatalf("expected [a b c], got [%s %s %s]", elems[0].Data.GetRaw(), elems[1].Data.GetRaw(), elems[2].Data.GetRaw())
+
+		if string(elems[0].GetData().GetRaw()) != "a" || string(elems[1].GetData().GetRaw()) != "b" || string(elems[2].GetData().GetRaw()) != "c" {
+			t.Fatalf("expected [a b c], got [%s %s %s]", elems[0].GetData().GetRaw(), elems[1].GetData().GetRaw(), elems[2].GetData().GetRaw())
 		}
 	})
 
@@ -503,6 +545,7 @@ func TestHandleRPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x", "y")
+
 		resp := runHandlerWith(eng, ctx, handleRPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -513,6 +556,7 @@ func TestHandleRPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleRPush, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -523,12 +567,14 @@ func TestHandleRPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		runHandlerWith(eng, ctx, handleRPush, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
 		if snap == nil {
 			t.Fatal("expected snapshot")
 		}
-		if snap.TypeTag != pb.ValueType_TYPE_LIST {
-			t.Fatalf("expected TYPE_LIST tag, got %v", snap.TypeTag)
+
+		if snap.GetTypeTag() != pb.ValueType_TYPE_LIST {
+			t.Fatalf("expected TYPE_LIST tag, got %v", snap.GetTypeTag())
 		}
 	})
 }
@@ -545,6 +591,7 @@ func TestHandleRPushX(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x", "y")
+
 		resp := runHandlerWith(eng, ctx, handleRPushX, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("a")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -555,6 +602,7 @@ func TestHandleRPushX(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleRPushX, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -567,16 +615,19 @@ func TestHandleLSet(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLSet, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("1"), []byte("X")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatal("expected 3 elements")
 		}
-		if string(snap.OrderedElements[1].Data.GetRaw()) != "X" {
-			t.Fatalf("expected element 1 to be X, got %q", snap.OrderedElements[1].Data.GetRaw())
+
+		if string(snap.GetOrderedElements()[1].GetData().GetRaw()) != "X" {
+			t.Fatalf("expected element 1 to be X, got %q", snap.GetOrderedElements()[1].GetData().GetRaw())
 		}
 	})
 
@@ -584,13 +635,15 @@ func TestHandleLSet(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLSet, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-1"), []byte("Z")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if string(snap.OrderedElements[2].Data.GetRaw()) != "Z" {
-			t.Fatalf("expected last element to be Z, got %q", snap.OrderedElements[2].Data.GetRaw())
+		if string(snap.GetOrderedElements()[2].GetData().GetRaw()) != "Z" {
+			t.Fatalf("expected last element to be Z, got %q", snap.GetOrderedElements()[2].GetData().GetRaw())
 		}
 	})
 
@@ -605,6 +658,7 @@ func TestHandleLSet(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b")
+
 		resp := runHandlerWith(eng, ctx, handleLSet, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("5"), []byte("v")}})
 		if resp != "-ERR index out of range\r\n" {
 			t.Fatalf("expected out of range error, got %q", resp)
@@ -615,6 +669,7 @@ func TestHandleLSet(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLSet, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("0"), []byte("v")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -627,6 +682,7 @@ func TestHandleLInsert(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLInsert, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("BEFORE"), []byte("b"), []byte("X")}})
 		if resp != ":4\r\n" {
 			t.Fatalf("expected :4\\r\\n, got %q", resp)
@@ -637,6 +693,7 @@ func TestHandleLInsert(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLInsert, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("AFTER"), []byte("b"), []byte("X")}})
 		if resp != ":4\r\n" {
 			t.Fatalf("expected :4\\r\\n, got %q", resp)
@@ -647,6 +704,7 @@ func TestHandleLInsert(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLInsert, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("BEFORE"), []byte("z"), []byte("X")}})
 		if resp != ":-1\r\n" {
 			t.Fatalf("expected :-1\\r\\n, got %q", resp)
@@ -664,6 +722,7 @@ func TestHandleLInsert(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLInsert, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("BEFORE"), []byte("a"), []byte("X")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -676,12 +735,14 @@ func TestHandleLRem(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "a", "c", "a")
+
 		resp := runHandlerWith(eng, ctx, handleLRem, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("2"), []byte("a")}})
 		if resp != ":2\r\n" {
 			t.Fatalf("expected :2\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 remaining elements, got %v", snap)
 		}
 	})
@@ -690,12 +751,14 @@ func TestHandleLRem(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "a", "c", "a")
+
 		resp := runHandlerWith(eng, ctx, handleLRem, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-2"), []byte("a")}})
 		if resp != ":2\r\n" {
 			t.Fatalf("expected :2\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 remaining elements, got %v", snap)
 		}
 	})
@@ -704,12 +767,14 @@ func TestHandleLRem(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "a", "c", "a")
+
 		resp := runHandlerWith(eng, ctx, handleLRem, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("a")}})
 		if resp != ":3\r\n" {
 			t.Fatalf("expected :3\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 2 {
+		if snap == nil || len(snap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected 2 remaining elements, got %v", snap)
 		}
 	})
@@ -718,6 +783,7 @@ func TestHandleLRem(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLRem, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("1"), []byte("z")}})
 		if resp != ":0\r\n" {
 			t.Fatalf("expected :0\\r\\n, got %q", resp)
@@ -735,6 +801,7 @@ func TestHandleLRem(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLRem, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("1"), []byte("a")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -747,16 +814,19 @@ func TestHandleLTrim(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "d", "e")
+
 		resp := runHandlerWith(eng, ctx, handleLTrim, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("1"), []byte("3")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 remaining elements, got %v", snap)
 		}
-		if string(snap.OrderedElements[0].Data.GetRaw()) != "b" {
-			t.Fatalf("expected first element b, got %q", snap.OrderedElements[0].Data.GetRaw())
+
+		if string(snap.GetOrderedElements()[0].GetData().GetRaw()) != "b" {
+			t.Fatalf("expected first element b, got %q", snap.GetOrderedElements()[0].GetData().GetRaw())
 		}
 	})
 
@@ -764,12 +834,14 @@ func TestHandleLTrim(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLTrim, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("100")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 elements unchanged, got %v", snap)
 		}
 	})
@@ -778,13 +850,15 @@ func TestHandleLTrim(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLTrim, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("5"), []byte("1")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap != nil && len(snap.OrderedElements) != 0 {
-			t.Fatalf("expected empty list, got %d elements", len(snap.OrderedElements))
+		if snap != nil && len(snap.GetOrderedElements()) != 0 {
+			t.Fatalf("expected empty list, got %d elements", len(snap.GetOrderedElements()))
 		}
 	})
 
@@ -799,6 +873,7 @@ func TestHandleLTrim(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLTrim, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("0"), []byte("1")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -809,16 +884,19 @@ func TestHandleLTrim(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c", "d", "e")
+
 		resp := runHandlerWith(eng, ctx, handleLTrim, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("-3"), []byte("-1")}})
 		if resp != "+OK\r\n" {
 			t.Fatalf("expected +OK\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 remaining elements, got %v", snap)
 		}
-		if string(snap.OrderedElements[0].Data.GetRaw()) != "c" {
-			t.Fatalf("expected first element c, got %q", snap.OrderedElements[0].Data.GetRaw())
+
+		if string(snap.GetOrderedElements()[0].GetData().GetRaw()) != "c" {
+			t.Fatalf("expected first element c, got %q", snap.GetOrderedElements()[0].GetData().GetRaw())
 		}
 	})
 }
@@ -842,12 +920,14 @@ func TestHandleLPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLPop, &shared.Command{Args: [][]byte{[]byte("mylist")}})
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 2 {
+		if snap == nil || len(snap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected 2 remaining elements, got %v", snap)
 		}
 	})
@@ -857,12 +937,14 @@ func TestHandleLPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
 		resp := runHandlerWith(eng, ctx, handleLPop, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("2")}})
+
 		expect := "*2\r\n$1\r\na\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 1 {
+		if snap == nil || len(snap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 remaining element, got %v", snap)
 		}
 	})
@@ -872,6 +954,7 @@ func TestHandleLPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b")
 		resp := runHandlerWith(eng, ctx, handleLPop, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("5")}})
+
 		expect := "*2\r\n$1\r\na\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -882,13 +965,15 @@ func TestHandleLPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x")
+
 		resp := runHandlerWith(eng, ctx, handleLPop, &shared.Command{Args: [][]byte{[]byte("mylist")}})
 		if resp != "$1\r\nx\r\n" {
 			t.Fatalf("expected $1\\r\\nx\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap != nil && len(snap.OrderedElements) != 0 {
-			t.Fatalf("expected empty snapshot, got %d elements", len(snap.OrderedElements))
+		if snap != nil && len(snap.GetOrderedElements()) != 0 {
+			t.Fatalf("expected empty snapshot, got %d elements", len(snap.GetOrderedElements()))
 		}
 	})
 
@@ -896,6 +981,7 @@ func TestHandleLPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLPop, &shared.Command{Args: [][]byte{[]byte("myhash")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -922,12 +1008,14 @@ func TestHandleRPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleRPop, &shared.Command{Args: [][]byte{[]byte("mylist")}})
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 2 {
+		if snap == nil || len(snap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected 2 remaining elements, got %v", snap)
 		}
 	})
@@ -942,8 +1030,9 @@ func TestHandleRPop(t *testing.T) {
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 1 {
+		if snap == nil || len(snap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 remaining element, got %v", snap)
 		}
 	})
@@ -953,6 +1042,7 @@ func TestHandleRPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b")
 		resp := runHandlerWith(eng, ctx, handleRPop, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("5")}})
+
 		expect := "*2\r\n$1\r\nb\r\n$1\r\na\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -963,13 +1053,15 @@ func TestHandleRPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "x")
+
 		resp := runHandlerWith(eng, ctx, handleRPop, &shared.Command{Args: [][]byte{[]byte("mylist")}})
 		if resp != "$1\r\nx\r\n" {
 			t.Fatalf("expected $1\\r\\nx\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap != nil && len(snap.OrderedElements) != 0 {
-			t.Fatalf("expected empty snapshot, got %d elements", len(snap.OrderedElements))
+		if snap != nil && len(snap.GetOrderedElements()) != 0 {
+			t.Fatalf("expected empty snapshot, got %d elements", len(snap.GetOrderedElements()))
 		}
 	})
 
@@ -977,6 +1069,7 @@ func TestHandleRPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleRPop, &shared.Command{Args: [][]byte{[]byte("myhash")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -997,6 +1090,7 @@ func TestHandleLMPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "list2", "x", "y", "z")
 		resp := runHandlerWith(eng, ctx, handleLMPop, &shared.Command{Args: [][]byte{[]byte("2"), []byte("empty"), []byte("list2"), []byte("LEFT")}})
+
 		expect := "*2\r\n$5\r\nlist2\r\n*1\r\n$1\r\nx\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -1008,12 +1102,14 @@ func TestHandleLMPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
 		resp := runHandlerWith(eng, ctx, handleLMPop, &shared.Command{Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("LEFT"), []byte("COUNT"), []byte("2")}})
+
 		expect := "*2\r\n$6\r\nmylist\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 1 {
+		if snap == nil || len(snap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 remaining element, got %v", snap)
 		}
 	})
@@ -1023,12 +1119,14 @@ func TestHandleLMPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
 		resp := runHandlerWith(eng, ctx, handleLMPop, &shared.Command{Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("RIGHT"), []byte("COUNT"), []byte("2")}})
+
 		expect := "*2\r\n$6\r\nmylist\r\n*2\r\n$1\r\nc\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 1 {
+		if snap == nil || len(snap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 remaining element, got %v", snap)
 		}
 	})
@@ -1037,6 +1135,7 @@ func TestHandleLMPop(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLMPop, &shared.Command{Args: [][]byte{[]byte("1"), []byte("myhash"), []byte("LEFT")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -1048,6 +1147,7 @@ func TestHandleLMPop(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
 		resp := runHandlerWith(eng, ctx, handleLMPop, &shared.Command{Args: [][]byte{[]byte("1"), []byte("mylist"), []byte("LEFT")}})
+
 		expect := "*2\r\n$6\r\nmylist\r\n*1\r\n$1\r\na\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -1060,20 +1160,24 @@ func TestHandleLMove(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLMove, &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("LEFT"), []byte("LEFT")}})
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
 		}
+
 		srcSnap, _, _, _ := eng.GetSnapshot("src")
-		if srcSnap == nil || len(srcSnap.OrderedElements) != 2 {
+		if srcSnap == nil || len(srcSnap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected 2 elements in src, got %v", srcSnap)
 		}
+
 		dstSnap, _, _, _ := eng.GetSnapshot("dst")
-		if dstSnap == nil || len(dstSnap.OrderedElements) != 1 {
+		if dstSnap == nil || len(dstSnap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 element in dst, got %v", dstSnap)
 		}
-		if string(dstSnap.OrderedElements[0].Data.GetRaw()) != "a" {
-			t.Fatalf("expected dst[0]=a, got %q", dstSnap.OrderedElements[0].Data.GetRaw())
+
+		if string(dstSnap.GetOrderedElements()[0].GetData().GetRaw()) != "a" {
+			t.Fatalf("expected dst[0]=a, got %q", dstSnap.GetOrderedElements()[0].GetData().GetRaw())
 		}
 	})
 
@@ -1081,6 +1185,7 @@ func TestHandleLMove(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLMove, &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("RIGHT"), []byte("LEFT")}})
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
@@ -1091,12 +1196,14 @@ func TestHandleLMove(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "mylist", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleLMove, &shared.Command{Args: [][]byte{[]byte("mylist"), []byte("mylist"), []byte("LEFT"), []byte("RIGHT")}})
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
 		}
+
 		snap, _, _, _ := eng.GetSnapshot("mylist")
-		if snap == nil || len(snap.OrderedElements) != 3 {
+		if snap == nil || len(snap.GetOrderedElements()) != 3 {
 			t.Fatalf("expected 3 elements, got %v", snap)
 		}
 	})
@@ -1112,6 +1219,7 @@ func TestHandleLMove(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLMove, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("dst"), []byte("LEFT"), []byte("LEFT")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -1123,13 +1231,14 @@ func TestHandleLMove(t *testing.T) {
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b")
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleLMove, &shared.Command{Args: [][]byte{[]byte("src"), []byte("myhash"), []byte("LEFT"), []byte("LEFT")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
 		}
 		// Source should NOT have been modified (dest type checked before pop)
 		srcSnap, _, _, _ := eng.GetSnapshot("src")
-		if srcSnap == nil || len(srcSnap.OrderedElements) != 2 {
+		if srcSnap == nil || len(srcSnap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected source unchanged with 2 elements, got %v", srcSnap)
 		}
 	})
@@ -1140,16 +1249,19 @@ func TestHandleRPopLPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b", "c")
+
 		resp := runHandlerWith(eng, ctx, handleRPopLPush, &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst")}})
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
 		}
+
 		srcSnap, _, _, _ := eng.GetSnapshot("src")
-		if srcSnap == nil || len(srcSnap.OrderedElements) != 2 {
+		if srcSnap == nil || len(srcSnap.GetOrderedElements()) != 2 {
 			t.Fatalf("expected 2 elements in src, got %v", srcSnap)
 		}
+
 		dstSnap, _, _, _ := eng.GetSnapshot("dst")
-		if dstSnap == nil || len(dstSnap.OrderedElements) != 1 {
+		if dstSnap == nil || len(dstSnap.GetOrderedElements()) != 1 {
 			t.Fatalf("expected 1 element in dst, got %v", dstSnap)
 		}
 	})
@@ -1165,6 +1277,7 @@ func TestHandleRPopLPush(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedHash(ctx)
+
 		resp := runHandlerWith(eng, ctx, handleRPopLPush, &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("dst")}})
 		if resp != "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n" {
 			t.Fatalf("expected WRONGTYPE, got %q", resp)
@@ -1177,17 +1290,22 @@ func TestHandleLPopNonBlocking(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "list2", "x", "y")
+
 		cmd := &shared.Command{Args: [][]byte{[]byte("empty"), []byte("list2"), []byte("0")}}
 		cmd.Runtime = eng
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleLPopNonBlocking(cmd, w, true)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
+
 		expect := "*2\r\n$5\r\nlist2\r\n$1\r\nx\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -1202,11 +1320,14 @@ func TestHandleLPopNonBlocking(t *testing.T) {
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleLPopNonBlocking(cmd, w, true)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "*-1\r\n" {
 			t.Fatalf("expected null array, got %q", resp)
@@ -1219,17 +1340,22 @@ func TestHandleBLMPopNonBlocking(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "list2", "a", "b", "c")
+
 		cmd := &shared.Command{Args: [][]byte{[]byte("0"), []byte("2"), []byte("empty"), []byte("list2"), []byte("LEFT"), []byte("COUNT"), []byte("2")}}
 		cmd.Runtime = eng
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBLMPopNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
+
 		expect := "*2\r\n$5\r\nlist2\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n"
 		if resp != expect {
 			t.Fatalf("expected %q, got %q", expect, resp)
@@ -1244,11 +1370,14 @@ func TestHandleBLMPopNonBlocking(t *testing.T) {
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBLMPopNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "*-1\r\n" {
 			t.Fatalf("expected null array, got %q", resp)
@@ -1261,16 +1390,20 @@ func TestHandleBRPopLPushNonBlocking(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b", "c")
+
 		cmd := &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("0")}}
 		cmd.Runtime = eng
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBRPopLPushNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "$1\r\nc\r\n" {
 			t.Fatalf("expected $1\\r\\nc\\r\\n, got %q", resp)
@@ -1285,11 +1418,14 @@ func TestHandleBRPopLPushNonBlocking(t *testing.T) {
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBRPopLPushNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "$-1\r\n" {
 			t.Fatalf("expected null bulk string, got %q", resp)
@@ -1302,16 +1438,20 @@ func TestHandleBLMoveNonBlocking(t *testing.T) {
 		eng := effects.NewTestEngine()
 		ctx := eng.NewContext()
 		seedList(ctx, "src", "a", "b", "c")
+
 		cmd := &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("LEFT"), []byte("RIGHT"), []byte("0")}}
 		cmd.Runtime = eng
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBLMoveNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "$1\r\na\r\n" {
 			t.Fatalf("expected $1\\r\\na\\r\\n, got %q", resp)
@@ -1326,11 +1466,14 @@ func TestHandleBLMoveNonBlocking(t *testing.T) {
 		cmd.Context = ctx
 		buf := &bytes.Buffer{}
 		w := shared.NewWriter(buf)
+
 		valid, _, runner := handleBLMoveNonBlocking(cmd, w)
 		if valid && runner != nil {
 			runner()
+
 			_ = ctx.Flush()
 		}
+
 		resp := buf.String()
 		if resp != "$-1\r\n" {
 			t.Fatalf("expected null bulk string, got %q", resp)

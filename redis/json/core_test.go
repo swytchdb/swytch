@@ -38,6 +38,7 @@ type harness struct {
 
 func newHarness() *harness {
 	eng := effects.NewTestEngine()
+
 	return &harness{eng: eng, ctx: eng.NewContext()}
 }
 
@@ -46,13 +47,17 @@ func (h *harness) run(handler shared.HandlerFunc, args ...string) string {
 	for _, a := range args {
 		cmd.Args = append(cmd.Args, []byte(a))
 	}
+
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = h.ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -86,6 +91,7 @@ func TestJSON_NestedSet(t *testing.T) {
 	if got := h.run(handleJSONSet, "k", "$.a.b", `9`); !strings.Contains(got, "+OK") {
 		t.Fatalf("nested SET: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.a"); !strings.Contains(got, `[{"b":9}]`) {
 		t.Fatalf("GET $.a: %q", got)
 	}
@@ -113,6 +119,7 @@ func TestJSON_NXXX(t *testing.T) {
 	if got := h.run(handleJSONSet, "k", "$.a", `5`, "XX"); !strings.Contains(got, "+OK") {
 		t.Fatalf("XX existing: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.a"); !strings.Contains(got, `[5]`) {
 		t.Fatalf("after XX: %q", got)
 	}
@@ -121,6 +128,7 @@ func TestJSON_NXXX(t *testing.T) {
 func TestJSON_Type(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"i":1,"f":1.5,"s":"x","b":true,"n":null,"o":{},"a":[]}`)
+
 	cases := map[string]string{
 		".i": "integer", ".f": "number", ".s": "string",
 		".b": "boolean", ".n": "null", ".o": "object", ".a": "array",
@@ -136,9 +144,11 @@ func TestJSON_Type(t *testing.T) {
 func TestJSON_Del(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"a":1,"b":2}`)
+
 	if got := h.run(handleJSONDel, "k", "$.a"); !strings.Contains(got, ":1\r\n") {
 		t.Fatalf("DEL $.a: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$"); !strings.Contains(got, `[{"b":2}]`) {
 		t.Fatalf("after DEL: %q", got)
 	}
@@ -148,9 +158,11 @@ func TestJSON_Del(t *testing.T) {
 	}
 	// Root del removes the key.
 	h.run(handleJSONSet, "k2", "$", `{"x":1}`)
+
 	if got := h.run(handleJSONDel, "k2"); !strings.Contains(got, ":1\r\n") {
 		t.Fatalf("root DEL: %q", got)
 	}
+
 	if got := h.run(handleJSONType, "k2"); !strings.Contains(got, "$-1") {
 		t.Fatalf("TYPE after root DEL should be nil: %q", got)
 	}
@@ -163,6 +175,7 @@ func TestJSON_Merge(t *testing.T) {
 	if got := h.run(handleJSONMerge, "k", "$", `{"b":null,"c":3}`); !strings.Contains(got, "+OK") {
 		t.Fatalf("MERGE: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$"); !strings.Contains(got, `[{"a":1,"c":3}]`) {
 		t.Fatalf("after MERGE: %q", got)
 	}
@@ -171,12 +184,15 @@ func TestJSON_Merge(t *testing.T) {
 func TestJSON_Clear(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"o":{"x":1},"a":[1,2],"n":5,"s":"keep"}`)
+
 	if got := h.run(handleJSONClear, "k", "$.o"); !strings.Contains(got, ":1\r\n") {
 		t.Fatalf("CLEAR object: %q", got)
 	}
+
 	if got := h.run(handleJSONClear, "k", "$.s"); !strings.Contains(got, ":0\r\n") {
 		t.Fatalf("CLEAR string should be no-op: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.o"); !strings.Contains(got, `[{}]`) {
 		t.Fatalf("object after clear: %q", got)
 	}
@@ -189,6 +205,7 @@ func TestJSON_EmptyContainerExists(t *testing.T) {
 	if got := h.run(handleJSONType, "k", "$"); !strings.Contains(got, "object") {
 		t.Fatalf("empty object TYPE: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$"); !strings.Contains(got, `[{}]`) {
 		t.Fatalf("empty object GET: %q", got)
 	}
@@ -198,6 +215,7 @@ func TestJSON_WrongType(t *testing.T) {
 	h := newHarness()
 	// Seed a non-JSON value by emitting a plain string scalar with a string tag.
 	seedString(h, "str", "hello")
+
 	if got := h.run(handleJSONGet, "str", "$"); !strings.Contains(got, "Existing key has wrong Redis type") {
 		t.Fatalf("JSON.GET on string key should be wrong-type: %q", got)
 	}

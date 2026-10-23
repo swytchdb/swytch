@@ -54,6 +54,7 @@ func TestHandleHExpire(t *testing.T) {
 		[]byte("myhash"), []byte("100"),
 		[]byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHExpire, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1 (success), got %q", resp)
@@ -104,6 +105,7 @@ func TestHandleHPExpire(t *testing.T) {
 		[]byte("myhash"), []byte("100000"),
 		[]byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHPExpire, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1 (success), got %q", resp)
@@ -121,6 +123,7 @@ func TestHandleHExpireAt(t *testing.T) {
 		[]byte("myhash"), []byte("9999999999"),
 		[]byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHExpireAt, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1 (success), got %q", resp)
@@ -154,6 +157,7 @@ func TestHandleHPExpireAt(t *testing.T) {
 		[]byte("myhash"), []byte("9999999999999"),
 		[]byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHPExpireAt, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1 (success), got %q", resp)
@@ -187,6 +191,7 @@ func TestHandleHTTL_NoTTL(t *testing.T) {
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHTTL, cmd)
 	if !strings.Contains(resp, ":-1") {
 		t.Fatalf("expected -1 (no TTL), got %q", resp)
@@ -213,6 +218,7 @@ func TestHandleHPTTL(t *testing.T) {
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHPTTL, cmd)
 	if strings.Contains(resp, ":-1") || strings.Contains(resp, ":-2") {
 		t.Fatalf("expected positive TTL in ms, got %q", resp)
@@ -230,6 +236,7 @@ func TestHandleHExpireTime(t *testing.T) {
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHExpireTime, cmd)
 	if strings.Contains(resp, ":-1") || strings.Contains(resp, ":-2") {
 		t.Fatalf("expected positive expire time, got %q", resp)
@@ -248,7 +255,9 @@ func TestHandleHPExpireTime(t *testing.T) {
 			cmd := &shared.Command{Args: [][]byte{
 				[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 			}}
+
 			resp := runHandlerWith(eng, ctx, handleHPExpireTime, cmd)
+
 			want := fmt.Sprintf("*1\r\n:%d\r\n", expiresAtMs)
 			if resp != want {
 				t.Fatalf("expected exact expiry in ms %q, got %q", want, resp)
@@ -268,6 +277,7 @@ func TestHandleHPersist(t *testing.T) {
 	cmd := &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHPersist, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1 (success), got %q", resp)
@@ -277,6 +287,7 @@ func TestHandleHPersist(t *testing.T) {
 	cmd = &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp = runHandlerWith(eng, ctx, handleHTTL, cmd)
 	if !strings.Contains(resp, ":-1") {
 		t.Fatalf("expected -1 (no TTL), got %q", resp)
@@ -310,6 +321,7 @@ func TestHandleHSetEx(t *testing.T) {
 		[]byte("f1"), []byte("v1"),
 		[]byte("f2"), []byte("v2"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHSetEx, cmd)
 	if !strings.Contains(resp, ":1") {
 		t.Fatalf("expected 1, got %q", resp)
@@ -317,6 +329,7 @@ func TestHandleHSetEx(t *testing.T) {
 
 	// Verify fields were set
 	cmd = &shared.Command{Args: [][]byte{[]byte("myhash"), []byte("f1")}}
+
 	resp = runHandlerWith(eng, ctx, handleHGet, cmd)
 	if !strings.Contains(resp, "v1") {
 		t.Fatalf("expected v1, got %q", resp)
@@ -334,6 +347,7 @@ func TestHandleHSetEx_FNX(t *testing.T) {
 		[]byte("FIELDS"), []byte("1"),
 		[]byte("f1"), []byte("newval"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHSetEx, cmd)
 	if !strings.Contains(resp, ":0") {
 		t.Fatalf("expected 0 (FNX failed), got %q", resp)
@@ -350,6 +364,7 @@ func TestHandleHSetEx_FXX(t *testing.T) {
 		[]byte("FIELDS"), []byte("1"),
 		[]byte("f1"), []byte("v1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHSetEx, cmd)
 	if !strings.Contains(resp, ":0") {
 		t.Fatalf("expected 0 (FXX failed), got %q", resp)
@@ -375,6 +390,7 @@ func TestHandleHGetEx(t *testing.T) {
 		[]byte("FIELDS"), []byte("2"),
 		[]byte("f1"), []byte("f2"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHGetEx, cmd)
 	if !strings.Contains(resp, "v1") || !strings.Contains(resp, "v2") {
 		t.Fatalf("expected v1 and v2, got %q", resp)
@@ -391,6 +407,7 @@ func TestHandleHGetEx_Persist(t *testing.T) {
 		[]byte("myhash"), []byte("PERSIST"),
 		[]byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp := runHandlerWith(eng, ctx, handleHGetEx, cmd)
 	if !strings.Contains(resp, "v1") {
 		t.Fatalf("expected v1, got %q", resp)
@@ -400,6 +417,7 @@ func TestHandleHGetEx_Persist(t *testing.T) {
 	cmd = &shared.Command{Args: [][]byte{
 		[]byte("myhash"), []byte("FIELDS"), []byte("1"), []byte("f1"),
 	}}
+
 	resp = runHandlerWith(eng, ctx, handleHTTL, cmd)
 	if !strings.Contains(resp, ":-1") {
 		t.Fatalf("expected -1 (no TTL), got %q", resp)
@@ -433,9 +451,11 @@ func TestParseHExpireArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
 	if !nx || xx || gt || lt {
 		t.Fatal("expected only NX set")
 	}
+
 	if len(fields) != 1 || fields[0] != "f1" {
 		t.Fatalf("expected [f1], got %v", fields)
 	}
@@ -459,6 +479,7 @@ func TestParseHTTLArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
 	if len(fields) != 2 || fields[0] != "f1" || fields[1] != "f2" {
 		t.Fatalf("expected [f1 f2], got %v", fields)
 	}

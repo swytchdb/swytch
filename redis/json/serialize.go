@@ -40,6 +40,7 @@ func SerializePretty(v *Value, opts PrintOpts) []byte {
 	if opts.Indent == "" && opts.Newline == "" && opts.Space == "" {
 		return appendValue(nil, v)
 	}
+
 	return appendPretty(nil, v, opts, 0)
 }
 
@@ -47,6 +48,7 @@ func appendValue(b []byte, v *Value) []byte {
 	if v == nil {
 		return append(b, "null"...)
 	}
+
 	switch v.Kind {
 	case KindNull:
 		return append(b, "null"...)
@@ -54,6 +56,7 @@ func appendValue(b []byte, v *Value) []byte {
 		if v.Bool {
 			return append(b, "true"...)
 		}
+
 		return append(b, "false"...)
 	case KindInt:
 		return strconv.AppendInt(b, v.Int, 10)
@@ -63,25 +66,32 @@ func appendValue(b []byte, v *Value) []byte {
 		return appendString(b, v.Str)
 	case KindArray:
 		b = append(b, '[')
+
 		for i, e := range v.Arr {
 			if i > 0 {
 				b = append(b, ',')
 			}
+
 			b = appendValue(b, e)
 		}
+
 		return append(b, ']')
 	case KindObject:
 		b = append(b, '{')
+
 		for i, m := range v.Obj {
 			if i > 0 {
 				b = append(b, ',')
 			}
+
 			b = appendString(b, m.Key)
 			b = append(b, ':')
 			b = appendValue(b, m.Val)
 		}
+
 		return append(b, '}')
 	}
+
 	return b
 }
 
@@ -89,32 +99,41 @@ func appendPretty(b []byte, v *Value, opts PrintOpts, depth int) []byte {
 	if v == nil {
 		return append(b, "null"...)
 	}
+
 	switch v.Kind {
 	case KindArray:
 		if len(v.Arr) == 0 {
 			return append(b, "[]"...)
 		}
+
 		b = append(b, '[')
+
 		for i, e := range v.Arr {
 			if i > 0 {
 				b = append(b, ',')
 			}
+
 			b = append(b, opts.Newline...)
 			b = appendIndent(b, opts.Indent, depth+1)
 			b = appendPretty(b, e, opts, depth+1)
 		}
+
 		b = append(b, opts.Newline...)
 		b = appendIndent(b, opts.Indent, depth)
+
 		return append(b, ']')
 	case KindObject:
 		if len(v.Obj) == 0 {
 			return append(b, "{}"...)
 		}
+
 		b = append(b, '{')
+
 		for i, m := range v.Obj {
 			if i > 0 {
 				b = append(b, ',')
 			}
+
 			b = append(b, opts.Newline...)
 			b = appendIndent(b, opts.Indent, depth+1)
 			b = appendString(b, m.Key)
@@ -122,8 +141,10 @@ func appendPretty(b []byte, v *Value, opts PrintOpts, depth int) []byte {
 			b = append(b, opts.Space...)
 			b = appendPretty(b, m.Val, opts, depth+1)
 		}
+
 		b = append(b, opts.Newline...)
 		b = appendIndent(b, opts.Indent, depth)
+
 		return append(b, '}')
 	case KindNull, KindBool, KindInt, KindFloat, KindString:
 		// Scalar formatting is identical to compact output.
@@ -136,6 +157,7 @@ func appendIndent(b []byte, indent string, depth int) []byte {
 	for range depth {
 		b = append(b, indent...)
 	}
+
 	return b
 }
 
@@ -145,6 +167,7 @@ const hexDigits = "0123456789abcdef"
 // JSON escaping (no HTML escaping of <, >, &, unlike encoding/json's default).
 func appendString(b []byte, s string) []byte {
 	b = append(b, '"')
+
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -168,5 +191,6 @@ func appendString(b []byte, s string) []byte {
 			b = append(b, c)
 		}
 	}
+
 	return append(b, '"')
 }

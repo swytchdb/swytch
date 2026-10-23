@@ -37,11 +37,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -51,11 +54,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -64,6 +70,7 @@ func TestHandleSAdd(t *testing.T) {
 	ctx := eng.NewContext()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myset"), []byte("a"), []byte("b"), []byte("c")}}
+
 	resp := runHandlerWith(eng, ctx, handleSAdd, cmd)
 	if resp != ":3\r\n" {
 		t.Fatalf("expected :3\\r\\n, got %q", resp)
@@ -71,6 +78,7 @@ func TestHandleSAdd(t *testing.T) {
 
 	// Add duplicate members
 	cmd = &shared.Command{Args: [][]byte{[]byte("myset"), []byte("a"), []byte("d")}}
+
 	resp = runHandlerWith(eng, ctx, handleSAdd, cmd)
 	if resp != ":1\r\n" {
 		t.Fatalf("expected :1\\r\\n, got %q", resp)
@@ -101,6 +109,7 @@ func TestHandleSAdd_WrongType(t *testing.T) {
 	_ = ctx.Flush()
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("mykey"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleSAdd, cmd)
 	if !strings.Contains(resp, "WRONGTYPE") {
 		t.Fatalf("expected WRONGTYPE error, got %q", resp)
@@ -117,6 +126,7 @@ func TestHandleSRem(t *testing.T) {
 	})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myset"), []byte("a"), []byte("d")}}
+
 	resp := runHandlerWith(eng, ctx, handleSRem, cmd)
 	if resp != ":1\r\n" {
 		t.Fatalf("expected :1\\r\\n, got %q", resp)
@@ -158,6 +168,7 @@ func TestHandleSPop_WithCount(t *testing.T) {
 	})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("myset"), []byte("2")}}
+
 	resp := runHandlerWith(eng, ctx, handleSPop, cmd)
 	if !strings.Contains(resp, "*2") {
 		t.Fatalf("expected array of 2, got %q", resp)
@@ -185,6 +196,7 @@ func TestHandleSMove(t *testing.T) {
 	})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("a")}}
+
 	resp := runHandlerWith(eng, ctx, handleSMove, cmd)
 	if resp != ":1\r\n" {
 		t.Fatalf("expected :1\\r\\n, got %q", resp)
@@ -216,6 +228,7 @@ func TestHandleSMove_MemberNotInSource(t *testing.T) {
 	})
 
 	cmd := &shared.Command{Args: [][]byte{[]byte("src"), []byte("dst"), []byte("x")}}
+
 	resp := runHandlerWith(eng, ctx, handleSMove, cmd)
 	if resp != ":0\r\n" {
 		t.Fatalf("expected :0\\r\\n, got %q", resp)

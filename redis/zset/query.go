@@ -30,6 +30,7 @@ import (
 func handleZScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("zscore")
+
 		return
 	}
 
@@ -42,25 +43,32 @@ func handleZScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		score, found := zsetMemberScore(snap, member)
 		if !found {
 			w.WriteNullBulkString()
+
 			return
 		}
 
 		w.WriteScore(score)
 	}
+
 	return
 }
 
@@ -68,6 +76,7 @@ func handleZScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 func handleZMScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("zmscore")
+
 		return
 	}
 
@@ -80,22 +89,29 @@ func handleZMScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			// Return array of nils
 			w.WriteArray(len(members))
+
 			for range members {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		w.WriteArray(len(members))
+
 		for _, member := range members {
 			score, found := zsetMemberScore(snap, string(member))
 			if !found {
@@ -105,12 +121,14 @@ func handleZMScore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 			}
 		}
 	}
+
 	return
 }
 
 func handleZCard(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("zcard")
+
 		return
 	}
 
@@ -122,29 +140,37 @@ func handleZCard(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		count := 0
 		if snap.NetAdds != nil {
-			count = len(snap.NetAdds)
+			count = len(snap.GetNetAdds())
 		}
+
 		w.WriteInteger(int64(count))
 	}
+
 	return
 }
 
 func handleZRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 || len(cmd.Args) > 3 {
 		w.WriteWrongNumArguments("zrank")
+
 		return
 	}
 
@@ -154,11 +180,14 @@ func handleZRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 	// Check for WITHSCORE option
 	withScore := false
+
 	if len(cmd.Args) == 3 {
 		if !strings.EqualFold(string(cmd.Args[2]), "withscore") {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		withScore = true
 	}
 
@@ -167,26 +196,33 @@ func handleZRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if withScore {
 				w.WriteNullArray()
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
 		rank := -1
+
 		for i, e := range sorted {
 			if e.Member == member {
 				rank = i
+
 				break
 			}
 		}
@@ -197,6 +233,7 @@ func handleZRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
@@ -208,12 +245,14 @@ func handleZRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			w.WriteInteger(int64(rank))
 		}
 	}
+
 	return
 }
 
 func handleZRevRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 || len(cmd.Args) > 3 {
 		w.WriteWrongNumArguments("zrevrank")
+
 		return
 	}
 
@@ -223,11 +262,14 @@ func handleZRevRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 	// Check for WITHSCORE option
 	withScore := false
+
 	if len(cmd.Args) == 3 {
 		if !strings.EqualFold(string(cmd.Args[2]), "withscore") {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		withScore = true
 	}
 
@@ -236,27 +278,34 @@ func handleZRevRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if withScore {
 				w.WriteNullArray()
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		sorted := zsetSortedMembers(snap)
 		// Find member in sorted order, then compute reverse rank
 		rank := -1
+
 		for i, e := range sorted {
 			if e.Member == member {
 				rank = len(sorted) - 1 - i
+
 				break
 			}
 		}
@@ -267,11 +316,13 @@ func handleZRevRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
 		if withScore {
 			score, _ := zsetMemberScore(snap, member)
+
 			w.WriteArray(2)
 			w.WriteInteger(int64(rank))
 			w.WriteScore(score)
@@ -279,12 +330,14 @@ func handleZRevRank(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			w.WriteInteger(int64(rank))
 		}
 	}
+
 	return
 }
 
 func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("zcount")
+
 		return
 	}
 
@@ -292,9 +345,11 @@ func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 	keys = []string{key}
 
 	minScore, minEx, ok1 := ParseScore(cmd.Args[1])
+
 	maxScore, maxEx, ok2 := ParseScore(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteError("ERR min or max is not a float")
+
 		return
 	}
 
@@ -303,18 +358,24 @@ func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteInteger(0)
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		count := 0
+
 		for _, entry := range zsetSortedMembers(snap) {
 			if scoreInRange(entry.Score, minScore, maxScore, minEx, maxEx) {
 				count++
@@ -323,12 +384,14 @@ func handleZCount(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 
 		w.WriteInteger(int64(count))
 	}
+
 	return
 }
 
 func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("zrandmember")
+
 		return
 	}
 
@@ -336,8 +399,11 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 	keys = []string{key}
 
 	hasCount := len(cmd.Args) > 1
-	var count int
-	var withScores bool
+
+	var (
+		count      int
+		withScores bool
+	)
 
 	if hasCount {
 		// Parse count - use ParseInt to handle large values
@@ -346,16 +412,21 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			// Check if it's a range error (overflow)
 			if numErr, ok := err.(*strconv.NumError); ok && numErr.Err == strconv.ErrRange {
 				w.WriteError("ERR value is out of range")
+
 				return
 			}
+
 			w.WriteNotInteger()
+
 			return
 		}
 		// Check if absolute value is too large (would cause allocation issues)
 		if count64 < -1<<31 || count64 > 1<<31 {
 			w.WriteError("ERR value is out of range")
+
 			return
 		}
+
 		count = int(count64)
 
 		// Parse WITHSCORES option
@@ -365,11 +436,14 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 				withScores = true
 			} else {
 				w.WriteSyntaxError()
+
 				return
 			}
 		}
+
 		if len(cmd.Args) > 3 {
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -379,25 +453,30 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		snap, _, exists, wrongType, err := getZSetSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if !hasCount {
 				w.WriteNullBulkString()
 			} else {
 				w.WriteArray(0)
 			}
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		// Get all members as a slice for random access
-		members := make([]shared.ZSetEntry, 0, len(snap.NetAdds))
-		for member, elem := range snap.NetAdds {
-			members = append(members, shared.ZSetEntry{Member: member, Score: elem.Data.GetFloatVal()})
+		members := make([]shared.ZSetEntry, 0, len(snap.GetNetAdds()))
+		for member, elem := range snap.GetNetAdds() {
+			members = append(members, shared.ZSetEntry{Member: member, Score: elem.GetData().GetFloatVal()})
 		}
 
 		if len(members) == 0 {
@@ -406,6 +485,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			} else {
 				w.WriteArray(0)
 			}
+
 			return
 		}
 
@@ -413,11 +493,13 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		if !hasCount {
 			idx := rand.Intn(len(members))
 			w.WriteBulkStringStr(members[idx].Member)
+
 			return
 		}
 
 		if count == 0 {
 			w.WriteArray(0)
+
 			return
 		}
 
@@ -428,6 +510,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			actualCount := min(count, len(members))
 			// Shuffle and take first count elements (Fisher-Yates)
 			perm := rand.Perm(len(members))
+
 			result = make([]shared.ZSetEntry, actualCount)
 			for i := range actualCount {
 				result[i] = members[perm[i]]
@@ -435,6 +518,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		} else {
 			// Negative count: repetition allowed
 			absCount := -count
+
 			result = make([]shared.ZSetEntry, absCount)
 			for i := range absCount {
 				idx := rand.Intn(len(members))
@@ -446,6 +530,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			if w.Protocol() == shared.RESP3 {
 				// RESP3: array of [member, score] pairs
 				w.WriteArray(len(result))
+
 				for _, entry := range result {
 					w.WriteArray(2)
 					w.WriteBulkStringStr(entry.Member)
@@ -454,6 +539,7 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			} else {
 				// RESP2: flat array
 				w.WriteArray(len(result) * 2)
+
 				for _, entry := range result {
 					w.WriteBulkStringStr(entry.Member)
 					w.WriteScore(entry.Score)
@@ -461,11 +547,13 @@ func handleZRandMember(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 			}
 		} else {
 			w.WriteArray(len(result))
+
 			for _, entry := range result {
 				w.WriteBulkStringStr(entry.Member)
 			}
 		}
 	}
+
 	return
 }
 
@@ -480,6 +568,7 @@ func scoreInRange(score, minScore, maxScore float64, minEx, maxEx bool) bool {
 			return false
 		}
 	}
+
 	if maxEx {
 		if score >= maxScore {
 			return false
@@ -489,5 +578,6 @@ func scoreInRange(score, minScore, maxScore float64, minEx, maxEx bool) bool {
 			return false
 		}
 	}
+
 	return true
 }

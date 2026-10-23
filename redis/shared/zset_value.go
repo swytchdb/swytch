@@ -34,12 +34,15 @@ type ZSetEntry struct {
 
 func (z *ZSetValue) ZAdd(members map[string]float64) int {
 	added := 0
+
 	for member, score := range members {
 		if _, exists := z.Members[member]; !exists {
 			added++
 		}
+
 		z.Members[member] = score
 	}
+
 	return added
 }
 
@@ -52,6 +55,7 @@ func (z *ZSetValue) ZAddWithOptions(member string, score float64, nx, xx, gt, lt
 	if nx && exists {
 		return false, false // NX: only add if not exists
 	}
+
 	if xx && !exists {
 		return false, false // XX: only update if exists
 	}
@@ -61,17 +65,22 @@ func (z *ZSetValue) ZAddWithOptions(member string, score float64, nx, xx, gt, lt
 		if gt && score <= existing {
 			return false, false
 		}
+
 		if lt && score >= existing {
 			return false, false
 		}
+
 		if score != existing {
 			z.Members[member] = score
+
 			return false, true
 		}
+
 		return false, false
 	}
 
 	z.Members[member] = score
+
 	return true, true
 }
 
@@ -79,18 +88,22 @@ func (z *ZSetValue) ZAddWithOptions(member string, score float64, nx, xx, gt, lt
 // Returns the number of members removed
 func (z *ZSetValue) ZRem(members ...string) int {
 	removed := 0
+
 	for _, member := range members {
 		if _, exists := z.Members[member]; exists {
 			delete(z.Members, member)
+
 			removed++
 		}
 	}
+
 	return removed
 }
 
 // ZScore returns the score of a member
 func (z *ZSetValue) ZScore(member string) (float64, bool) {
 	score, exists := z.Members[member]
+
 	return score, exists
 }
 
@@ -103,6 +116,7 @@ func (z *ZSetValue) ZCard() int {
 // Returns the new score
 func (z *ZSetValue) ZIncrBy(member string, delta float64) float64 {
 	z.Members[member] += delta
+
 	return z.Members[member]
 }
 
@@ -112,12 +126,15 @@ func (z *ZSetValue) Sorted() []ZSetEntry {
 	for member, score := range z.Members {
 		entries = append(entries, ZSetEntry{Member: member, Score: score})
 	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Score != entries[j].Score {
 			return entries[i].Score < entries[j].Score
 		}
+
 		return entries[i].Member < entries[j].Member
 	})
+
 	return entries
 }
 
@@ -127,12 +144,15 @@ func (z *ZSetValue) SortedReverse() []ZSetEntry {
 	for member, score := range z.Members {
 		entries = append(entries, ZSetEntry{Member: member, Score: score})
 	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Score != entries[j].Score {
 			return entries[i].Score > entries[j].Score
 		}
+
 		return entries[i].Member > entries[j].Member
 	})
+
 	return entries
 }
 
@@ -142,12 +162,14 @@ func (z *ZSetValue) ZRank(member string) int {
 	if _, exists := z.Members[member]; !exists {
 		return -1
 	}
+
 	sorted := z.Sorted()
 	for i, entry := range sorted {
 		if entry.Member == member {
 			return i
 		}
 	}
+
 	return -1
 }
 
@@ -157,18 +179,21 @@ func (z *ZSetValue) ZRevRank(member string) int {
 	if _, exists := z.Members[member]; !exists {
 		return -1
 	}
+
 	sorted := z.SortedReverse()
 	for i, entry := range sorted {
 		if entry.Member == member {
 			return i
 		}
 	}
+
 	return -1
 }
 
 // ZCount counts members with scores between minScore and maxScore, respecting exclusive bounds.
 func (z *ZSetValue) ZCount(minScore, maxScore float64, minExclusive, maxExclusive bool) int {
 	count := 0
+
 	for _, score := range z.Members {
 		if minExclusive {
 			if score <= minScore {
@@ -179,6 +204,7 @@ func (z *ZSetValue) ZCount(minScore, maxScore float64, minExclusive, maxExclusiv
 				continue
 			}
 		}
+
 		if maxExclusive {
 			if score >= maxScore {
 				continue
@@ -188,8 +214,10 @@ func (z *ZSetValue) ZCount(minScore, maxScore float64, minExclusive, maxExclusiv
 				continue
 			}
 		}
+
 		count++
 	}
+
 	return count
 }
 
@@ -211,6 +239,7 @@ func (z *ZSetValue) ZRange(start, stop int, reverse bool) []ZSetEntry {
 	if start < 0 {
 		start = length + start
 	}
+
 	if stop < 0 {
 		stop = length + stop
 	}
@@ -219,6 +248,7 @@ func (z *ZSetValue) ZRange(start, stop int, reverse bool) []ZSetEntry {
 	if start < 0 {
 		start = 0
 	}
+
 	if stop >= length {
 		stop = length - 1
 	}
@@ -240,6 +270,7 @@ func (z *ZSetValue) ZRangeByScore(minScore, maxScore float64, minExclusive, maxE
 	}
 
 	result := make([]ZSetEntry, 0)
+
 	for _, entry := range sorted {
 		inRange := true
 
@@ -275,12 +306,15 @@ func (z *ZSetValue) ZRangeByScore(minScore, maxScore float64, minExclusive, maxE
 	if offset < 0 {
 		return nil
 	}
+
 	if offset > 0 {
 		if offset >= len(result) {
 			return nil
 		}
+
 		result = result[offset:]
 	}
+
 	if count >= 0 && count < len(result) {
 		result = result[:count]
 	}
@@ -293,9 +327,11 @@ func (z *ZSetValue) ZPopMin() (ZSetEntry, bool) {
 	if len(z.Members) == 0 {
 		return ZSetEntry{}, false
 	}
+
 	sorted := z.Sorted()
 	entry := sorted[0]
 	delete(z.Members, entry.Member)
+
 	return entry, true
 }
 
@@ -304,9 +340,11 @@ func (z *ZSetValue) ZPopMax() (ZSetEntry, bool) {
 	if len(z.Members) == 0 {
 		return ZSetEntry{}, false
 	}
+
 	sorted := z.SortedReverse()
 	entry := sorted[0]
 	delete(z.Members, entry.Member)
+
 	return entry, true
 }
 
@@ -315,14 +353,17 @@ func (z *ZSetValue) ZPopMinN(n int) []ZSetEntry {
 	if len(z.Members) == 0 || n <= 0 {
 		return nil
 	}
+
 	sorted := z.Sorted()
 	if n > len(sorted) {
 		n = len(sorted)
 	}
+
 	result := sorted[:n]
 	for _, entry := range result {
 		delete(z.Members, entry.Member)
 	}
+
 	return result
 }
 
@@ -331,13 +372,16 @@ func (z *ZSetValue) ZPopMaxN(n int) []ZSetEntry {
 	if len(z.Members) == 0 || n <= 0 {
 		return nil
 	}
+
 	sorted := z.SortedReverse()
 	if n > len(sorted) {
 		n = len(sorted)
 	}
+
 	result := sorted[:n]
 	for _, entry := range result {
 		delete(z.Members, entry.Member)
 	}
+
 	return result
 }

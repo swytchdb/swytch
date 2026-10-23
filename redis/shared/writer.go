@@ -86,7 +86,9 @@ func (w *Writer) Scratch() *bytes.Buffer {
 	if w.buf == &w.scratch {
 		return &bytes.Buffer{}
 	}
+
 	w.scratch.Reset()
+
 	return &w.scratch
 }
 
@@ -116,6 +118,7 @@ func (w *Writer) WriteError(msg string) {
 		if idx := strings.Index(msg, " "); idx > 0 {
 			prefix = msg[:idx]
 		}
+
 		w.stats.RecordError(prefix)
 	}
 }
@@ -213,6 +216,7 @@ func (w *Writer) WriteScore(f float64) {
 				w.buf.Write(strconv.AppendFloat(w.tmp[:0], f, 'g', -1, 64))
 			}
 		}
+
 		w.buf.Write(crlf)
 	} else {
 		// RESP2: use bulk string with formatted score
@@ -283,6 +287,7 @@ func (w *Writer) WriteSet(count int) {
 func (w *Writer) WriteBlobError(errType, msg string) {
 	if w.protocol == RESP3 {
 		fullMsg := errType + " " + msg
+
 		w.buf.WriteByte(RESP3BlobError)
 		w.buf.Write(strconv.AppendInt(w.tmp[:0], int64(len(fullMsg)), 10))
 		w.buf.Write(crlf)
@@ -301,7 +306,9 @@ func (w *Writer) WriteVerbatimString(encoding string, data []byte) {
 		if len(encoding) != 3 {
 			encoding = "txt"
 		}
+
 		totalLen := 3 + 1 + len(data) // encoding + ":" + data
+
 		w.buf.WriteByte(RESP3VerbatimString)
 		w.buf.Write(strconv.AppendInt(w.tmp[:0], int64(totalLen), 10))
 		w.buf.Write(crlf)
@@ -420,18 +427,23 @@ func (w *Writer) WriteUnknownCommand(cmd string, args [][]byte) {
 	w.buf.WriteString("ERR unknown command '")
 	w.buf.WriteString(cmd)
 	w.buf.WriteString("', with args beginning with: ")
+
 	for i, arg := range args {
 		if i > 0 {
 			w.buf.WriteByte(' ')
 		}
+
 		w.buf.WriteByte('\'')
 		w.buf.Write(arg)
 		w.buf.WriteByte('\'')
+
 		if i >= 2 {
 			w.buf.WriteString("...")
+
 			break
 		}
 	}
+
 	w.buf.Write(crlf)
 }
 

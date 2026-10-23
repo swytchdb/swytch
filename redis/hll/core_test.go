@@ -38,11 +38,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -54,11 +57,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -100,6 +106,7 @@ func TestHLLMerge(t *testing.T) {
 	for i := range 500 {
 		hll1.Add(fmt.Appendf(nil, "element-a-%d", i))
 	}
+
 	for i := range 500 {
 		hll2.Add(fmt.Appendf(nil, "element-b-%d", i))
 	}
@@ -158,6 +165,7 @@ func TestPFAddCommand(t *testing.T) {
 		Type: shared.CmdPFAdd,
 		Args: [][]byte{[]byte("hll_key"), []byte("a"), []byte("b"), []byte("c")},
 	}
+
 	resp := runHandlerWith(eng, ctx, handlePFAdd, cmd)
 	if resp != ":1\r\n" {
 		t.Errorf("Expected :1\\r\\n, got %q", resp)
@@ -168,6 +176,7 @@ func TestPFAddCommand(t *testing.T) {
 		Type: shared.CmdPFAdd,
 		Args: [][]byte{[]byte("hll_key"), []byte("a"), []byte("b"), []byte("c")},
 	}
+
 	resp = runHandlerWith(eng, ctx, handlePFAdd, cmd)
 	if resp != ":0\r\n" {
 		t.Errorf("Expected :0\\r\\n for duplicate add, got %q", resp)
@@ -190,6 +199,7 @@ func TestPFCountCommand(t *testing.T) {
 		Type: shared.CmdPFCount,
 		Args: [][]byte{[]byte("hll_key")},
 	}
+
 	resp := runHandlerWith(eng, ctx, handlePFCount, cmd)
 	if resp != ":3\r\n" {
 		t.Errorf("Expected :3\\r\\n, got %q", resp)
@@ -333,6 +343,7 @@ func TestPFDebugNonExistent(t *testing.T) {
 func TestHLLHashElement(t *testing.T) {
 	// Verify hllHashElement produces the same results as HLLValue.Add
 	hll := &shared.HLLValue{}
+
 	elements := [][]byte{[]byte("hello"), []byte("world"), []byte("foo")}
 	for _, elem := range elements {
 		hll.Add(elem)
@@ -340,6 +351,7 @@ func TestHLLHashElement(t *testing.T) {
 
 	// Reconstruct from hllHashElement
 	hll2 := &shared.HLLValue{}
+
 	for _, elem := range elements {
 		regIdx, rho := hllHashElement(elem)
 		if rho > hll2.Registers[regIdx] {

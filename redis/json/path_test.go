@@ -45,9 +45,11 @@ func TestParsePath_Dialect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParsePath(%q): %v", c.in, err)
 		}
+
 		if p.JSONPath != c.jsonpath {
 			t.Errorf("ParsePath(%q).JSONPath = %v, want %v", c.in, p.JSONPath, c.jsonpath)
 		}
+
 		if len(p.segs) != c.nSegs {
 			t.Errorf("ParsePath(%q) segs = %d, want %d", c.in, len(p.segs), c.nSegs)
 		}
@@ -61,6 +63,7 @@ func TestParsePath_Dialect(t *testing.T) {
 func TestPath_ResolveMulti(t *testing.T) {
 	root, _ := Parse([]byte(`{"a":1,"b":2,"c":{"a":10,"d":3},"arr":[1,2,3,4,5],"nested":{"x":{"a":100}}}`))
 	store, _ := Parse([]byte(`{"bikes":[{"price":1000,"id":1},{"price":3000,"id":2},{"price":2500,"id":3}]}`))
+
 	cases := []struct {
 		doc  *Value
 		path string
@@ -83,6 +86,7 @@ func TestPath_ResolveMulti(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParsePath(%q): %v", c.path, err)
 		}
+
 		got := Serialize(&Value{Kind: KindArray, Arr: p.resolve(c.doc)})
 		if string(got) != c.want {
 			t.Errorf("resolve(%q) = %s, want %s", c.path, got, c.want)
@@ -95,6 +99,7 @@ func TestPath_ResolveMulti(t *testing.T) {
 func TestPath_ResolveConcrete(t *testing.T) {
 	root, _ := Parse([]byte(`{"a":1,"b":{"a":2},"arr":[10,20,30]}`))
 	p, _ := ParsePath(`$..a`)
+
 	ms := p.resolveMatches(root)
 	if len(ms) != 2 {
 		t.Fatalf("$..a = %d matches, want 2", len(ms))
@@ -103,11 +108,13 @@ func TestPath_ResolveConcrete(t *testing.T) {
 	if len(ms[0].segs) != 1 || ms[0].segs[0].kind != segKey || ms[0].segs[0].key != "a" {
 		t.Errorf("match0 segs = %+v", ms[0].segs)
 	}
+
 	if len(ms[1].segs) != 2 || ms[1].segs[1].key != "a" {
 		t.Errorf("match1 segs = %+v", ms[1].segs)
 	}
 	// Slice yields concrete positive indices.
 	ps, _ := ParsePath(`$.arr[1:3]`)
+
 	sm := ps.resolveMatches(root)
 	if len(sm) != 2 || sm[0].segs[1].kind != segIndex || sm[0].segs[1].idx != 1 || sm[1].segs[1].idx != 2 {
 		t.Errorf("arr[1:3] concrete = %+v", sm)
@@ -116,6 +123,7 @@ func TestPath_ResolveConcrete(t *testing.T) {
 
 func TestPath_Resolve(t *testing.T) {
 	root, _ := Parse([]byte(`{"a":1,"b":{"c":2},"arr":[10,20,{"d":3}]}`))
+
 	cases := []struct {
 		path string
 		want string // serialized match, or "" for no match
@@ -136,16 +144,20 @@ func TestPath_Resolve(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParsePath(%q): %v", c.path, err)
 		}
+
 		matches := p.resolve(root)
 		if c.want == "" {
 			if len(matches) != 0 {
 				t.Errorf("resolve(%q) = %d matches, want none", c.path, len(matches))
 			}
+
 			continue
 		}
+
 		if len(matches) != 1 {
 			t.Fatalf("resolve(%q) = %d matches, want 1", c.path, len(matches))
 		}
+
 		if got := string(Serialize(matches[0])); got != c.want {
 			t.Errorf("resolve(%q) = %s, want %s", c.path, got, c.want)
 		}

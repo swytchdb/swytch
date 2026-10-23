@@ -39,6 +39,7 @@ func TestManager_SubscribeUnsubscribe(t *testing.T) {
 	if len(counts) != 3 {
 		t.Errorf("expected 3 counts, got %d", len(counts))
 	}
+
 	if counts[0] != 1 || counts[1] != 2 || counts[2] != 3 {
 		t.Errorf("unexpected counts: %v", counts)
 	}
@@ -53,6 +54,7 @@ func TestManager_SubscribeUnsubscribe(t *testing.T) {
 	if len(names) != 1 || names[0] != "channel2" {
 		t.Errorf("unexpected unsubscribed channels: %v", names)
 	}
+
 	if unsubCounts[0] != 2 {
 		t.Errorf("expected count 2 after unsubscribe, got %d", unsubCounts[0])
 	}
@@ -88,6 +90,7 @@ func TestManager_PSubscribePUnsubscribe(t *testing.T) {
 	if len(counts) != 2 {
 		t.Errorf("expected 2 counts, got %d", len(counts))
 	}
+
 	if counts[0] != 1 || counts[1] != 2 {
 		t.Errorf("unexpected counts: %v", counts)
 	}
@@ -97,6 +100,7 @@ func TestManager_PSubscribePUnsubscribe(t *testing.T) {
 	if len(names) != 1 || names[0] != "channel.*" {
 		t.Errorf("unexpected unsubscribed patterns: %v", names)
 	}
+
 	if unsubCounts[0] != 1 {
 		t.Errorf("expected count 1 after punsubscribe, got %d", unsubCounts[0])
 	}
@@ -171,9 +175,11 @@ func TestManager_PatternPublish(t *testing.T) {
 		if msg.Type != "pmessage" {
 			t.Errorf("expected pmessage, got %s", msg.Type)
 		}
+
 		if msg.Pattern != "news.*" {
 			t.Errorf("expected pattern 'news.*', got %s", msg.Pattern)
 		}
+
 		if msg.Channel != "news.sports" {
 			t.Errorf("expected channel 'news.sports', got %s", msg.Channel)
 		}
@@ -201,6 +207,7 @@ func TestManager_Cleanup(t *testing.T) {
 	if len(m.Channels("")) != 2 {
 		t.Errorf("expected 2 active channels")
 	}
+
 	if m.NumPat() != 1 {
 		t.Errorf("expected 1 pattern subscription")
 	}
@@ -212,6 +219,7 @@ func TestManager_Cleanup(t *testing.T) {
 	if len(m.Channels("")) != 0 {
 		t.Errorf("expected 0 active channels after cleanup")
 	}
+
 	if m.NumPat() != 0 {
 		t.Errorf("expected 0 pattern subscriptions after cleanup")
 	}
@@ -251,9 +259,11 @@ func TestManager_NumSub(t *testing.T) {
 	if counts["channel1"] != 2 {
 		t.Errorf("expected 2 subscribers for channel1, got %d", counts["channel1"])
 	}
+
 	if counts["channel2"] != 1 {
 		t.Errorf("expected 1 subscriber for channel2, got %d", counts["channel2"])
 	}
+
 	if counts["channel3"] != 0 {
 		t.Errorf("expected 0 subscribers for channel3, got %d", counts["channel3"])
 	}
@@ -308,6 +318,7 @@ func TestFormatPubSubMessage_RESP2(t *testing.T) {
 	}
 
 	data := FormatPubSubMessage(msg, shared.RESP2)
+
 	expected := "*3\r\n$7\r\nmessage\r\n$4\r\ntest\r\n$5\r\nhello\r\n"
 	if !bytes.Equal(data, []byte(expected)) {
 		t.Errorf("unexpected RESP2 format:\ngot: %q\nwant: %q", string(data), expected)
@@ -322,6 +333,7 @@ func TestFormatPubSubMessage_RESP3(t *testing.T) {
 	}
 
 	data := FormatPubSubMessage(msg, shared.RESP3)
+
 	expected := ">3\r\n$7\r\nmessage\r\n$4\r\ntest\r\n$5\r\nhello\r\n"
 	if !bytes.Equal(data, []byte(expected)) {
 		t.Errorf("unexpected RESP3 format:\ngot: %q\nwant: %q", string(data), expected)
@@ -337,6 +349,7 @@ func TestFormatPubSubMessage_PMessage(t *testing.T) {
 	}
 
 	data := FormatPubSubMessage(msg, shared.RESP2)
+
 	expected := "*4\r\n$8\r\npmessage\r\n$6\r\nnews.*\r\n$11\r\nnews.sports\r\n$4\r\ngoal\r\n"
 	if !bytes.Equal(data, []byte(expected)) {
 		t.Errorf("unexpected pmessage format:\ngot: %q\nwant: %q", string(data), expected)
@@ -351,6 +364,7 @@ func TestFormatPubSubMessage_Subscribe(t *testing.T) {
 	}
 
 	data := FormatPubSubMessage(msg, shared.RESP2)
+
 	expected := "*3\r\n$9\r\nsubscribe\r\n$4\r\ntest\r\n:1\r\n"
 	if !bytes.Equal(data, []byte(expected)) {
 		t.Errorf("unexpected subscribe format:\ngot: %q\nwant: %q", string(data), expected)

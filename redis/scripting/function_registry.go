@@ -113,6 +113,7 @@ func (r *FunctionRegistry) Delete(libName string) bool {
 
 	// Remove the library
 	delete(r.libraries, libName)
+
 	return true
 }
 
@@ -142,6 +143,7 @@ func (r *FunctionRegistry) GetFunction(funcName string) (*FunctionDef, *Library)
 	}
 
 	funcDef := lib.Functions[funcName]
+
 	return funcDef, lib
 }
 
@@ -160,11 +162,13 @@ func (r *FunctionRegistry) List(pattern string) []*Library {
 	defer r.mu.RUnlock(token)
 
 	var result []*Library
+
 	for _, lib := range r.libraries {
 		if pattern == "" || matchGlobPattern(pattern, lib.Name) {
 			result = append(result, lib)
 		}
 	}
+
 	return result
 }
 
@@ -190,13 +194,16 @@ func matchGlobPattern(pattern, name string) bool {
 	if pattern == "*" {
 		return true
 	}
+
 	if pattern == name {
 		return true
 	}
 	// Simple prefix matching for patterns like "foo*"
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '*' {
 		prefix := pattern[:len(pattern)-1]
+
 		return len(name) >= len(prefix) && name[:len(prefix)] == prefix
 	}
+
 	return false
 }

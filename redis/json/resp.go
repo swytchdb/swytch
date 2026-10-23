@@ -33,8 +33,10 @@ import "github.com/swytchdb/swytch/redis/shared"
 func handleJSONResp(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("json.resp")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -43,38 +45,53 @@ func handleJSONResp(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 		if len(cmd.Args) == 2 {
 			pathStr = string(cmd.Args[1])
 		}
+
 		path, err := ParsePath(pathStr)
 		if err != nil {
 			w.WriteError("ERR " + err.Error())
+
 			return
 		}
+
 		root, _, exists, wrongType, err := getJSONSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullBulkString()
+
 			return
 		}
+
 		if wrongType {
 			writeWrongType(w)
+
 			return
 		}
+
 		matches := path.resolve(assemble(root, ""))
 		if path.JSONPath {
 			w.WriteArray(len(matches))
+
 			for _, m := range matches {
 				writeRESPValue(w, m)
 			}
+
 			return
 		}
+
 		if len(matches) == 0 {
 			w.WriteError("ERR Path '" + pathStr + "' does not exist")
+
 			return
 		}
+
 		writeRESPValue(w, matches[0])
 	}
+
 	return
 }
 
@@ -98,12 +115,14 @@ func writeRESPValue(w *shared.Writer, v *Value) {
 	case KindArray:
 		w.WriteArray(len(v.Arr) + 1)
 		w.WriteSimpleString("[")
+
 		for _, e := range v.Arr {
 			writeRESPValue(w, e)
 		}
 	case KindObject:
 		w.WriteArray(len(v.Obj)*2 + 1)
 		w.WriteSimpleString("{")
+
 		for _, m := range v.Obj {
 			w.WriteBulkStringStr(m.Key)
 			writeRESPValue(w, m.Val)

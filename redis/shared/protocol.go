@@ -141,6 +141,7 @@ func (p *Parser) readArrayCommand(cmd *Command) (*Command, error) {
 
 	if count == 0 {
 		cmd.Type = CmdUnknown
+
 		return cmd, nil
 	}
 
@@ -148,6 +149,7 @@ func (p *Parser) readArrayCommand(cmd *Command) (*Command, error) {
 	if cap(cmd.Args) < int(count) {
 		cmd.Args = make([][]byte, 0, count)
 	}
+
 	cmd.Args = cmd.Args[:0]
 
 	// Read each element (all should be bulk strings)
@@ -156,6 +158,7 @@ func (p *Parser) readArrayCommand(cmd *Command) (*Command, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		cmd.Args = append(cmd.Args, arg)
 	}
 
@@ -191,6 +194,7 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 
 	if len(line) == 0 {
 		cmd.Type = CmdNoop
+
 		return cmd, nil
 	}
 
@@ -198,6 +202,7 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 	if cap(cmd.Args) < 8 {
 		cmd.Args = make([][]byte, 0, 8)
 	}
+
 	cmd.Args = cmd.Args[:0]
 
 	rest := line
@@ -216,6 +221,7 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 
 	if len(cmd.Args) == 0 {
 		cmd.Type = CmdNoop
+
 		return cmd, nil
 	}
 
@@ -228,6 +234,7 @@ func (p *Parser) readInlineCommand(cmd *Command) (*Command, error) {
 	} else {
 		PutDataBuf(name)
 	}
+
 	last := len(cmd.Args) - 1
 	copy(cmd.Args, cmd.Args[1:])
 	cmd.Args[last] = nil
@@ -269,9 +276,11 @@ func (p *Parser) readBulkString() ([]byte, error) {
 
 	// Read the data
 	data := GetDataBuf(int(length))
+
 	_, err = io.ReadFull(p.reader, data)
 	if err != nil {
 		PutDataBuf(data)
+
 		return nil, err
 	}
 
@@ -279,6 +288,7 @@ func (p *Parser) readBulkString() ([]byte, error) {
 	_, err = p.reader.Discard(2)
 	if err != nil {
 		PutDataBuf(data)
+
 		return nil, err
 	}
 
@@ -293,6 +303,7 @@ func (p *Parser) readLine() ([]byte, error) {
 			// Line too long
 			return nil, ErrLineTooLong
 		}
+
 		return nil, err
 	}
 
@@ -301,6 +312,7 @@ func (p *Parser) readLine() ([]byte, error) {
 	if lineLen > 0 && line[lineLen-1] == '\n' {
 		lineLen--
 	}
+
 	if lineLen > 0 && line[lineLen-1] == '\r' {
 		lineLen--
 	}
@@ -313,8 +325,10 @@ func ParseInt64(b []byte) (int64, bool) {
 	if len(b) == 0 {
 		return 0, false
 	}
+
 	neg := false
 	i := 0
+
 	switch b[0] {
 	case '-':
 		neg = true
@@ -322,30 +336,39 @@ func ParseInt64(b []byte) (int64, bool) {
 	case '+':
 		i = 1
 	}
+
 	if i >= len(b) {
 		return 0, false
 	}
+
 	var n uint64
+
 	for ; i < len(b); i++ {
 		c := b[i]
 		if c < '0' || c > '9' {
 			return 0, false
 		}
+
 		d := uint64(c - '0')
+
 		if n > (math.MaxInt64+1)/10 { // would overflow on multiply
 			return 0, false
 		}
+
 		n = n*10 + d
 		if !neg && n > math.MaxInt64 {
 			return 0, false
 		}
+
 		if neg && n > math.MaxInt64+1 {
 			return 0, false
 		}
 	}
+
 	if neg {
 		return -int64(n), true
 	}
+
 	return int64(n), true
 }
 
@@ -354,13 +377,17 @@ func ParseUint64(b []byte) (uint64, bool) {
 	if len(b) == 0 {
 		return 0, false
 	}
+
 	var n uint64
+
 	for _, c := range b {
 		if c < '0' || c > '9' {
 			return 0, false
 		}
+
 		n = n*10 + uint64(c-'0')
 	}
+
 	return n, true
 }
 
@@ -371,6 +398,7 @@ func ParseFloat64(b []byte) (float64, bool) {
 	}
 
 	var neg bool
+
 	switch b[0] {
 	case '-':
 		neg = true
@@ -379,21 +407,27 @@ func ParseFloat64(b []byte) (float64, bool) {
 		b = b[1:]
 	}
 
-	var intPart, fracPart int64
-	var fracDiv float64 = 1
-	var hasFrac bool
+	var (
+		intPart, fracPart int64
+		fracDiv           float64 = 1
+		hasFrac           bool
+	)
 
 	for _, c := range b {
 		if c == '.' {
 			if hasFrac {
 				return 0, false // Multiple decimal points
 			}
+
 			hasFrac = true
+
 			continue
 		}
+
 		if c < '0' || c > '9' {
 			return 0, false
 		}
+
 		if hasFrac {
 			fracPart = fracPart*10 + int64(c-'0')
 			fracDiv *= 10
@@ -406,6 +440,7 @@ func ParseFloat64(b []byte) (float64, bool) {
 	if neg {
 		result = -result
 	}
+
 	return result, true
 }
 
@@ -415,6 +450,7 @@ func NextToken(b []byte) (token, rest []byte) {
 	for len(b) > 0 && b[0] == ' ' {
 		b = b[1:]
 	}
+
 	if len(b) == 0 {
 		return nil, nil
 	}
@@ -426,9 +462,11 @@ func NextToken(b []byte) (token, rest []byte) {
 	}
 
 	token = b[:end]
+
 	rest = b[end:]
 	if len(rest) > 0 {
 		rest = rest[1:] // Skip the space
 	}
+
 	return token, rest
 }

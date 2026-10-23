@@ -67,8 +67,10 @@ type pubsubClusterRouterHolder struct {
 func SetPubSubClusterRouter(r PubSubClusterRouter) {
 	if r == nil {
 		pubsubClusterRouter.Store(nil)
+
 		return
 	}
+
 	pubsubClusterRouter.Store(&pubsubClusterRouterHolder{router: r})
 }
 
@@ -79,5 +81,6 @@ func GetPubSubClusterRouter() PubSubClusterRouter {
 	if h == nil {
 		return nil
 	}
+
 	return h.router
 }

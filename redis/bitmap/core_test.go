@@ -40,11 +40,14 @@ func runHandler(handler shared.HandlerFunc, cmd *shared.Command) string {
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -56,11 +59,14 @@ func runHandlerWith(eng *effects.Engine, ctx *effects.Context, handler shared.Ha
 
 	buf := &bytes.Buffer{}
 	w := shared.NewWriter(buf)
+
 	valid, _, runner := handler(cmd, w, nil)
 	if valid && runner != nil {
 		runner()
+
 		_ = ctx.Flush()
 	}
+
 	return buf.String()
 }
 
@@ -83,6 +89,7 @@ func seedBitmapData(ctx *effects.Context, key string, data []byte) {
 			}
 		}
 	}
+
 	_ = ctx.Flush()
 }
 
@@ -200,6 +207,7 @@ func TestSetBitGetBit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			eng := effects.NewTestEngine()
+
 			ctx := eng.NewContext()
 			for i, c := range tt.cmds {
 				got := runHandlerWith(eng, ctx, c.handler, c.cmd)
@@ -411,9 +419,11 @@ func TestBitOp(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetSnapshot error: %v", err)
 			}
+
 			if snap == nil {
 				t.Fatalf("destination key %q not found", tt.checkDest)
 			}
+
 			gotData := reconstructBitmapBytes(snap)
 			if !bytes.Equal(gotData, tt.checkData) {
 				t.Errorf("dest data = %v, want %v", gotData, tt.checkData)
@@ -582,6 +592,7 @@ func TestBitFieldOverflow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			eng := effects.NewTestEngine()
+
 			ctx := eng.NewContext()
 			for i, c := range tt.cmds {
 				got := runHandlerWith(eng, ctx, handleBitField, c.cmd)
@@ -639,6 +650,7 @@ func TestBitIndexing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if snap == nil {
 		t.Fatal("key not found")
 	}
@@ -656,6 +668,7 @@ func TestBitIndexing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	data = reconstructBitmapBytes(snap)
 	// Should now be 0x81 (MSB and LSB set)
 	if len(data) == 0 || data[0] != 0x81 {
@@ -686,6 +699,7 @@ func TestApplyOverflowNoPanic(t *testing.T) {
 			if !signed && bits == 64 {
 				continue
 			}
+
 			for _, behavior := range behaviors {
 				for _, value := range testValues {
 					func() {
@@ -695,6 +709,7 @@ func TestApplyOverflowNoPanic(t *testing.T) {
 									bits, signed, behavior, value, r)
 							}
 						}()
+
 						_ = applyOverflow(value, bits, signed, behavior)
 					}()
 				}
@@ -726,6 +741,7 @@ func TestApplyOverflowI64(t *testing.T) {
 					t.Errorf("panic: %v", r)
 				}
 			}()
+
 			result := applyOverflow(tt.value, 64, true, tt.behavior)
 			// For i64, the result should always equal the input (no overflow possible in int64)
 			if result != tt.value {

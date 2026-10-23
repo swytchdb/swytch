@@ -93,9 +93,11 @@ func (t *Topic[T]) notifyOldest() bool {
 			default:
 				// Already has a pending signal, that's fine
 			}
+
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -108,6 +110,7 @@ func (t *Topic[T]) remove(w *Waiter[T]) {
 		if waiter == w {
 			// Remove by setting to nil; compaction happens lazily
 			t.waiters[i] = nil
+
 			return
 		}
 	}
@@ -128,16 +131,19 @@ func (m *SubscriptionManager[T]) getTopic(hash uint64) *Topic[T] {
 	token := m.mu.RLock()
 	t := m.topics[hash]
 	m.mu.RUnlock(token)
+
 	if t != nil {
 		return t
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	if t = m.topics[hash]; t == nil {
 		t = &Topic[T]{waiters: make([]*Waiter[T], 0, 4)}
 		m.topics[hash] = t
 	}
+
 	return t
 }
 
@@ -150,6 +156,7 @@ func (m *SubscriptionManager[T]) Notify(channel []byte) bool {
 	token := m.mu.RLock()
 	t := m.topics[hash]
 	m.mu.RUnlock(token)
+
 	if t == nil {
 		return false
 	}
@@ -170,6 +177,7 @@ func (m *SubscriptionManager[T]) NotifyAllWaiters(channel []byte) {
 	token := m.mu.RLock()
 	t := m.topics[hash]
 	m.mu.RUnlock(token)
+
 	if t == nil {
 		return
 	}
@@ -194,11 +202,13 @@ func (m *SubscriptionManager[T]) BlockingKeyCount() int64 {
 	defer m.mu.RUnlock(token)
 
 	var count int64
+
 	for _, t := range m.topics {
 		if t.hasActiveWaiters() {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -213,6 +223,7 @@ func (m *SubscriptionManager[T]) BlockingKeyCounts() (total int64, nokey int64) 
 	// internal notifications (e.g., XGROUP DESTROY) and should not be visible
 	// to users through INFO.
 	seenKeys := make(map[uint64]bool) // hash -> hasNoKeyWaiter
+
 	for _, t := range m.topics {
 		t.mu.Lock()
 		for _, w := range t.waiters {
@@ -221,6 +232,7 @@ func (m *SubscriptionManager[T]) BlockingKeyCounts() (total int64, nokey int64) 
 					if bytes.ContainsRune(ch, '\x01') {
 						continue
 					}
+
 					hash := xxh3.Hash(ch)
 					if hasNoKey, seen := seenKeys[hash]; seen {
 						// Already seen this key, update if this waiter has nokey flag
@@ -242,6 +254,7 @@ func (m *SubscriptionManager[T]) BlockingKeyCounts() (total int64, nokey int64) 
 			nokey++
 		}
 	}
+
 	return total, nokey
 }
 
@@ -270,6 +283,7 @@ func (t *Topic[T]) hasActiveWaiters() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -345,6 +359,7 @@ func (r *Registration[T]) IsOldestWaiter(channel []byte) bool {
 			return w == r.waiter
 		}
 	}
+
 	return true
 }
 
@@ -377,6 +392,7 @@ func (r *Registration[T]) Cancel() {
 // (e.g. WRONGTYPE on destination) so the next blocked client gets a chance.
 func (r *Registration[T]) CancelAndRenotify() {
 	r.Cancel()
+
 	for _, ch := range r.waiter.channels {
 		r.sm.Notify(ch)
 	}
@@ -396,6 +412,7 @@ func (r *Registration[T]) Wait() ([]byte, error) {
 		return nil, nil
 	case <-r.ctx.Done():
 		r.Cancel()
+
 		return nil, r.ctx.Err()
 	}
 }

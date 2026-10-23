@@ -48,8 +48,10 @@ func (r *recorder) handler() http.Handler {
 func (r *recorder) get() []url.Values {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	cp := make([]url.Values, len(r.requests))
 	copy(cp, r.requests)
+
 	return cp
 }
 
@@ -57,6 +59,7 @@ func newTestClient(ts *httptest.Server, cfg Config) *Client {
 	c := New(cfg)
 	c.endpoint = ts.URL
 	c.heartbeatInterval = 50 * time.Millisecond
+
 	return c
 }
 
@@ -66,6 +69,7 @@ func dummyStats() HeartbeatStats {
 
 func TestStartupEvent(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -78,6 +82,7 @@ func TestStartupEvent(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() { c.Run(ctx); close(done) }()
 
 	time.Sleep(20 * time.Millisecond)
@@ -93,18 +98,23 @@ func TestStartupEvent(t *testing.T) {
 	if startup.Get("ev") != "startup" {
 		t.Errorf("expected ev=startup, got %q", startup.Get("ev"))
 	}
+
 	if startup.Get("node_id") != "abc123" {
 		t.Errorf("expected node_id=abc123, got %q", startup.Get("node_id"))
 	}
+
 	if startup.Get("ver") != "1.0.0" {
 		t.Errorf("expected ver=1.0.0, got %q", startup.Get("ver"))
 	}
+
 	if startup.Get("os") != runtime.GOOS {
 		t.Errorf("expected os=%s, got %q", runtime.GOOS, startup.Get("os"))
 	}
+
 	if startup.Get("arch") != runtime.GOARCH {
 		t.Errorf("expected arch=%s, got %q", runtime.GOARCH, startup.Get("arch"))
 	}
+
 	if startup.Get("features") != "redis" {
 		t.Errorf("expected features=redis, got %q", startup.Get("features"))
 	}
@@ -112,6 +122,7 @@ func TestStartupEvent(t *testing.T) {
 
 func TestHeartbeatEvent(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -146,36 +157,47 @@ func TestHeartbeatEvent(t *testing.T) {
 	if hb.Get("ev") != "heartbeat" {
 		t.Errorf("expected ev=heartbeat, got %q", hb.Get("ev"))
 	}
+
 	if hb.Get("node_id") != "def456" {
 		t.Errorf("expected node_id=def456, got %q", hb.Get("node_id"))
 	}
+
 	if hb.Get("nodes") != "5" {
 		t.Errorf("expected nodes=5, got %q", hb.Get("nodes"))
 	}
+
 	if hb.Get("uptime") != "300" {
 		t.Errorf("expected uptime=300, got %q", hb.Get("uptime"))
 	}
+
 	if hb.Get("memory_available") != "1024" {
 		t.Errorf("expected memory_available=1024, got %q", hb.Get("memory_available"))
 	}
+
 	if hb.Get("memory_usage") != "512" {
 		t.Errorf("expected memory_usage=512, got %q", hb.Get("memory_usage"))
 	}
+
 	if hb.Get("hit_count") != "100" {
 		t.Errorf("expected hit_count=100, got %q", hb.Get("hit_count"))
 	}
+
 	if hb.Get("miss_count") != "10" {
 		t.Errorf("expected miss_count=10, got %q", hb.Get("miss_count"))
 	}
+
 	if hb.Get("evictions") != "3" {
 		t.Errorf("expected evictions=3, got %q", hb.Get("evictions"))
 	}
+
 	if hb.Get("entry_count") != "50" {
 		t.Errorf("expected entry_count=50, got %q", hb.Get("entry_count"))
 	}
+
 	if hb.Get("capacity") != "200" {
 		t.Errorf("expected capacity=200, got %q", hb.Get("capacity"))
 	}
+
 	if hb.Get("average_k") != "1.50" {
 		t.Errorf("expected average_k=1.50, got %q", hb.Get("average_k"))
 	}
@@ -183,6 +205,7 @@ func TestHeartbeatEvent(t *testing.T) {
 
 func TestHeartbeatOmitsZeroOptionals(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -200,6 +223,7 @@ func TestHeartbeatOmitsZeroOptionals(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(reqs))
 	}
+
 	hb := reqs[0]
 	for _, key := range []string{"memory_available", "memory_usage", "hit_count", "miss_count", "evictions", "entry_count", "capacity", "average_k"} {
 		if hb.Get(key) != "" {
@@ -210,6 +234,7 @@ func TestHeartbeatOmitsZeroOptionals(t *testing.T) {
 
 func TestAdopterEvent(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -226,13 +251,16 @@ func TestAdopterEvent(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatalf("expected 1 request, got %d", len(reqs))
 	}
+
 	ev := reqs[0]
 	if ev.Get("ev") != "early-adopter" {
 		t.Errorf("expected ev=early-adopter, got %q", ev.Get("ev"))
 	}
+
 	if ev.Get("node_id") != "bbb" {
 		t.Errorf("expected node_id=bbb, got %q", ev.Get("node_id"))
 	}
+
 	wantEmail := base64.StdEncoding.EncodeToString([]byte("test@example.com"))
 	if ev.Get("email") != wantEmail {
 		t.Errorf("expected email=%s, got %q", wantEmail, ev.Get("email"))
@@ -241,6 +269,7 @@ func TestAdopterEvent(t *testing.T) {
 
 func TestNoRequests(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -262,6 +291,7 @@ func TestNoRequests(t *testing.T) {
 
 func TestInviteMeOverride(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -274,6 +304,7 @@ func TestInviteMeOverride(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() { c.Run(ctx); close(done) }()
 
 	time.Sleep(20 * time.Millisecond)
@@ -283,21 +314,25 @@ func TestInviteMeOverride(t *testing.T) {
 	reqs := rec.get()
 	hasStartup := false
 	hasAdopter := false
+
 	for _, r := range reqs {
 		switch r.Get("ev") {
 		case "startup":
 			hasStartup = true
 		case "early-adopter":
 			hasAdopter = true
+
 			wantEmail := base64.StdEncoding.EncodeToString([]byte("early@adopter.com"))
 			if r.Get("email") != wantEmail {
 				t.Errorf("expected email=%s, got %q", wantEmail, r.Get("email"))
 			}
 		}
 	}
+
 	if !hasStartup {
 		t.Error("expected startup event")
 	}
+
 	if !hasAdopter {
 		t.Error("expected early-adopter event")
 	}
@@ -305,6 +340,7 @@ func TestInviteMeOverride(t *testing.T) {
 
 func TestCancelStopsTicker(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -318,6 +354,7 @@ func TestCancelStopsTicker(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() { c.Run(ctx); close(done) }()
 
 	time.Sleep(10 * time.Millisecond)
@@ -351,6 +388,7 @@ func TestHTTPErrorsSwallowed(t *testing.T) {
 
 func TestFinalHeartbeatOnShutdown(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -365,6 +403,7 @@ func TestFinalHeartbeatOnShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
 	go func() { c.Run(ctx); close(done) }()
 
 	time.Sleep(20 * time.Millisecond)
@@ -373,17 +412,21 @@ func TestFinalHeartbeatOnShutdown(t *testing.T) {
 
 	reqs := rec.get()
 	hasHeartbeat := false
+
 	for _, r := range reqs {
 		if r.Get("ev") == "heartbeat" {
 			hasHeartbeat = true
+
 			if r.Get("nodes") != "2" {
 				t.Errorf("expected nodes=2, got %q", r.Get("nodes"))
 			}
+
 			if r.Get("uptime") != "42" {
 				t.Errorf("expected uptime=42, got %q", r.Get("uptime"))
 			}
 		}
 	}
+
 	if !hasHeartbeat {
 		t.Error("expected a final heartbeat on shutdown")
 	}
@@ -391,6 +434,7 @@ func TestFinalHeartbeatOnShutdown(t *testing.T) {
 
 func TestNilStatsFuncDoesNotPanic(t *testing.T) {
 	rec := &recorder{}
+
 	ts := httptest.NewServer(rec.handler())
 	defer ts.Close()
 
@@ -400,6 +444,7 @@ func TestNilStatsFuncDoesNotPanic(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan struct{})
 	go func() { defer close(done); c.Run(ctx) }()
 
@@ -415,6 +460,7 @@ func TestNilStatsFuncDoesNotPanic(t *testing.T) {
 	reqs := rec.get()
 	hasStartup := false
 	hasHeartbeat := false
+
 	for _, r := range reqs {
 		switch r.Get("ev") {
 		case "startup":
@@ -423,9 +469,11 @@ func TestNilStatsFuncDoesNotPanic(t *testing.T) {
 			hasHeartbeat = true
 		}
 	}
+
 	if !hasStartup {
 		t.Error("expected startup event even with nil StatsFunc")
 	}
+
 	if !hasHeartbeat {
 		t.Error("expected final heartbeat even with nil StatsFunc")
 	}

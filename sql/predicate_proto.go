@@ -34,6 +34,7 @@ import (
 
 func predicateToProto(p Predicate) *pb.Predicate {
 	out := &pb.Predicate{}
+
 	switch p.Kind {
 	case PredBool:
 		out.Kind = pb.Predicate_BOOL
@@ -41,6 +42,7 @@ func predicateToProto(p Predicate) *pb.Predicate {
 
 	case PredAnd:
 		out.Kind = pb.Predicate_AND
+
 		out.Children = make([]*pb.Predicate, len(p.Children))
 		for i := range p.Children {
 			out.Children[i] = predicateToProto(p.Children[i])
@@ -48,6 +50,7 @@ func predicateToProto(p Predicate) *pb.Predicate {
 
 	case PredOr:
 		out.Kind = pb.Predicate_OR
+
 		out.Children = make([]*pb.Predicate, len(p.Children))
 		for i := range p.Children {
 			out.Children[i] = predicateToProto(p.Children[i])
@@ -75,6 +78,7 @@ func predicateToProto(p Predicate) *pb.Predicate {
 		out.Kind = pb.Predicate_IS_NULL
 		out.Col = uint32(p.Col)
 	}
+
 	return out
 }
 
@@ -82,50 +86,56 @@ func predicateFromProto(p *pb.Predicate) Predicate {
 	if p == nil {
 		return PTrue()
 	}
-	switch p.Kind {
+
+	switch p.GetKind() {
 	case pb.Predicate_BOOL:
-		return Predicate{Kind: PredBool, BoolVal: p.BoolVal}
+		return Predicate{Kind: PredBool, BoolVal: p.GetBoolVal()}
 
 	case pb.Predicate_AND:
-		children := make([]Predicate, len(p.Children))
-		for i := range p.Children {
-			children[i] = predicateFromProto(p.Children[i])
+		children := make([]Predicate, len(p.GetChildren()))
+		for i := range p.GetChildren() {
+			children[i] = predicateFromProto(p.GetChildren()[i])
 		}
+
 		return Predicate{Kind: PredAnd, Children: children}
 
 	case pb.Predicate_OR:
-		children := make([]Predicate, len(p.Children))
-		for i := range p.Children {
-			children[i] = predicateFromProto(p.Children[i])
+		children := make([]Predicate, len(p.GetChildren()))
+		for i := range p.GetChildren() {
+			children[i] = predicateFromProto(p.GetChildren()[i])
 		}
+
 		return Predicate{Kind: PredOr, Children: children}
 
 	case pb.Predicate_NOT:
-		if p.Child == nil {
+		if p.GetChild() == nil {
 			return PTrue()
 		}
-		child := predicateFromProto(p.Child)
+
+		child := predicateFromProto(p.GetChild())
+
 		return Predicate{Kind: PredNot, Child: &child}
 
 	case pb.Predicate_CMP:
 		return Predicate{
 			Kind:    PredCmp,
-			Col:     int(p.Col),
-			Op:      cmpOpFromProto(p.Op),
-			Literal: typedValueFromProto(p.Literal),
+			Col:     int(p.GetCol()),
+			Op:      cmpOpFromProto(p.GetOp()),
+			Literal: typedValueFromProto(p.GetLiteral()),
 		}
 
 	case pb.Predicate_COL_CMP:
 		return Predicate{
 			Kind: PredColCmp,
-			Col:  int(p.Col),
-			Col2: int(p.Col2),
-			Op:   cmpOpFromProto(p.Op),
+			Col:  int(p.GetCol()),
+			Col2: int(p.GetCol2()),
+			Op:   cmpOpFromProto(p.GetOp()),
 		}
 
 	case pb.Predicate_IS_NULL:
-		return Predicate{Kind: PredIsNull, Col: int(p.Col)}
+		return Predicate{Kind: PredIsNull, Col: int(p.GetCol())}
 	}
+
 	return PTrue()
 }
 
@@ -142,6 +152,7 @@ func cmpOpToProto(op CmpOp) pb.PredicateCmpOp {
 	case OpGe:
 		return pb.PredicateCmpOp_CMP_GE
 	}
+
 	return pb.PredicateCmpOp_CMP_EQ
 }
 
@@ -158,11 +169,13 @@ func cmpOpFromProto(op pb.PredicateCmpOp) CmpOp {
 	case pb.PredicateCmpOp_CMP_GE:
 		return OpGe
 	}
+
 	return OpEq
 }
 
 func typedValueToProto(v TypedValue) *pb.TypedValue {
 	out := &pb.TypedValue{}
+
 	switch v.Kind {
 	case sqlite.TypeNull:
 		out.Kind = pb.TypedValue_NULL_VALUE
@@ -181,6 +194,7 @@ func typedValueToProto(v TypedValue) *pb.TypedValue {
 	default:
 		out.Kind = pb.TypedValue_NULL_VALUE
 	}
+
 	return out
 }
 
@@ -188,18 +202,20 @@ func typedValueFromProto(v *pb.TypedValue) TypedValue {
 	if v == nil {
 		return NullVal()
 	}
-	switch v.Kind {
+
+	switch v.GetKind() {
 	case pb.TypedValue_NULL_VALUE:
 		return NullVal()
 	case pb.TypedValue_INT:
-		return IntVal(v.IntVal)
+		return IntVal(v.GetIntVal())
 	case pb.TypedValue_FLOAT:
-		return FloatVal(v.FloatVal)
+		return FloatVal(v.GetFloatVal())
 	case pb.TypedValue_TEXT:
-		return TextVal(v.TextVal)
+		return TextVal(v.GetTextVal())
 	case pb.TypedValue_BLOB:
-		return BlobVal(v.BlobVal)
+		return BlobVal(v.GetBlobVal())
 	}
+
 	return NullVal()
 }
 
@@ -212,6 +228,7 @@ func rowWriteToProto(rw RowWrite) *pb.RowWriteEffect {
 	for i := range rw.Cols {
 		out.Columns[i] = typedValueToProto(rw.Cols[i])
 	}
+
 	return out
 }
 
@@ -219,15 +236,17 @@ func rowWriteFromProto(table string, rw *pb.RowWriteEffect) RowWrite {
 	if rw == nil {
 		return RowWrite{Table: table}
 	}
+
 	out := RowWrite{
 		Table: table,
-		PK:    rw.Pk,
-		Kind:  writeKindFromProto(rw.Kind),
-		Cols:  make([]TypedValue, len(rw.Columns)),
+		PK:    rw.GetPk(),
+		Kind:  writeKindFromProto(rw.GetKind()),
+		Cols:  make([]TypedValue, len(rw.GetColumns())),
 	}
-	for i := range rw.Columns {
-		out.Cols[i] = typedValueFromProto(rw.Columns[i])
+	for i := range rw.GetColumns() {
+		out.Cols[i] = typedValueFromProto(rw.GetColumns()[i])
 	}
+
 	return out
 }
 
@@ -240,6 +259,7 @@ func writeKindToProto(k WriteKind) pb.RowWriteEffect_Kind {
 	case WriteDelete:
 		return pb.RowWriteEffect_DELETE
 	}
+
 	return pb.RowWriteEffect_INSERT
 }
 
@@ -252,5 +272,6 @@ func writeKindFromProto(k pb.RowWriteEffect_Kind) WriteKind {
 	case pb.RowWriteEffect_DELETE:
 		return WriteDelete
 	}
+
 	return WriteInsert
 }

@@ -42,6 +42,7 @@ func TestUpsertOnConflictDoUpdate(t *testing.T) {
 	if err := db.QueryRow(`SELECT value FROM _wp_sqlite_global_variables WHERE name = 'k'`).Scan(&got); err != nil {
 		t.Fatalf("SELECT after insert: %v", err)
 	}
+
 	if got != "v1" {
 		t.Fatalf("after insert branch: want 'v1', got %q", got)
 	}
@@ -50,9 +51,11 @@ func TestUpsertOnConflictDoUpdate(t *testing.T) {
 		ON CONFLICT(name) DO UPDATE SET value = 'v4'`); err != nil {
 		t.Fatalf("second upsert (update branch): %v", err)
 	}
+
 	if err := db.QueryRow(`SELECT value FROM _wp_sqlite_global_variables WHERE name = 'k'`).Scan(&got); err != nil {
 		t.Fatalf("SELECT after update: %v", err)
 	}
+
 	if got != "v4" {
 		t.Fatalf("after update branch: want 'v4', got %q", got)
 	}

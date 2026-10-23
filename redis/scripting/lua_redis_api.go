@@ -149,6 +149,7 @@ func setupKeysAndArgv(L *lua.LState, keys, args []string) {
 	for i, key := range keys {
 		keysTbl.RawSetInt(i+1, lua.LString(key))
 	}
+
 	L.SetGlobal("KEYS", keysTbl)
 
 	// Create ARGV table
@@ -156,6 +157,7 @@ func setupKeysAndArgv(L *lua.LState, keys, args []string) {
 	for i, arg := range args {
 		argvTbl.RawSetInt(i+1, lua.LString(arg))
 	}
+
 	L.SetGlobal("ARGV", argvTbl)
 }
 
@@ -168,9 +170,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("Script killed by user with SCRIPT KILL")
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString("Script killed by user with SCRIPT KILL"))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -180,9 +184,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("Script timed out")
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString("Script timed out"))
 		L.Push(tbl)
+
 		return 1
 	default:
 	}
@@ -192,9 +198,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("Please specify at least one argument for redis.call()")
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString("Please specify at least one argument for redis.call()"))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -206,9 +214,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("%s", errMsg)
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString(errMsg))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -222,9 +232,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("%s", errMsg)
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString(errMsg))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -234,9 +246,11 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 		if raiseError {
 			L.RaiseError("%s", errMsg)
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString(errMsg))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -248,6 +262,7 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 
 	// Create temporary writer
 	var buf bytes.Buffer
+
 	w := shared.NewWriter(&buf)
 	w.SetProtocol(sc.conn.Protocol)
 
@@ -263,14 +278,17 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 
 	// Parse the RESP response back to Lua
 	respData := buf.Bytes()
+
 	result, _, err := respToLua(L, respData)
 	if err != nil {
 		if raiseError {
 			L.RaiseError("Error parsing Redis response: %v", err)
 		}
+
 		tbl := L.NewTable()
 		tbl.RawSetString("err", lua.LString("Error parsing Redis response"))
 		L.Push(tbl)
+
 		return 1
 	}
 
@@ -284,6 +302,7 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 					if strings.Contains(errMsg, "wrong number of args for") {
 						errMsg = "Wrong number of args calling Redis command from script"
 					}
+
 					L.RaiseError("%s", errMsg)
 				}
 			}
@@ -291,6 +310,7 @@ func redisCall(L *lua.LState, sc *ScriptContext, raiseError bool) int {
 	}
 
 	L.Push(result)
+
 	return 1
 }
 
@@ -300,6 +320,7 @@ func redisErrorReply(L *lua.LState) int {
 	tbl := L.NewTable()
 	tbl.RawSetString("err", lua.LString(msg))
 	L.Push(tbl)
+
 	return 1
 }
 
@@ -309,12 +330,14 @@ func redisStatusReply(L *lua.LState) int {
 	tbl := L.NewTable()
 	tbl.RawSetString("ok", lua.LString(msg))
 	L.Push(tbl)
+
 	return 1
 }
 
 // Kill marks the script as killed.
 func (sc *ScriptContext) Kill() {
 	sc.killed.Store(true)
+
 	if sc.cancel != nil {
 		sc.cancel()
 	}
@@ -330,6 +353,7 @@ func (sc *ScriptContext) IsTimedOut() bool {
 	if sc.timeout <= 0 {
 		return false
 	}
+
 	return time.Since(sc.startTime) > sc.timeout
 }
 
@@ -349,6 +373,7 @@ func parseShebang(source string) (engine, libName string, err error) {
 
 	// Remove #! prefix
 	shebang = strings.TrimPrefix(shebang, "#!")
+
 	parts := strings.Fields(shebang)
 	if len(parts) == 0 {
 		return "", "", fmt.Errorf("missing engine in shebang")
@@ -365,6 +390,7 @@ func parseShebang(source string) (engine, libName string, err error) {
 		if len(kv) != 2 {
 			continue
 		}
+
 		key := strings.ToLower(kv[0])
 		value := kv[1]
 
@@ -387,10 +413,12 @@ func stripShebang(source string) string {
 	if !strings.HasPrefix(source, "#!") {
 		return source
 	}
+
 	_, after, ok := strings.Cut(source, "\n")
 	if !ok {
 		return "" // Only shebang, no code
 	}
+
 	return after
 }
 
@@ -434,6 +462,7 @@ func redisRegisterFunction(L *lua.LState, ctx *LibraryLoadContext) int {
 	if nArgs == 0 {
 		ctx.Error = "ERR redis.register_function requires at least one argument"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -449,6 +478,7 @@ func redisRegisterFunction(L *lua.LState, ctx *LibraryLoadContext) int {
 	if nArgs < 2 {
 		ctx.Error = "ERR redis.register_function requires function name and callback"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -456,6 +486,7 @@ func redisRegisterFunction(L *lua.LState, ctx *LibraryLoadContext) int {
 	if !ok {
 		ctx.Error = "ERR function name must be a string"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -463,6 +494,7 @@ func redisRegisterFunction(L *lua.LState, ctx *LibraryLoadContext) int {
 	if _, ok := callback.(*lua.LFunction); !ok {
 		ctx.Error = "ERR callback must be a function"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -471,6 +503,7 @@ func redisRegisterFunction(L *lua.LState, ctx *LibraryLoadContext) int {
 	if _, exists := ctx.Functions[name]; exists {
 		ctx.Error = fmt.Sprintf("ERR Function '%s' already registered in this library", name)
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -492,12 +525,15 @@ func registerFunctionFromTable(L *lua.LState, ctx *LibraryLoadContext, tbl *lua.
 	if funcNameVal == lua.LNil {
 		ctx.Error = "ERR missing function_name in registration table"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
+
 	funcName, ok := funcNameVal.(lua.LString)
 	if !ok {
 		ctx.Error = "ERR function_name must be a string"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
@@ -506,17 +542,21 @@ func registerFunctionFromTable(L *lua.LState, ctx *LibraryLoadContext, tbl *lua.
 	if callbackVal == lua.LNil {
 		ctx.Error = "ERR missing callback in registration table"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
+
 	callback, ok := callbackVal.(*lua.LFunction)
 	if !ok {
 		ctx.Error = "ERR callback must be a function"
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 
 	// Extract optional description
 	var description string
+
 	descVal := tbl.RawGetString("description")
 	if descStr, ok := descVal.(lua.LString); ok {
 		description = string(descStr)
@@ -524,6 +564,7 @@ func registerFunctionFromTable(L *lua.LState, ctx *LibraryLoadContext, tbl *lua.
 
 	// Extract optional flags
 	var flags []string
+
 	flagsVal := tbl.RawGetString("flags")
 	if flagsTbl, ok := flagsVal.(*lua.LTable); ok {
 		flagsTbl.ForEach(func(_, v lua.LValue) {
@@ -538,6 +579,7 @@ func registerFunctionFromTable(L *lua.LState, ctx *LibraryLoadContext, tbl *lua.
 	if _, exists := ctx.Functions[name]; exists {
 		ctx.Error = fmt.Sprintf("ERR Function '%s' already registered in this library", name)
 		L.RaiseError("%s", ctx.Error)
+
 		return 0
 	}
 

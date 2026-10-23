@@ -29,6 +29,7 @@ import (
 func TestZLexCount(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed: ZADD zlexcount 0 a 0 b 0 c 0 d 0 e
@@ -41,6 +42,7 @@ func TestZLexCount(t *testing.T) {
 			[]byte("0"), []byte("d"), []byte("0"), []byte("e"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":5\r\n" {
 			t.Fatalf("seed ZADD: got %q, want %q", got, ":5\r\n")
 		}
@@ -84,6 +86,7 @@ func TestZLexCount(t *testing.T) {
 			w := shared.NewWriter(buf)
 			cmd := &shared.Command{Type: shared.CmdZLexCount, Args: tt.args}
 			h.ExecuteInto(cmd, w, conn)
+
 			if got := buf.String(); got != tt.expect {
 				t.Errorf("got %q, want %q", got, tt.expect)
 			}
@@ -94,6 +97,7 @@ func TestZLexCount(t *testing.T) {
 func TestZRangeByLex(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed: ZADD zrangebylex 0 a 0 b 0 c 0 d 0 e
@@ -106,6 +110,7 @@ func TestZRangeByLex(t *testing.T) {
 			[]byte("0"), []byte("d"), []byte("0"), []byte("e"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":5\r\n" {
 			t.Fatalf("seed ZADD: got %q, want %q", got, ":5\r\n")
 		}
@@ -149,6 +154,7 @@ func TestZRangeByLex(t *testing.T) {
 			w := shared.NewWriter(buf)
 			cmd := &shared.Command{Type: shared.CmdZRangeByLex, Args: tt.args}
 			h.ExecuteInto(cmd, w, conn)
+
 			if got := buf.String(); got != tt.expect {
 				t.Errorf("got %q, want %q", got, tt.expect)
 			}
@@ -159,6 +165,7 @@ func TestZRangeByLex(t *testing.T) {
 func TestZRevRangeByLex(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	// Seed: ZADD zrevrangebylex 0 a 0 b 0 c 0 d 0 e
@@ -171,6 +178,7 @@ func TestZRevRangeByLex(t *testing.T) {
 			[]byte("0"), []byte("d"), []byte("0"), []byte("e"),
 		}}
 		h.ExecuteInto(cmd, w, conn)
+
 		if got := buf.String(); got != ":5\r\n" {
 			t.Fatalf("seed ZADD: got %q, want %q", got, ":5\r\n")
 		}
@@ -204,6 +212,7 @@ func TestZRevRangeByLex(t *testing.T) {
 			w := shared.NewWriter(buf)
 			cmd := &shared.Command{Type: shared.CmdZRevRangeByLex, Args: tt.args}
 			h.ExecuteInto(cmd, w, conn)
+
 			if got := buf.String(); got != tt.expect {
 				t.Errorf("got %q, want %q", got, tt.expect)
 			}

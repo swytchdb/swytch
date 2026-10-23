@@ -29,6 +29,7 @@ import (
 func TestZAdd(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	tests := []struct {
@@ -230,6 +231,7 @@ func TestZAdd(t *testing.T) {
 				buf := &bytes.Buffer{}
 				w := shared.NewWriter(buf)
 				h.ExecuteInto(c.cmd, w, conn)
+
 				if got := buf.String(); got != c.expect {
 					t.Errorf("step %d: got %q, want %q", i, got, c.expect)
 				}
@@ -241,6 +243,7 @@ func TestZAdd(t *testing.T) {
 func TestZIncrBy(t *testing.T) {
 	h := newHandlerWithEffects()
 	defer h.Close()
+
 	conn := newEffectsConn(h)
 
 	tests := []struct {
@@ -302,6 +305,7 @@ func TestZIncrBy(t *testing.T) {
 				buf := &bytes.Buffer{}
 				w := shared.NewWriter(buf)
 				h.ExecuteInto(c.cmd, w, conn)
+
 				if got := buf.String(); got != c.expect {
 					t.Errorf("step %d: got %q, want %q", i, got, c.expect)
 				}

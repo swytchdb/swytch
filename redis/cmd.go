@@ -146,11 +146,13 @@ Examples:
 
 	if *showHelp {
 		fs.Usage()
+
 		return
 	}
 
 	if *showVersion {
 		fmt.Printf("swytch redis %s\n", Version)
+
 		return
 	}
 
@@ -168,12 +170,14 @@ Examples:
 	}
 
 	var logHandler slog.Handler
+
 	opts := &slog.HandlerOptions{Level: logLevel}
 	if *logFormat == "json" {
 		logHandler = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
 		logHandler = slog.NewTextHandler(os.Stderr, opts)
 	}
+
 	slog.SetDefault(slog.New(tracing.NewTracingHandler(logHandler)))
 
 	// Set GOMAXPROCS based on threads
@@ -195,20 +199,24 @@ Examples:
 		fmt.Fprintf(os.Stderr, "Error: --tls-cert-file and --tls-key-file must be specified together\n")
 		os.Exit(1)
 	}
+
 	if *tlsCA != "" && *tlsCert == "" {
 		fmt.Fprintf(os.Stderr, "Error: --tls-ca-cert-file requires --tls-cert-file and --tls-key-file\n")
 		os.Exit(1)
 	}
+
 	if *tlsCert != "" {
 		if _, err := os.Stat(*tlsCert); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Error: TLS certificate file not found: %s\n", *tlsCert)
 			os.Exit(1)
 		}
+
 		if _, err := os.Stat(*tlsKey); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Error: TLS key file not found: %s\n", *tlsKey)
 			os.Exit(1)
 		}
 	}
+
 	if *tlsCA != "" {
 		if _, err := os.Stat(*tlsCA); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Error: TLS CA certificate file not found: %s\n", *tlsCA)
@@ -248,6 +256,7 @@ Examples:
 	// Initialize effects log if configured (effects builds only)
 	effectsCfg.MemoryLimit = maxMemory
 	effectsCfg.MemoryLimitPercent = maxMemoryPct
+
 	effectsCfg.Port = *port
 	if err := InitializeEffects(effectsCfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize effects log: %v\n", err)
@@ -280,6 +289,7 @@ Examples:
 	// Metrics adapter is always created (lightweight wrapper); metrics
 	// server only starts when --metrics-port is set.
 	adapter := NewMetricsAdapter(server.Stats(), server.Handler(), maxMemory)
+
 	var metricsServer *metrics.Server
 	if *metricsPort > 0 {
 		metricsServer = metrics.NewServer(adapter, *metricsPort)
@@ -288,16 +298,21 @@ Examples:
 	}
 
 	// Start telemetry client
-	var telemetryCancel context.CancelFunc
-	var telemetryDone chan struct{}
+	var (
+		telemetryCancel context.CancelFunc
+		telemetryDone   chan struct{}
+	)
+
 	if telemetryEnabled && activeRuntime != nil {
 		telCtx, cancel := context.WithCancel(context.Background())
 		telemetryCancel = cancel
 		nodeID := fmt.Sprintf("%x", uint64(activeRuntime.Engine.NodeID()))
+
 		var clusterID string
 		if effectsCfg.JoinAddr != "" {
 			clusterID = fmt.Sprintf("%x", xxh3.HashString(effectsCfg.JoinAddr))
 		}
+
 		tc := telemetry.New(telemetry.Config{
 			NodeID:       nodeID,
 			ClusterID:    clusterID,
@@ -309,6 +324,7 @@ Examples:
 				if activeRuntime != nil && activeRuntime.PeerManager != nil {
 					nodes = len(activeRuntime.PeerManager.PeerIDs()) + 1
 				}
+
 				ec := activeRuntime.Engine.EffectCache()
 				hits, misses, _ := ec.Stats()
 				// Capacity is the pool's byte budget (it is byte-bounded, not
@@ -327,6 +343,7 @@ Examples:
 				}
 			},
 		})
+
 		telemetryDone = make(chan struct{})
 		go func() { defer close(telemetryDone); tc.Run(telCtx) }()
 	}
@@ -343,6 +360,7 @@ Examples:
 	if *pprofAddr != "" {
 		go func() {
 			slog.Info("pprof server started", "addr", *pprofAddr, "path", "/debug/pprof/")
+
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
 				slog.Error("pprof server error", "error", err)
 			}
@@ -353,30 +371,40 @@ Examples:
 	fmt.Printf("Swytch Redis Server %s starting\n", Version)
 	fmt.Printf("  Port: %d\n", *port)
 	fmt.Printf("  Bind: %s\n", *bind)
+
 	if *unixSocket != "" {
 		fmt.Printf("  Unix Socket: %s\n", *unixSocket)
 	}
+
 	fmt.Printf("  Max Memory: %s\n", formatBytes(uint64(maxMemory)))
 	fmt.Printf("  Threads: %d\n", runtime.GOMAXPROCS(0))
+
 	if *requirePass != "" {
 		fmt.Printf("  Auth: enabled\n")
 	}
+
 	PrintEffectsConfig(effectsCfg)
+
 	if *tlsCert != "" {
 		fmt.Printf("  TLS: enabled\n")
+
 		if *tlsCA != "" {
 			fmt.Printf("  mTLS: enabled (client certs required)\n")
 		}
 	}
+
 	if *pprofAddr != "" {
 		fmt.Printf("  Pprof: http://%s/debug/pprof/\n", *pprofAddr)
 	}
+
 	if *metricsPort > 0 {
 		fmt.Printf("  Metrics: http://localhost:%d/metrics\n", *metricsPort)
 	}
+
 	if *debug {
 		fmt.Printf("  Debug Logging: enabled\n")
 	}
+
 	fmt.Println()
 
 	// Start server
@@ -390,25 +418,31 @@ Examples:
 
 	<-sigCh
 	slog.Info("Shutting down")
+
 	if telemetryCancel != nil {
 		telemetryCancel()
 		<-telemetryDone
 	}
+
 	if metricsServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
 		if err := metricsServer.Stop(ctx); err != nil {
 			slog.Error("Error stopping metrics server", "error", err)
 		}
 	}
+
 	if err := server.Stop(); err != nil {
 		slog.Error("Error during shutdown", "error", err)
 	}
+
 	StopCluster()
 }
 
 // Run starts the Redis server with the given arguments
 func Run(args []string) error {
 	Main(args)
+
 	return nil
 }

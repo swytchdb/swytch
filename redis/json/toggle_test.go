@@ -31,6 +31,7 @@ func TestJSON_Toggle(t *testing.T) {
 	if got := h.run(handleJSONToggle, "k", "$.b"); !strings.Contains(got, "*1\r\n:0") {
 		t.Fatalf("TOGGLE $.b: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".b"); !strings.Contains(got, "false") {
 		t.Fatalf("after toggle: %q", got)
 	}
@@ -42,6 +43,7 @@ func TestJSON_Toggle(t *testing.T) {
 	if got := h.run(handleJSONToggle, "k", ".n"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("TOGGLE .n should error: %q", got)
 	}
+
 	if got := h.run(handleJSONToggle, "k", "$.n"); !strings.Contains(got, "*1\r\n$-1") {
 		t.Fatalf("TOGGLE $.n should be [null]: %q", got)
 	}

@@ -29,6 +29,7 @@ import (
 func handleSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments(messageTypeSubscribe)
+
 		return
 	}
 
@@ -71,8 +72,10 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 				Count: 0,
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
+
 			return
 		}
+
 		for _, arg := range cmd.Args {
 			msg := &shared.PubSubMessage{
 				Type:    messageTypeUnsubscribe,
@@ -81,6 +84,7 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
 		}
+
 		return
 	}
 
@@ -125,6 +129,7 @@ func handleUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conne
 func handlePSubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Connection) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments(messageTypePSubscribe)
+
 		return
 	}
 
@@ -167,8 +172,10 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 				Count: 0,
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
+
 			return
 		}
+
 		for _, arg := range cmd.Args {
 			msg := &shared.PubSubMessage{
 				Type:    messageTypePUnsubscribe,
@@ -177,6 +184,7 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 			}
 			w.WriteRaw(FormatPubSubMessage(msg, conn.Protocol))
 		}
+
 		return
 	}
 
@@ -221,6 +229,7 @@ func handlePUnsubscribe(cmd *shared.Command, w *shared.Writer, conn *shared.Conn
 func handlePublish(cmd *shared.Command, w *shared.Writer, _ *shared.Database) (bool, []string, shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("publish")
+
 		return false, nil, nil
 	}
 
@@ -237,6 +246,7 @@ func handlePublish(cmd *shared.Command, w *shared.Writer, _ *shared.Database) (b
 func handlePubSub(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("pubsub")
+
 		return
 	}
 
@@ -266,6 +276,7 @@ func handlePubSubChannels(cmd *shared.Command, w *shared.Writer) {
 	channels := shared.GetPubSubBroker().Channels(pattern)
 
 	w.WriteArray(len(channels))
+
 	for _, channel := range channels {
 		w.WriteBulkStringStr(channel)
 	}
@@ -275,6 +286,7 @@ func handlePubSubChannels(cmd *shared.Command, w *shared.Writer) {
 func handlePubSubNumSub(cmd *shared.Command, w *shared.Writer) {
 	if len(cmd.Args) < 2 {
 		w.WriteArray(0)
+
 		return
 	}
 
@@ -286,6 +298,7 @@ func handlePubSubNumSub(cmd *shared.Command, w *shared.Writer) {
 	counts := shared.GetPubSubBroker().NumSub(channels...)
 
 	w.WriteArray(len(channels) * 2)
+
 	for _, channel := range channels {
 		w.WriteBulkStringStr(channel)
 		w.WriteInteger(int64(counts[channel]))
@@ -314,6 +327,7 @@ func handlePubSubHelp(_ *shared.Command, w *shared.Writer) {
 	}
 
 	w.WriteArray(len(help))
+
 	for _, line := range help {
 		w.WriteBulkStringStr(line)
 	}

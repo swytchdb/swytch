@@ -47,6 +47,7 @@ func TestInjectExtractRoundtrip(t *testing.T) {
 	if data == nil {
 		t.Fatal("InjectIntoBytes returned nil for valid span context")
 	}
+
 	if len(data) != traceContextSize {
 		t.Fatalf("expected %d bytes, got %d", traceContextSize, len(data))
 	}
@@ -57,12 +58,15 @@ func TestInjectExtractRoundtrip(t *testing.T) {
 	if esc.TraceID() != tid {
 		t.Errorf("TraceID mismatch: got %s, want %s", esc.TraceID(), tid)
 	}
+
 	if esc.SpanID() != sid {
 		t.Errorf("SpanID mismatch: got %s, want %s", esc.SpanID(), sid)
 	}
+
 	if esc.TraceFlags() != flags {
 		t.Errorf("TraceFlags mismatch: got %v, want %v", esc.TraceFlags(), flags)
 	}
+
 	if !esc.IsRemote() {
 		t.Error("expected remote span context")
 	}
@@ -77,6 +81,7 @@ func TestInjectIntoBytes_InvalidContext(t *testing.T) {
 
 func TestExtractFromBytes_Nil(t *testing.T) {
 	ctx := ExtractFromBytes(nil)
+
 	sc := trace.SpanContextFromContext(ctx)
 	if sc.IsValid() {
 		t.Error("expected invalid span context from nil data")
@@ -85,6 +90,7 @@ func TestExtractFromBytes_Nil(t *testing.T) {
 
 func TestExtractFromBytes_WrongSize(t *testing.T) {
 	ctx := ExtractFromBytes([]byte{1, 2, 3})
+
 	sc := trace.SpanContextFromContext(ctx)
 	if sc.IsValid() {
 		t.Error("expected invalid span context from short data")
@@ -93,6 +99,7 @@ func TestExtractFromBytes_WrongSize(t *testing.T) {
 
 func TestTracingHandler_AddsTraceAttrs(t *testing.T) {
 	var captured []slog.Attr
+
 	inner := &capturingHandler{attrs: &captured}
 	handler := NewTracingHandler(inner)
 
@@ -116,17 +123,21 @@ func TestTracingHandler_AddsTraceAttrs(t *testing.T) {
 
 	foundTraceID := false
 	foundSpanID := false
+
 	for _, a := range captured {
 		if a.Key == "trace_id" {
 			foundTraceID = true
 		}
+
 		if a.Key == "span_id" {
 			foundSpanID = true
 		}
 	}
+
 	if !foundTraceID {
 		t.Error("trace_id not found in log record")
 	}
+
 	if !foundSpanID {
 		t.Error("span_id not found in log record")
 	}
@@ -134,6 +145,7 @@ func TestTracingHandler_AddsTraceAttrs(t *testing.T) {
 
 func TestTracingHandler_NoTraceAttrsWithoutSpan(t *testing.T) {
 	var captured []slog.Attr
+
 	inner := &capturingHandler{attrs: &captured}
 	handler := NewTracingHandler(inner)
 
@@ -164,6 +176,7 @@ func TestInitNoOp(t *testing.T) {
 // nonRecordingSpan implements trace.Span with a fixed SpanContext.
 type nonRecordingSpan struct {
 	trace.Span
+
 	sc trace.SpanContext
 }
 
@@ -179,8 +192,10 @@ func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return tr
 func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
 	r.Attrs(func(a slog.Attr) bool {
 		*h.attrs = append(*h.attrs, a)
+
 		return true
 	})
+
 	return nil
 }
 func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }

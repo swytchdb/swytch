@@ -25,8 +25,10 @@ import "github.com/swytchdb/swytch/redis/shared"
 func handleJSONObjLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("json.objlen")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -35,13 +37,16 @@ func handleJSONObjLen(cmd *shared.Command, w *shared.Writer, db *shared.Database
 		if len(cmd.Args) == 2 {
 			pathStr = string(cmd.Args[1])
 		}
+
 		jsonReadInt(cmd, w, key, pathStr, "an object", func(m *Value) (int64, bool) {
 			if m.Kind != KindObject {
 				return 0, false
 			}
+
 			return int64(len(m.Obj)), true
 		})
 	}
+
 	return
 }
 
@@ -49,8 +54,10 @@ func handleJSONObjLen(cmd *shared.Command, w *shared.Writer, db *shared.Database
 func handleJSONObjKeys(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("json.objkeys")
+
 		return
 	}
+
 	key := string(cmd.Args[0])
 	keys = []string{key}
 	valid = true
@@ -59,29 +66,39 @@ func handleJSONObjKeys(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 		if len(cmd.Args) == 2 {
 			pathStr = string(cmd.Args[1])
 		}
+
 		path, err := ParsePath(pathStr)
 		if err != nil {
 			w.WriteError("ERR " + err.Error())
+
 			return
 		}
+
 		root, _, exists, wrongType, err := getJSONSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteNullArray()
+
 			return
 		}
+
 		if wrongType {
 			writeWrongType(w)
+
 			return
 		}
+
 		matches := path.resolve(assemble(root, ""))
 		if path.JSONPath {
 			// One entry per match: the member-key array, or null for a
 			// non-object match.
 			w.WriteArray(len(matches))
+
 			for _, m := range matches {
 				if m.Kind == KindObject {
 					writeObjKeys(w, m)
@@ -89,18 +106,25 @@ func handleJSONObjKeys(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 					w.WriteNullArray()
 				}
 			}
+
 			return
 		}
+
 		if len(matches) == 0 {
 			w.WriteError("ERR Path '" + pathStr + "' does not exist")
+
 			return
 		}
+
 		if matches[0].Kind != KindObject {
 			w.WriteError("ERR wrong type of path value - expected an object but found " + matches[0].TypeName())
+
 			return
 		}
+
 		writeObjKeys(w, matches[0])
 	}
+
 	return
 }
 
@@ -108,6 +132,7 @@ func handleJSONObjKeys(cmd *shared.Command, w *shared.Writer, db *shared.Databas
 // order.
 func writeObjKeys(w *shared.Writer, obj *Value) {
 	w.WriteArray(len(obj.Obj))
+
 	for _, m := range obj.Obj {
 		w.WriteBulkString([]byte(m.Key))
 	}

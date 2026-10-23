@@ -48,12 +48,15 @@ func emitView(ctx *effects.Context, v *viewSchema) error {
 	if v.Name == "" {
 		return fmt.Errorf("sql: emitView: empty name")
 	}
+
 	if v.Body == "" {
 		return fmt.Errorf("sql: emitView: view %q has empty body", v.Name)
 	}
+
 	if err := emitRawField(ctx, viewMetaKey(v.Name), viewFieldSQL, []byte(v.Body)); err != nil {
 		return err
 	}
+
 	return emitRawField(ctx, viewListKey, v.Name, []byte{1})
 }
 
@@ -63,6 +66,7 @@ func emitViewRemove(ctx *effects.Context, name string) error {
 	if err := emitKeyedRemove(ctx, viewMetaKey(name), viewFieldSQL); err != nil {
 		return err
 	}
+
 	return emitKeyedRemove(ctx, viewListKey, name)
 }
 
@@ -73,19 +77,23 @@ func loadView(ctx *effects.Context, name string) (*viewSchema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sql: read view %q: %w", name, err)
 	}
-	if reduced == nil || len(reduced.NetAdds) == 0 {
+
+	if reduced == nil || len(reduced.GetNetAdds()) == 0 {
 		return nil, ErrNoSuchView
 	}
-	el, ok := reduced.NetAdds[viewFieldSQL]
-	if !ok || el.Data == nil {
+
+	el, ok := reduced.GetNetAdds()[viewFieldSQL]
+	if !ok || el.GetData() == nil {
 		return nil, fmt.Errorf("sql: view %q missing sql field", name)
 	}
-	body := el.Data.Decompress()
+
+	body := el.GetData().Decompress()
 	if len(body) == 0 {
 		// emitView never stores an empty body — nil here means the stored
 		// value failed to decompress.
 		return nil, fmt.Errorf("sql: view %q missing or invalid sql field", name)
 	}
+
 	return &viewSchema{Name: name, Body: string(body)}, nil
 }
 
@@ -96,14 +104,18 @@ func listViews(ctx *effects.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sql: read view list: %w", err)
 	}
-	if reduced == nil || len(reduced.NetAdds) == 0 {
+
+	if reduced == nil || len(reduced.GetNetAdds()) == 0 {
 		return nil, nil
 	}
-	names := make([]string, 0, len(reduced.NetAdds))
-	for name := range reduced.NetAdds {
+
+	names := make([]string, 0, len(reduced.GetNetAdds()))
+	for name := range reduced.GetNetAdds() {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names, nil
 }
 

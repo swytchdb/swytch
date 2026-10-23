@@ -43,6 +43,7 @@ func TestJSON_ArrLen(t *testing.T) {
 	if got := h.run(handleJSONArrLen, "k", ".s"); !strings.Contains(got, "-ERR") {
 		t.Fatalf("ARRLEN .s should error: %q", got)
 	}
+
 	if got := h.run(handleJSONArrLen, "k", "$.s"); !strings.Contains(got, "*1\r\n$-1") {
 		t.Fatalf("ARRLEN $.s should be [null]: %q", got)
 	}
@@ -59,6 +60,7 @@ func TestJSON_ArrAppend(t *testing.T) {
 	if got := h.run(handleJSONArrAppend, "k", "$.a", "3", "4"); !strings.Contains(got, ":4") {
 		t.Fatalf("ARRAPPEND: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.a"); !strings.Contains(got, "[[1,2,3,4]]") {
 		t.Fatalf("after append: %q", got)
 	}
@@ -66,6 +68,7 @@ func TestJSON_ArrAppend(t *testing.T) {
 	if got := h.run(handleJSONArrAppend, "k", ".a", `{"x":1}`); !strings.Contains(got, ":5\r\n") {
 		t.Fatalf("ARRAPPEND container: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, `[1,2,3,4,{"x":1}]`) {
 		t.Fatalf("after container append: %q", got)
 	}
@@ -78,6 +81,7 @@ func TestJSON_ArrInsert(t *testing.T) {
 	if got := h.run(handleJSONArrInsert, "k", "$.a", "1", "2", "3"); !strings.Contains(got, ":4") {
 		t.Fatalf("ARRINSERT: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, "[1,2,3,4]") {
 		t.Fatalf("after insert: %q", got)
 	}
@@ -85,6 +89,7 @@ func TestJSON_ArrInsert(t *testing.T) {
 	if got := h.run(handleJSONArrInsert, "k", ".a", "4", "5"); !strings.Contains(got, ":5\r\n") {
 		t.Fatalf("ARRINSERT tail: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, "[1,2,3,4,5]") {
 		t.Fatalf("after tail insert: %q", got)
 	}
@@ -92,6 +97,7 @@ func TestJSON_ArrInsert(t *testing.T) {
 	if got := h.run(handleJSONArrInsert, "k", ".a", "-1", "9"); !strings.Contains(got, ":6\r\n") {
 		t.Fatalf("ARRINSERT neg: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, "[1,2,3,4,9,5]") {
 		t.Fatalf("after neg insert: %q", got)
 	}
@@ -112,6 +118,7 @@ func TestJSON_ArrPop(t *testing.T) {
 	if got := h.run(handleJSONArrPop, "k", ".a", "0"); !strings.Contains(got, "\r\n1\r\n") {
 		t.Fatalf("ARRPOP 0: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, "[2,3]") {
 		t.Fatalf("after pops: %q", got)
 	}
@@ -121,6 +128,7 @@ func TestJSON_ArrPop(t *testing.T) {
 	}
 	// Pop until empty, then null.
 	h.run(handleJSONArrPop, "k", ".a")
+
 	if got := h.run(handleJSONArrPop, "k", ".a"); !strings.Contains(got, "$-1") {
 		t.Fatalf("ARRPOP empty should be null: %q", got)
 	}
@@ -133,6 +141,7 @@ func TestJSON_ArrTrim(t *testing.T) {
 	if got := h.run(handleJSONArrTrim, "k", "$.a", "1", "3"); !strings.Contains(got, ":3") {
 		t.Fatalf("ARRTRIM: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", ".a"); !strings.Contains(got, "[1,2,3]") {
 		t.Fatalf("after trim: %q", got)
 	}
@@ -140,6 +149,7 @@ func TestJSON_ArrTrim(t *testing.T) {
 	if got := h.run(handleJSONArrTrim, "k", ".a", "2", "1"); !strings.Contains(got, ":0\r\n") {
 		t.Fatalf("ARRTRIM empty: %q", got)
 	}
+
 	if got := h.run(handleJSONGet, "k", "$.a"); !strings.Contains(got, "[[]]") {
 		t.Fatalf("after empty trim: %q", got)
 	}
@@ -148,9 +158,11 @@ func TestJSON_ArrTrim(t *testing.T) {
 func TestJSON_ArrIndex(t *testing.T) {
 	h := newHarness()
 	h.run(handleJSONSet, "k", "$", `{"a":[10,20,30,20]}`)
+
 	if got := h.run(handleJSONArrIndex, "k", ".a", "20"); !strings.Contains(got, ":1\r\n") {
 		t.Fatalf("ARRINDEX 20: %q", got)
 	}
+
 	if got := h.run(handleJSONArrIndex, "k", ".a", "99"); !strings.Contains(got, ":-1\r\n") {
 		t.Fatalf("ARRINDEX missing: %q", got)
 	}

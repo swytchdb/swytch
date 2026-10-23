@@ -37,6 +37,7 @@ const optionStoreDist = "STOREDIST"
 func handleGeoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("geosearch")
+
 		return
 	}
 
@@ -47,6 +48,7 @@ func handleGeoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 	runner = func() {
 		geoSearch(cmd, w, "", false)
 	}
+
 	return
 }
 
@@ -58,6 +60,7 @@ func handleGeoSearch(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 func handleGeoSearchStore(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("geosearchstore")
+
 		return
 	}
 
@@ -77,6 +80,7 @@ func handleGeoSearchStore(cmd *shared.Command, w *shared.Writer, db *shared.Data
 
 		geoSearch(modCmd, w, destKey, true)
 	}
+
 	return
 }
 
@@ -85,15 +89,18 @@ func handleGeoSearchStore(cmd *shared.Command, w *shared.Writer, db *shared.Data
 func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 5 {
 		w.WriteWrongNumArguments("georadius")
+
 		return
 	}
 
 	sourceKey := string(cmd.Args[0])
 
 	// Extract STORE/STOREDIST options from remaining args (they take a key in GEORADIUS)
-	var destKey string
-	var storeDist bool
-	var filteredOpts [][]byte
+	var (
+		destKey      string
+		storeDist    bool
+		filteredOpts [][]byte
+	)
 
 	isRO := cmd.Type == shared.CmdGeoRadiusRO
 
@@ -103,23 +110,31 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		case "STORE":
 			if isRO {
 				w.WriteError("ERR STORE option not allowed in GEORADIUS_RO")
+
 				return
 			}
+
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			destKey = string(cmd.Args[i+1])
 			i++ // skip the key
 		case optionStoreDist:
 			if isRO {
 				w.WriteError("ERR STOREDIST option not allowed in GEORADIUS_RO")
+
 				return
 			}
+
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			destKey = string(cmd.Args[i+1])
 			storeDist = true
 			i++ // skip the key
@@ -158,6 +173,7 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		}
 		geoSearch(modCmd, w, destKey, destKey != "")
 	}
+
 	return
 }
 
@@ -166,15 +182,18 @@ func handleGeoRadius(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 4 {
 		w.WriteWrongNumArguments("georadiusbymember")
+
 		return
 	}
 
 	sourceKey := string(cmd.Args[0])
 
 	// Extract STORE/STOREDIST options from remaining args (they take a key in GEORADIUSBYMEMBER)
-	var destKey string
-	var storeDist bool
-	var filteredOpts [][]byte
+	var (
+		destKey      string
+		storeDist    bool
+		filteredOpts [][]byte
+	)
 
 	isRO := cmd.Type == shared.CmdGeoRadiusByMemberRO
 
@@ -184,23 +203,31 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 		case "STORE":
 			if isRO {
 				w.WriteError("ERR STORE option not allowed in GEORADIUSBYMEMBER_RO")
+
 				return
 			}
+
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			destKey = string(cmd.Args[i+1])
 			i++ // skip the key
 		case optionStoreDist:
 			if isRO {
 				w.WriteError("ERR STOREDIST option not allowed in GEORADIUSBYMEMBER_RO")
+
 				return
 			}
+
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			destKey = string(cmd.Args[i+1])
 			storeDist = true
 			i++ // skip the key
@@ -239,6 +266,7 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 		}
 		geoSearch(modCmd, w, destKey, destKey != "")
 	}
+
 	return
 }
 
@@ -246,6 +274,7 @@ func handleGeoRadiusByMember(cmd *shared.Command, w *shared.Writer, db *shared.D
 func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bool) {
 	if len(cmd.Args) < 1 {
 		w.WriteWrongNumArguments("geosearch")
+
 		return
 	}
 
@@ -279,72 +308,99 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 		case "FROMMEMBER":
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			fromMember = string(cmd.Args[i+1])
 			hasFromMember = true
 			i += 2
 		case "FROMLONLAT":
 			if i+2 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			var err error
+
 			fromLon, err = strconv.ParseFloat(string(cmd.Args[i+1]), 64)
 			if err != nil {
 				w.WriteError("ERR value is not a valid float")
+
 				return
 			}
+
 			fromLat, err = strconv.ParseFloat(string(cmd.Args[i+2]), 64)
 			if err != nil {
 				w.WriteError("ERR value is not a valid float")
+
 				return
 			}
+
 			if !validateCoordinates(fromLon, fromLat) {
 				w.WriteError("ERR invalid longitude,latitude pair")
+
 				return
 			}
+
 			hasFromLonLat = true
 			i += 3
 		case "BYRADIUS":
 			if i+2 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			var err error
+
 			byRadius, err = strconv.ParseFloat(string(cmd.Args[i+1]), 64)
 			if err != nil || byRadius < 0 {
 				w.WriteError("ERR need a non-negative radius")
+
 				return
 			}
+
 			unit = strings.ToLower(string(cmd.Args[i+2]))
 			if unit != "m" && unit != "km" && unit != "mi" && unit != "ft" {
 				w.WriteError("ERR unsupported unit provided. please use M, KM, FT, MI")
+
 				return
 			}
+
 			hasRadius = true
 			i += 3
 		case "BYBOX":
 			if i+3 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			var err error
+
 			byWidth, err = strconv.ParseFloat(string(cmd.Args[i+1]), 64)
 			if err != nil || byWidth < 0 {
 				w.WriteError("ERR need a non-negative width")
+
 				return
 			}
+
 			byHeight, err = strconv.ParseFloat(string(cmd.Args[i+2]), 64)
 			if err != nil || byHeight < 0 {
 				w.WriteError("ERR need a non-negative height")
+
 				return
 			}
+
 			unit = strings.ToLower(string(cmd.Args[i+3]))
 			if unit != "m" && unit != "km" && unit != "mi" && unit != "ft" {
 				w.WriteError("ERR unsupported unit provided. please use M, KM, FT, MI")
+
 				return
 			}
+
 			hasBox = true
 			i += 4
 		case "ASC":
@@ -358,14 +414,19 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 		case "COUNT":
 			if i+1 >= len(cmd.Args) {
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			var err error
+
 			count64, err := strconv.ParseInt(string(cmd.Args[i+1]), 10, 64)
 			if err != nil || count64 <= 0 {
 				w.WriteError("ERR COUNT must be > 0")
+
 				return
 			}
+
 			count = int(count64)
 			i += 2
 		case "ANY":
@@ -384,12 +445,15 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 			if !isStore {
 				// STOREDIST is only valid for GEOSEARCHSTORE, not GEOSEARCH
 				w.WriteError("ERR syntax error")
+
 				return
 			}
+
 			storeDist = true
 			i++
 		default:
 			w.WriteError("ERR syntax error")
+
 			return
 		}
 	}
@@ -397,40 +461,52 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 	// Validate required options
 	if !hasFromMember && !hasFromLonLat {
 		w.WriteError("ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH")
+
 		return
 	}
+
 	if hasFromMember && hasFromLonLat {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
+
 	if !hasRadius && !hasBox {
 		w.WriteError("ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH")
+
 		return
 	}
+
 	if hasRadius && hasBox {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	// ANY requires COUNT
 	if countAny && count == 0 {
 		w.WriteError("ERR the ANY option requires the COUNT option")
+
 		return
 	}
 
 	// Cannot use WITH* options with STORE
 	if isStore && (withCoord || withDist || withHash) {
 		w.WriteError("ERR STORE option cannot be combined with WITHCOORD, WITHDIST, or WITHHASH")
+
 		return
 	}
 
 	snap, exists, wrongType, err := getGeoSnapshot(cmd, key)
 	if err != nil {
 		w.WriteError(err.Error())
+
 		return
 	}
+
 	if wrongType {
 		w.WriteWrongType()
+
 		return
 	}
 
@@ -438,12 +514,15 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 		if isStore {
 			if err := emitGeoDeleteKey(cmd, destKey); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			w.WriteInteger(0)
 		} else {
 			w.WriteArray(0)
 		}
+
 		return
 	}
 
@@ -452,8 +531,10 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 		score, found := geoMemberScore(snap, fromMember)
 		if !found {
 			w.WriteError("ERR could not decode requested zset member")
+
 			return
 		}
+
 		fromLon, fromLat = geoHashDecode(uint64(score))
 	}
 
@@ -515,8 +596,10 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 			// Delete existing dest key first
 			if err := emitGeoDeleteKey(cmd, destKey); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			for _, entry := range results {
 				var score float64
 				if storeDist {
@@ -524,36 +607,46 @@ func geoSearch(cmd *shared.Command, w *shared.Writer, destKey string, isStore bo
 				} else {
 					score = float64(entry.Hash)
 				}
+
 				if err := emitGeoInsert(cmd, destKey, entry.Member, score); err != nil {
 					w.WriteError(err.Error())
+
 					return
 				}
 			}
+
 			if err := emitGeoTypeTag(cmd, destKey); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		} else {
 			if err := emitGeoDeleteKey(cmd, destKey); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		w.WriteInteger(int64(len(results)))
+
 		return
 	}
 
 	// Write results
 	w.WriteArray(len(results))
+
 	for _, entry := range results {
 		// Calculate how many fields to return
 		fieldCount := 1 // member name
 		if withDist {
 			fieldCount++
 		}
+
 		if withHash {
 			fieldCount++
 		}
+
 		if withCoord {
 			fieldCount++
 		}

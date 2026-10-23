@@ -36,10 +36,12 @@ func BenchmarkHandler_Set(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -57,11 +59,13 @@ func BenchmarkHandler_Get(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 10000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -73,8 +77,10 @@ func BenchmarkHandler_Get(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdGet,
 			Args: [][]byte{fmt.Appendf(nil, "key%d", i%10000)},
@@ -91,10 +97,12 @@ func BenchmarkHandler_LPush(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdLPush,
 			Args: [][]byte{
@@ -112,10 +120,12 @@ func BenchmarkHandler_RPush(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -133,11 +143,13 @@ func BenchmarkHandler_LPop(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 100000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -149,8 +161,10 @@ func BenchmarkHandler_LPop(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdLPop,
 			Args: [][]byte{[]byte("mylist")},
@@ -165,11 +179,13 @@ func BenchmarkHandler_RPop(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 100000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -181,8 +197,10 @@ func BenchmarkHandler_RPop(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPop,
 			Args: [][]byte{[]byte("mylist")},
@@ -197,11 +215,13 @@ func BenchmarkHandler_LRange(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 1000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -213,8 +233,10 @@ func BenchmarkHandler_LRange(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdLRange,
 			Args: [][]byte{[]byte("mylist"), []byte("0"), []byte("99")},
@@ -229,11 +251,13 @@ func BenchmarkHandler_LIndex(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 1000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -245,8 +269,10 @@ func BenchmarkHandler_LIndex(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdLIndex,
 			Args: [][]byte{[]byte("mylist"), fmt.Appendf(nil, "%d", i%1000)},
@@ -263,10 +289,12 @@ func BenchmarkHandler_HSet(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHSet,
 			Args: [][]byte{
@@ -285,11 +313,13 @@ func BenchmarkHandler_HGet(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 1000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHSet,
 			Args: [][]byte{
@@ -302,8 +332,10 @@ func BenchmarkHandler_HGet(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHGet,
 			Args: [][]byte{
@@ -321,11 +353,13 @@ func BenchmarkHandler_HGetAll(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 100 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHSet,
 			Args: [][]byte{
@@ -338,8 +372,10 @@ func BenchmarkHandler_HGetAll(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHGetAll,
 			Args: [][]byte{[]byte("myhash")},
@@ -354,10 +390,12 @@ func BenchmarkHandler_HIncrBy(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Setup counter
 	w.Buffer().Reset()
+
 	cmd := &shared.Command{
 		Type: shared.CmdHSet,
 		Args: [][]byte{[]byte("myhash"), []byte("counter"), []byte("0")},
@@ -365,8 +403,10 @@ func BenchmarkHandler_HIncrBy(b *testing.B) {
 	h.ExecuteInto(cmd, w, conn)
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdHIncrBy,
 			Args: [][]byte{[]byte("myhash"), []byte("counter"), []byte("1")},
@@ -383,10 +423,12 @@ func BenchmarkHandler_Incr(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Setup counter
 	w.Buffer().Reset()
+
 	cmd := &shared.Command{
 		Type: shared.CmdSet,
 		Args: [][]byte{[]byte("counter"), []byte("0")},
@@ -394,8 +436,10 @@ func BenchmarkHandler_Incr(b *testing.B) {
 	h.ExecuteInto(cmd, w, conn)
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdIncr,
 			Args: [][]byte{[]byte("counter")},
@@ -410,10 +454,12 @@ func BenchmarkHandler_IncrBy(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Setup counter
 	w.Buffer().Reset()
+
 	cmd := &shared.Command{
 		Type: shared.CmdSet,
 		Args: [][]byte{[]byte("counter"), []byte("0")},
@@ -421,8 +467,10 @@ func BenchmarkHandler_IncrBy(b *testing.B) {
 	h.ExecuteInto(cmd, w, conn)
 
 	b.ResetTimer()
+
 	for b.Loop() {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdIncrBy,
 			Args: [][]byte{[]byte("counter"), []byte("10")},
@@ -439,11 +487,13 @@ func BenchmarkHandler_Mixed(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// Populate
 	for i := range 10000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -455,8 +505,10 @@ func BenchmarkHandler_Mixed(b *testing.B) {
 	}
 
 	b.ResetTimer()
+
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		if i%5 == 0 {
 			// 20% SET
 			cmd := &shared.Command{
@@ -487,10 +539,13 @@ func BenchmarkHandler_SetParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		w := shared.GetWriter()
 		defer shared.PutWriter(w)
+
 		conn := newEffectsConn(h)
 		i := 0
+
 		for pb.Next() {
 			w.Buffer().Reset()
+
 			cmd := &shared.Command{
 				Type: shared.CmdSet,
 				Args: [][]byte{
@@ -499,6 +554,7 @@ func BenchmarkHandler_SetParallel(b *testing.B) {
 				},
 			}
 			h.ExecuteInto(cmd, w, conn)
+
 			i++
 		}
 	})
@@ -514,6 +570,7 @@ func BenchmarkHandler_GetParallel(b *testing.B) {
 	// Populate
 	for i := range 10000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -523,21 +580,26 @@ func BenchmarkHandler_GetParallel(b *testing.B) {
 		}
 		h.ExecuteInto(cmd, w, conn)
 	}
+
 	shared.PutWriter(w)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		localW := shared.GetWriter()
 		defer shared.PutWriter(localW)
+
 		localConn := newEffectsConn(h)
 		i := 0
+
 		for pb.Next() {
 			localW.Buffer().Reset()
+
 			cmd := &shared.Command{
 				Type: shared.CmdGet,
 				Args: [][]byte{fmt.Appendf(nil, "key%d", i%10000)},
 			}
 			h.ExecuteInto(cmd, localW, localConn)
+
 			i++
 		}
 	})
@@ -550,10 +612,13 @@ func BenchmarkHandler_LPushParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		w := shared.GetWriter()
 		defer shared.PutWriter(w)
+
 		conn := newEffectsConn(h)
 		i := 0
+
 		for pb.Next() {
 			w.Buffer().Reset()
+
 			cmd := &shared.Command{
 				Type: shared.CmdLPush,
 				Args: [][]byte{
@@ -562,6 +627,7 @@ func BenchmarkHandler_LPushParallel(b *testing.B) {
 				},
 			}
 			h.ExecuteInto(cmd, w, conn)
+
 			i++
 		}
 	})
@@ -577,6 +643,7 @@ func BenchmarkHandler_LPopParallel(b *testing.B) {
 	// Pre-populate list with many elements
 	for i := range 100000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -586,15 +653,19 @@ func BenchmarkHandler_LPopParallel(b *testing.B) {
 		}
 		h.ExecuteInto(cmd, w, conn)
 	}
+
 	shared.PutWriter(w)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		localW := shared.GetWriter()
 		defer shared.PutWriter(localW)
+
 		localConn := newEffectsConn(h)
+
 		for pb.Next() {
 			localW.Buffer().Reset()
+
 			cmd := &shared.Command{
 				Type: shared.CmdLPop,
 				Args: [][]byte{[]byte("mylist")},
@@ -614,6 +685,7 @@ func BenchmarkHandler_RPopParallel(b *testing.B) {
 	// Pre-populate list with many elements
 	for i := range 100000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdRPush,
 			Args: [][]byte{
@@ -623,15 +695,19 @@ func BenchmarkHandler_RPopParallel(b *testing.B) {
 		}
 		h.ExecuteInto(cmd, w, conn)
 	}
+
 	shared.PutWriter(w)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		localW := shared.GetWriter()
 		defer shared.PutWriter(localW)
+
 		localConn := newEffectsConn(h)
+
 		for pb.Next() {
 			localW.Buffer().Reset()
+
 			cmd := &shared.Command{
 				Type: shared.CmdRPop,
 				Args: [][]byte{[]byte("mylist")},
@@ -651,6 +727,7 @@ func BenchmarkHandler_MixedParallel(b *testing.B) {
 	// Populate
 	for i := range 10000 {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -660,16 +737,20 @@ func BenchmarkHandler_MixedParallel(b *testing.B) {
 		}
 		h.ExecuteInto(cmd, w, conn)
 	}
+
 	shared.PutWriter(w)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		localW := shared.GetWriter()
 		defer shared.PutWriter(localW)
+
 		localConn := newEffectsConn(h)
 		i := 0
+
 		for pb.Next() {
 			localW.Buffer().Reset()
+
 			if i%5 == 0 {
 				// 20% SET
 				cmd := &shared.Command{
@@ -688,6 +769,7 @@ func BenchmarkHandler_MixedParallel(b *testing.B) {
 				}
 				h.ExecuteInto(cmd, localW, localConn)
 			}
+
 			i++
 		}
 	})
@@ -701,6 +783,7 @@ func BenchmarkHandler_SetLargeValue(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	largeValue := make([]byte, 10*1024) // 10KB value
@@ -710,6 +793,7 @@ func BenchmarkHandler_SetLargeValue(b *testing.B) {
 
 	for i := 0; b.Loop(); i++ {
 		w.Buffer().Reset()
+
 		cmd := &shared.Command{
 			Type: shared.CmdSet,
 			Args: [][]byte{
@@ -727,14 +811,17 @@ func BenchmarkParser_Set(b *testing.B) {
 	input := []byte("*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n")
 	reader := bytes.NewReader(input)
 	parser := shared.NewParserWithReader(bufio.NewReaderSize(reader, 4096))
+
 	cmd := shared.GetCommand()
 	defer shared.PutCommand(cmd)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
+
 		if _, err := parser.ReadCommandInto(cmd); err != nil {
 			b.Fatal(err)
 		}
@@ -745,14 +832,17 @@ func BenchmarkParser_Get(b *testing.B) {
 	input := []byte("*2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n")
 	reader := bytes.NewReader(input)
 	parser := shared.NewParserWithReader(bufio.NewReaderSize(reader, 4096))
+
 	cmd := shared.GetCommand()
 	defer shared.PutCommand(cmd)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
+
 		if _, err := parser.ReadCommandInto(cmd); err != nil {
 			b.Fatal(err)
 		}
@@ -763,14 +853,17 @@ func BenchmarkParser_LPush(b *testing.B) {
 	input := []byte("*4\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$6\r\nvalue1\r\n$6\r\nvalue2\r\n")
 	reader := bytes.NewReader(input)
 	parser := shared.NewParserWithReader(bufio.NewReaderSize(reader, 4096))
+
 	cmd := shared.GetCommand()
 	defer shared.PutCommand(cmd)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		reader.Reset(input)
 		parser.Reset(reader)
 		cmd.Reset()
+
 		if _, err := parser.ReadCommandInto(cmd); err != nil {
 			b.Fatal(err)
 		}
@@ -784,6 +877,7 @@ func BenchmarkWriter_SimpleString(b *testing.B) {
 	defer shared.PutWriter(w)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		w.Buffer().Reset()
 		w.WriteSimpleString("OK")
@@ -793,9 +887,11 @@ func BenchmarkWriter_SimpleString(b *testing.B) {
 func BenchmarkWriter_BulkString(b *testing.B) {
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	data := []byte("Hello, World!")
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		w.Buffer().Reset()
 		w.WriteBulkString(data)
@@ -807,6 +903,7 @@ func BenchmarkWriter_Integer(b *testing.B) {
 	defer shared.PutWriter(w)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		w.Buffer().Reset()
 		w.WriteInteger(12345)
@@ -818,9 +915,11 @@ func BenchmarkWriter_Array(b *testing.B) {
 	defer shared.PutWriter(w)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		w.Buffer().Reset()
 		w.WriteArray(5)
+
 		for i := range 5 {
 			w.WriteBulkString(fmt.Appendf(nil, "element%d", i))
 		}
@@ -838,11 +937,13 @@ func BenchmarkHandler_LPush_LargeList(b *testing.B) {
 
 			w := shared.GetWriter()
 			defer shared.PutWriter(w)
+
 			conn := newEffectsConn(h)
 
 			// Pre-populate list
 			for i := range size {
 				w.Buffer().Reset()
+
 				cmd := &shared.Command{
 					Type: shared.CmdRPush,
 					Args: [][]byte{
@@ -854,8 +955,10 @@ func BenchmarkHandler_LPush_LargeList(b *testing.B) {
 			}
 
 			b.ResetTimer()
+
 			for i := 0; b.Loop(); i++ {
 				w.Buffer().Reset()
+
 				cmd := &shared.Command{
 					Type: shared.CmdLPush,
 					Args: [][]byte{
@@ -876,6 +979,7 @@ func BenchmarkHandler_MSet(b *testing.B) {
 
 	w := shared.GetWriter()
 	defer shared.PutWriter(w)
+
 	conn := newEffectsConn(h)
 
 	// MSET with 10 key-value pairs
@@ -891,6 +995,7 @@ func BenchmarkHandler_MSet(b *testing.B) {
 		for j := range 10 {
 			args[j*2] = fmt.Appendf(args[j*2][:0], "key%d_%d", j, i)
 		}
+
 		cmd := &shared.Command{
 			Type: shared.CmdMSet,
 			Args: args,

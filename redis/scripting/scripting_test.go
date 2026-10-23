@@ -29,6 +29,7 @@ func TestScriptRegistry(t *testing.T) {
 
 	// Test Load and Get
 	script := []byte("return 1")
+
 	sha := r.Load(script)
 	if sha == "" {
 		t.Error("Load returned empty SHA")
@@ -44,6 +45,7 @@ func TestScriptRegistry(t *testing.T) {
 	if !ok {
 		t.Error("Get returned false for loaded script")
 	}
+
 	if !bytes.Equal(got, script) {
 		t.Error("Get returned different script")
 	}
@@ -59,12 +61,14 @@ func TestScriptRegistry(t *testing.T) {
 	if !results[0] {
 		t.Error("Exists returned false for loaded script")
 	}
+
 	if results[1] {
 		t.Error("Exists returned true for unknown script")
 	}
 
 	// Test Flush
 	r.Flush()
+
 	_, ok = r.Get(sha)
 	if ok {
 		t.Error("Get returned true after Flush")
@@ -96,6 +100,7 @@ func TestLuaVMPool(t *testing.T) {
 	if L3 == nil {
 		t.Fatal("Get returned nil VM after Put")
 	}
+
 	pool.Put(L3)
 }
 
@@ -105,9 +110,11 @@ func TestFunctionRegistry(t *testing.T) {
 		if r == nil {
 			t.Fatal("NewFunctionRegistry returned nil")
 		}
+
 		if r.Count() != 0 {
 			t.Errorf("expected 0 functions, got %d", r.Count())
 		}
+
 		if r.LibraryCount() != 0 {
 			t.Errorf("expected 0 libraries, got %d", r.LibraryCount())
 		}
@@ -132,6 +139,7 @@ func TestFunctionRegistry(t *testing.T) {
 		if r.Count() != 1 {
 			t.Errorf("expected 1 function, got %d", r.Count())
 		}
+
 		if r.LibraryCount() != 1 {
 			t.Errorf("expected 1 library, got %d", r.LibraryCount())
 		}
@@ -140,9 +148,11 @@ func TestFunctionRegistry(t *testing.T) {
 		if funcDef == nil || lib2 == nil {
 			t.Fatal("GetFunction returned nil")
 		}
+
 		if funcDef.Name != "hello" {
 			t.Errorf("expected function name 'hello', got '%s'", funcDef.Name)
 		}
+
 		if lib2.Name != "mylib" {
 			t.Errorf("expected library name 'mylib', got '%s'", lib2.Name)
 		}
@@ -189,6 +199,7 @@ func TestFunctionRegistry(t *testing.T) {
 		if err := r.Load(lib, false); err != nil {
 			t.Fatal(err)
 		}
+
 		if r.LibraryCount() != 1 {
 			t.Errorf("expected 1 library, got %d", r.LibraryCount())
 		}
@@ -201,6 +212,7 @@ func TestFunctionRegistry(t *testing.T) {
 		if r.LibraryCount() != 0 {
 			t.Errorf("expected 0 libraries after delete, got %d", r.LibraryCount())
 		}
+
 		if r.Count() != 0 {
 			t.Errorf("expected 0 functions after delete, got %d", r.Count())
 		}
@@ -214,6 +226,7 @@ func TestFunctionRegistry(t *testing.T) {
 
 	t.Run("Flush", func(t *testing.T) {
 		r := NewFunctionRegistry()
+
 		for i := range 5 {
 			lib := &Library{
 				Name:   "lib" + string(rune('a'+i)),
@@ -236,6 +249,7 @@ func TestFunctionRegistry(t *testing.T) {
 		if r.LibraryCount() != 0 {
 			t.Errorf("expected 0 libraries after flush, got %d", r.LibraryCount())
 		}
+
 		if r.Count() != 0 {
 			t.Errorf("expected 0 functions after flush, got %d", r.Count())
 		}
@@ -243,6 +257,7 @@ func TestFunctionRegistry(t *testing.T) {
 
 	t.Run("List with pattern", func(t *testing.T) {
 		r := NewFunctionRegistry()
+
 		for _, name := range []string{"mylib", "mylib2", "otherlib"} {
 			lib := &Library{
 				Name:   name,
@@ -332,14 +347,18 @@ func TestParseShebang(t *testing.T) {
 				if err == nil {
 					t.Error("expected error, got nil")
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+
 			if engine != tt.wantEngine {
 				t.Errorf("expected engine '%s', got '%s'", tt.wantEngine, engine)
 			}
+
 			if libName != tt.wantLib {
 				t.Errorf("expected libName '%s', got '%s'", tt.wantLib, libName)
 			}

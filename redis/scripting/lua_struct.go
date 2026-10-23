@@ -57,6 +57,7 @@ func OpenStruct(L *lua.LState) int {
 	mod := L.NewTable()
 	L.SetFuncs(mod, structFuncs)
 	L.Push(mod)
+
 	return 1
 }
 
@@ -76,6 +77,7 @@ func (s *structState) getByteOrder() binary.ByteOrder {
 	if s.bigEndian {
 		return binary.BigEndian
 	}
+
 	return binary.LittleEndian
 }
 
@@ -88,8 +90,10 @@ func (s *structState) nextChar() (byte, bool) {
 		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 			continue
 		}
+
 		return c, true
 	}
+
 	return 0, false
 }
 
@@ -109,6 +113,7 @@ func (s *structState) readNumber(defaultVal int) int {
 		n = n*10 + int(s.fmt[s.pos]-'0')
 		s.pos++
 	}
+
 	return n
 }
 
@@ -117,6 +122,7 @@ func addPadding(buf []byte, align int) []byte {
 	if align <= 1 {
 		return buf
 	}
+
 	offset := len(buf) % align
 	if offset != 0 {
 		padding := align - offset
@@ -124,6 +130,7 @@ func addPadding(buf []byte, align int) []byte {
 			buf = append(buf, 0)
 		}
 	}
+
 	return buf
 }
 
@@ -132,10 +139,12 @@ func calcPadding(offset, align int) int {
 	if align <= 1 {
 		return 0
 	}
+
 	mod := offset % align
 	if mod != 0 {
 		return align - mod
 	}
+
 	return 0
 }
 
@@ -180,6 +189,7 @@ func structPack(L *lua.LState) int {
 			buf = addPadding(buf, min(state.align, 1))
 			val := L.CheckInt(argIdx)
 			argIdx++
+
 			buf = append(buf, byte(int8(val)))
 
 		case 'B':
@@ -187,6 +197,7 @@ func structPack(L *lua.LState) int {
 			buf = addPadding(buf, min(state.align, 1))
 			val := L.CheckInt(argIdx)
 			argIdx++
+
 			buf = append(buf, byte(val))
 
 		case 'h':
@@ -257,13 +268,16 @@ func structPack(L *lua.LState) int {
 			size := state.readNumber(4)
 			if size < 1 || size > 8 {
 				L.ArgError(1, "invalid integer size")
+
 				return 0
 			}
+
 			buf = addPadding(buf, min(state.align, size))
 			val := L.CheckInt64(argIdx)
 			argIdx++
 			tmp := make([]byte, 8)
 			state.getByteOrder().PutUint64(tmp, uint64(val))
+
 			if state.bigEndian {
 				buf = append(buf, tmp[8-size:]...)
 			} else {
@@ -292,6 +306,7 @@ func structPack(L *lua.LState) int {
 			// Zero-terminated string
 			str := L.CheckString(argIdx)
 			argIdx++
+
 			buf = append(buf, []byte(str)...)
 			buf = append(buf, 0)
 
@@ -303,14 +318,17 @@ func structPack(L *lua.LState) int {
 				// In pack, c0 means pack the entire string
 				str := L.CheckString(argIdx)
 				argIdx++
+
 				buf = append(buf, []byte(str)...)
 			} else {
 				str := L.CheckString(argIdx)
 				argIdx++
+
 				data := []byte(str)
 				if len(data) > size {
 					data = data[:size]
 				}
+
 				buf = append(buf, data...)
 				// Pad with zeros if string is shorter
 				for range size - len(data) {
@@ -320,11 +338,13 @@ func structPack(L *lua.LState) int {
 
 		default:
 			L.ArgError(1, "invalid format option '"+string(c)+"'")
+
 			return 0
 		}
 	}
 
 	L.Push(lua.LString(string(buf)))
+
 	return 1
 }
 
@@ -336,6 +356,7 @@ func structUnpack(L *lua.LState) int {
 
 	if pos < 0 || pos > len(data) {
 		L.ArgError(3, "initial position out of bounds")
+
 		return 0
 	}
 
@@ -347,6 +368,7 @@ func structUnpack(L *lua.LState) int {
 	}
 
 	var results []lua.LValue
+
 	var prevSize int // For c0
 
 	for {
@@ -374,8 +396,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 1))
 			if pos >= len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			results = append(results, lua.LNumber(int8(data[pos])))
 			pos++
 
@@ -384,8 +408,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 1))
 			if pos >= len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			results = append(results, lua.LNumber(data[pos]))
 			pos++
 
@@ -394,8 +420,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 2))
 			if pos+2 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint16(data[pos:])
 			results = append(results, lua.LNumber(int16(val)))
 			pos += 2
@@ -405,8 +433,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 2))
 			if pos+2 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint16(data[pos:])
 			results = append(results, lua.LNumber(val))
 			pos += 2
@@ -416,8 +446,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 4))
 			if pos+4 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint32(data[pos:])
 			results = append(results, lua.LNumber(int32(val)))
 			pos += 4
@@ -427,8 +459,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 4))
 			if pos+4 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint32(data[pos:])
 			results = append(results, lua.LNumber(val))
 			pos += 4
@@ -438,8 +472,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 8))
 			if pos+8 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint64(data[pos:])
 			results = append(results, lua.LNumber(int64(val)))
 			pos += 8
@@ -449,8 +485,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 8))
 			if pos+8 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint64(data[pos:])
 			results = append(results, lua.LNumber(val))
 			pos += 8
@@ -460,8 +498,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 8))
 			if pos+8 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			val := state.getByteOrder().Uint64(data[pos:])
 			results = append(results, lua.LNumber(val))
 			pos += 8
@@ -471,19 +511,24 @@ func structUnpack(L *lua.LState) int {
 			size := state.readNumber(4)
 			if size < 1 || size > 8 {
 				L.ArgError(1, "invalid integer size")
+
 				return 0
 			}
+
 			pos += calcPadding(pos, min(state.align, size))
 			if pos+size > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			tmp := make([]byte, 8)
 			if state.bigEndian {
 				copy(tmp[8-size:], data[pos:pos+size])
 			} else {
 				copy(tmp[:size], data[pos:pos+size])
 			}
+
 			val := state.getByteOrder().Uint64(tmp)
 			// Sign extend if necessary
 			if size < 8 {
@@ -493,6 +538,7 @@ func structUnpack(L *lua.LState) int {
 					val |= mask
 				}
 			}
+
 			results = append(results, lua.LNumber(int64(val)))
 			pos += size
 
@@ -501,19 +547,24 @@ func structUnpack(L *lua.LState) int {
 			size := state.readNumber(4)
 			if size < 1 || size > 8 {
 				L.ArgError(1, "invalid integer size")
+
 				return 0
 			}
+
 			pos += calcPadding(pos, min(state.align, size))
 			if pos+size > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			tmp := make([]byte, 8)
 			if state.bigEndian {
 				copy(tmp[8-size:], data[pos:pos+size])
 			} else {
 				copy(tmp[:size], data[pos:pos+size])
 			}
+
 			val := state.getByteOrder().Uint64(tmp)
 			results = append(results, lua.LNumber(val))
 			pos += size
@@ -523,8 +574,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 4))
 			if pos+4 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			bits := state.getByteOrder().Uint32(data[pos:])
 			results = append(results, lua.LNumber(math.Float32frombits(bits)))
 			pos += 4
@@ -534,8 +587,10 @@ func structUnpack(L *lua.LState) int {
 			pos += calcPadding(pos, min(state.align, 8))
 			if pos+8 > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			bits := state.getByteOrder().Uint64(data[pos:])
 			results = append(results, lua.LNumber(math.Float64frombits(bits)))
 			pos += 8
@@ -546,6 +601,7 @@ func structUnpack(L *lua.LState) int {
 			for pos < len(data) && data[pos] != 0 {
 				pos++
 			}
+
 			results = append(results, lua.LString(string(data[start:pos])))
 			if pos < len(data) {
 				pos++ // Skip the null terminator
@@ -558,15 +614,19 @@ func structUnpack(L *lua.LState) int {
 				// c0: use previous value as length
 				size = prevSize
 			}
+
 			if pos+size > len(data) {
 				L.ArgError(2, "data string too short")
+
 				return 0
 			}
+
 			results = append(results, lua.LString(string(data[pos:pos+size])))
 			pos += size
 
 		default:
 			L.ArgError(1, "invalid format option '"+string(c)+"'")
+
 			return 0
 		}
 
@@ -633,8 +693,10 @@ func structSize(L *lua.LState) int {
 			n := state.readNumber(4)
 			if n < 1 || n > 8 {
 				L.ArgError(1, "invalid integer size")
+
 				return 0
 			}
+
 			size += calcPadding(size, min(state.align, n))
 			size += n
 
@@ -648,23 +710,28 @@ func structSize(L *lua.LState) int {
 
 		case 's':
 			L.ArgError(1, "variable-size format 's' not allowed in struct.size")
+
 			return 0
 
 		case 'c':
 			n := state.readNumber(1)
 			if n == 0 {
 				L.ArgError(1, "variable-size format 'c0' not allowed in struct.size")
+
 				return 0
 			}
+
 			size += n
 
 		default:
 			L.ArgError(1, "invalid format option '"+string(c)+"'")
+
 			return 0
 		}
 	}
 
 	L.Push(lua.LNumber(size))
+
 	return 1
 }
 

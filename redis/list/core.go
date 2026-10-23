@@ -40,19 +40,24 @@ func getListSnapshot(cmd *shared.Command, key string) (snap *pb.ReducedEffect, t
 	if err != nil {
 		return nil, nil, false, false, err
 	}
-	if snap == nil || snap.Op == pb.EffectOp_REMOVE_OP {
+
+	if snap == nil || snap.GetOp() == pb.EffectOp_REMOVE_OP {
 		return nil, tips, false, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_ORDERED {
+
+	if snap.GetCollection() == pb.CollectionKind_ORDERED {
 		// Only accept ORDERED collections that are actually lists (or untagged legacy data)
-		if snap.TypeTag != pb.ValueType_TYPE_LIST && snap.TypeTag != pb.ValueType_TYPE_UNSPECIFIED {
+		if snap.GetTypeTag() != pb.ValueType_TYPE_LIST && snap.GetTypeTag() != pb.ValueType_TYPE_UNSPECIFIED {
 			return nil, tips, true, true, nil
 		}
+
 		return snap, tips, true, false, nil
 	}
-	if snap.Collection == pb.CollectionKind_SCALAR && snap.TypeTag == pb.ValueType_TYPE_LIST {
+
+	if snap.GetCollection() == pb.CollectionKind_SCALAR && snap.GetTypeTag() == pb.ValueType_TYPE_LIST {
 		return snap, tips, true, false, nil
 	}
+
 	return nil, tips, true, true, nil
 }
 
@@ -76,6 +81,7 @@ func emitListInsert(cmd *shared.Command, key string, placement pb.Placement, val
 func emitListInsertAt(cmd *shared.Command, key string, placement pb.Placement, value []byte, referenceID []byte) error {
 	hlc := shared.NextHLC()
 	id := shared.EncodeElementID(hlc, shared.EffectsNodeID)
+
 	return cmd.Context.Emit(&pb.Effect{
 		Key: []byte(key),
 		Kind: &pb.Effect_Data{Data: &pb.DataEffect{
@@ -126,6 +132,7 @@ func emitListTypeTag(cmd *shared.Command, key string) error {
 func handleLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("lpush")
+
 		return
 	}
 
@@ -138,16 +145,20 @@ func handleLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		for _, elem := range elements {
 			if err := emitListInsert(cmd, key, pb.Placement_PLACE_HEAD, elem); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -155,22 +166,26 @@ func handleLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		if !exists {
 			if err := emitListTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		currentLen := 0
 		if snap != nil {
-			currentLen = len(snap.OrderedElements)
+			currentLen = len(snap.GetOrderedElements())
 		}
+
 		w.WriteInteger(int64(currentLen + len(elements)))
 	}
+
 	return
 }
 
 func handleLPushX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("lpushx")
+
 		return
 	}
 
@@ -183,32 +198,40 @@ func handleLPushX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		for _, elem := range elements {
 			if err := emitListInsert(cmd, key, pb.Placement_PLACE_HEAD, elem); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
-		w.WriteInteger(int64(len(snap.OrderedElements) + len(elements)))
+		w.WriteInteger(int64(len(snap.GetOrderedElements()) + len(elements)))
 	}
+
 	return
 }
 
 func handleRPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("rpush")
+
 		return
 	}
 
@@ -221,16 +244,20 @@ func handleRPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		for _, elem := range elements {
 			if err := emitListInsert(cmd, key, pb.Placement_PLACE_TAIL, elem); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
@@ -238,22 +265,26 @@ func handleRPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		if !exists {
 			if err := emitListTypeTag(cmd, key); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		currentLen := 0
 		if snap != nil {
-			currentLen = len(snap.OrderedElements)
+			currentLen = len(snap.GetOrderedElements())
 		}
+
 		w.WriteInteger(int64(currentLen + len(elements)))
 	}
+
 	return
 }
 
 func handleRPushX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("rpushx")
+
 		return
 	}
 
@@ -266,32 +297,40 @@ func handleRPushX(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		for _, elem := range elements {
 			if err := emitListInsert(cmd, key, pb.Placement_PLACE_TAIL, elem); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
-		w.WriteInteger(int64(len(snap.OrderedElements) + len(elements)))
+		w.WriteInteger(int64(len(snap.GetOrderedElements()) + len(elements)))
 	}
+
 	return
 }
 
 func handleLPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("lpop")
+
 		return
 	}
 
@@ -299,13 +338,16 @@ func handleLPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 	// Parse optional count argument
 	count := 1
+
 	hasCountArg := len(cmd.Args) > 1
 	if hasCountArg {
 		c, ok := shared.ParseInt64(cmd.Args[1])
 		if !ok || c < 0 {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		count = int(c)
 	}
 
@@ -316,55 +358,66 @@ func handleLPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
-		if !exists || len(snap.OrderedElements) == 0 {
+
+		if !exists || len(snap.GetOrderedElements()) == 0 {
 			if hasCountArg {
 				w.WriteNullArray()
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		elements := snap.GetOrderedElements()
 		n := min(count, len(elements))
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		for i := range n {
-			if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
+			if err := emitListRemove(cmd, key, elements[i].GetData().GetId()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		if count == 1 && !hasCountArg {
-			w.WriteBulkString(elements[0].Data.Decompress())
+			w.WriteBulkString(elements[0].GetData().Decompress())
 		} else {
 			w.WriteArray(n)
+
 			for i := range n {
-				w.WriteBulkString(elements[i].Data.Decompress())
+				w.WriteBulkString(elements[i].GetData().Decompress())
 			}
 		}
 	}
+
 	return
 }
 
 func handleRPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 || len(cmd.Args) > 2 {
 		w.WriteWrongNumArguments("rpop")
+
 		return
 	}
 
@@ -372,13 +425,16 @@ func handleRPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 	// Parse optional count argument
 	count := 1
+
 	hasCountArg := len(cmd.Args) > 1
 	if hasCountArg {
 		c, ok := shared.ParseInt64(cmd.Args[1])
 		if !ok || c < 0 {
 			w.WriteNotInteger()
+
 			return
 		}
+
 		count = int(c)
 	}
 
@@ -389,56 +445,67 @@ func handleRPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
-		if !exists || len(snap.OrderedElements) == 0 {
+
+		if !exists || len(snap.GetOrderedElements()) == 0 {
 			if hasCountArg {
 				w.WriteNullArray()
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		elements := snap.GetOrderedElements()
 		n := min(count, len(elements))
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
 
 		for i := range n {
 			idx := len(elements) - 1 - i
-			if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
+			if err := emitListRemove(cmd, key, elements[idx].GetData().GetId()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
 
 		if count == 1 && !hasCountArg {
-			w.WriteBulkString(elements[len(elements)-1].Data.Decompress())
+			w.WriteBulkString(elements[len(elements)-1].GetData().Decompress())
 		} else {
 			w.WriteArray(n)
+
 			for i := range n {
-				w.WriteBulkString(elements[len(elements)-1-i].Data.Decompress())
+				w.WriteBulkString(elements[len(elements)-1-i].GetData().Decompress())
 			}
 		}
 	}
+
 	return
 }
 
 func handleLLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 1 {
 		w.WriteWrongNumArguments("llen")
+
 		return
 	}
 
@@ -450,32 +517,42 @@ func handleLLen(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
-		w.WriteInteger(int64(len(snap.OrderedElements)))
+
+		w.WriteInteger(int64(len(snap.GetOrderedElements())))
 	}
+
 	return
 }
 
 func handleLRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("lrange")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	start, ok1 := shared.ParseInt64(cmd.Args[1])
+
 	stop, ok2 := shared.ParseInt64(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -486,21 +563,28 @@ func handleLRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
-			return
-		}
-		if !exists {
-			w.WriteArray(0)
-			return
-		}
-		if wrongType {
-			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		if !exists {
+			w.WriteArray(0)
+
+			return
+		}
+
+		if wrongType {
+			w.WriteWrongType()
+
+			return
+		}
+
+		elements := snap.GetOrderedElements()
+
 		listLen := len(elements)
 		if listLen == 0 {
 			w.WriteArray(0)
+
 			return
 		}
 
@@ -508,39 +592,49 @@ func handleLRange(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		if s < 0 {
 			s = listLen + s
 		}
+
 		if e < 0 {
 			e = listLen + e
 		}
+
 		if s < 0 {
 			s = 0
 		}
+
 		if e >= listLen {
 			e = listLen - 1
 		}
+
 		if s > e {
 			w.WriteArray(0)
+
 			return
 		}
 
 		result := elements[s : e+1]
 		w.WriteArray(len(result))
+
 		for _, elem := range result {
-			w.WriteBulkString(elem.Data.Decompress())
+			w.WriteBulkString(elem.GetData().Decompress())
 		}
 	}
+
 	return
 }
 
 func handleLIndex(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("lindex")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	index, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -551,44 +645,58 @@ func handleLIndex(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
-			return
-		}
-		if !exists {
-			w.WriteNullBulkString()
-			return
-		}
-		if wrongType {
-			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		if !exists {
+			w.WriteNullBulkString()
+
+			return
+		}
+
+		if wrongType {
+			w.WriteWrongType()
+
+			return
+		}
+
+		elements := snap.GetOrderedElements()
 		listLen := len(elements)
+
 		idx := int(index)
 		if idx < 0 {
 			idx = listLen + idx
 		}
+
 		if idx < 0 || idx >= listLen {
 			w.WriteNullBulkString()
+
 			return
 		}
-		w.WriteBulkString(elements[idx].Data.Decompress())
+
+		w.WriteBulkString(elements[idx].GetData().Decompress())
 	}
+
 	return
 }
 
 func handleLSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("lset")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	index, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	value := cmd.Args[2]
 
 	keys = []string{key}
@@ -598,58 +706,77 @@ func handleLSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
-			return
-		}
-		if !exists {
-			w.WriteError("ERR no such key")
-			return
-		}
-		if wrongType {
-			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		if !exists {
+			w.WriteError("ERR no such key")
+
+			return
+		}
+
+		if wrongType {
+			w.WriteWrongType()
+
+			return
+		}
+
+		elements := snap.GetOrderedElements()
 		listLen := len(elements)
+
 		idx := int(index)
 		if idx < 0 {
 			idx = listLen + idx
 		}
+
 		if idx < 0 || idx >= listLen {
 			w.WriteOutOfRange()
+
 			return
 		}
 
-		elementID := elements[idx].Data.Id
+		elementID := elements[idx].GetData().GetId()
+
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitListUpdate(cmd, key, elementID, value); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("lrem")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
+
 	count, ok := shared.ParseInt64(cmd.Args[1])
 	if !ok {
 		w.WriteNotInteger()
+
 		return
 	}
+
 	element := cmd.Args[2]
 
 	keys = []string{key}
@@ -659,23 +786,29 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		elements := snap.GetOrderedElements()
 
 		var toRemove []*pb.ReducedElement
+
 		if count > 0 {
 			for _, elem := range elements {
-				if bytes.Equal(elem.Data.Decompress(), element) {
+				if bytes.Equal(elem.GetData().Decompress(), element) {
 					toRemove = append(toRemove, elem)
 					if int64(len(toRemove)) >= count {
 						break
@@ -684,7 +817,7 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		} else if count < 0 {
 			for _, element0 := range slices.Backward(elements) {
-				if bytes.Equal(element0.Data.Decompress(), element) {
+				if bytes.Equal(element0.GetData().Decompress(), element) {
 					toRemove = append(toRemove, element0)
 					if int64(len(toRemove)) >= -count {
 						break
@@ -693,7 +826,7 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		} else {
 			for _, elem := range elements {
-				if bytes.Equal(elem.Data.Decompress(), element) {
+				if bytes.Equal(elem.GetData().Decompress(), element) {
 					toRemove = append(toRemove, elem)
 				}
 			}
@@ -701,39 +834,49 @@ func handleLRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 		if len(toRemove) == 0 {
 			w.WriteZero()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		for _, elem := range toRemove {
-			if err := emitListRemove(cmd, key, elem.Data.Id); err != nil {
+			if err := emitListRemove(cmd, key, elem.GetData().GetId()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		w.WriteInteger(int64(len(toRemove)))
 	}
+
 	return
 }
 
 func handleLTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 3 {
 		w.WriteWrongNumArguments("ltrim")
+
 		return
 	}
 
 	key := string(cmd.Args[0])
 	start, ok1 := shared.ParseInt64(cmd.Args[1])
+
 	stop, ok2 := shared.ParseInt64(cmd.Args[2])
 	if !ok1 || !ok2 {
 		w.WriteNotInteger()
+
 		return
 	}
 
@@ -744,36 +887,46 @@ func handleLTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
-			return
-		}
-		if !exists {
-			w.WriteOK()
-			return
-		}
-		if wrongType {
-			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		if !exists {
+			w.WriteOK()
+
+			return
+		}
+
+		if wrongType {
+			w.WriteWrongType()
+
+			return
+		}
+
+		elements := snap.GetOrderedElements()
 		listLen := len(elements)
 
 		s := int(start)
 		e := int(stop)
+
 		if s < 0 {
 			s = listLen + s
 		}
+
 		if e < 0 {
 			e = listLen + e
 		}
+
 		if s < 0 {
 			s = 0
 		}
+
 		if e >= listLen {
 			e = listLen - 1
 		}
 
 		var toRemove []*pb.ReducedElement
+
 		for i, elem := range elements {
 			if i < s || i > e {
 				toRemove = append(toRemove, elem)
@@ -782,31 +935,39 @@ func handleLTrim(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 		if len(toRemove) == 0 {
 			w.WriteOK()
+
 			return
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		for _, elem := range toRemove {
-			if err := emitListRemove(cmd, key, elem.Data.Id); err != nil {
+			if err := emitListRemove(cmd, key, elem.GetData().GetId()); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 		}
+
 		w.WriteOK()
 	}
+
 	return
 }
 
 func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 4 {
 		w.WriteWrongNumArguments("linsert")
+
 		return
 	}
 
@@ -816,6 +977,7 @@ func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 	element := cmd.Args[3]
 
 	var before bool
+
 	switch string(position) {
 	case "BEFORE":
 		before = true
@@ -823,6 +985,7 @@ func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		before = false
 	default:
 		w.WriteSyntaxError()
+
 		return
 	}
 
@@ -833,26 +996,35 @@ func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		snap, tips, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			w.WriteZero()
+
 			return
 		}
+
 		if wrongType {
 			w.WriteWrongType()
+
 			return
 		}
 
 		var pivotID []byte
-		for _, elem := range snap.OrderedElements {
-			if bytes.Equal(elem.Data.Decompress(), pivot) {
-				pivotID = elem.Data.Id
+
+		for _, elem := range snap.GetOrderedElements() {
+			if bytes.Equal(elem.GetData().Decompress(), pivot) {
+				pivotID = elem.GetData().GetId()
+
 				break
 			}
 		}
+
 		if pivotID == nil {
 			w.WriteInteger(-1)
+
 			return
 		}
 
@@ -862,25 +1034,32 @@ func handleLInsert(cmd *shared.Command, w *shared.Writer, db *shared.Database) (
 		}
 
 		cmd.Context.BeginTx()
+
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if err := emitListInsertAt(cmd, key, placement, element, pivotID); err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
-		w.WriteInteger(int64(len(snap.OrderedElements) + 1))
+
+		w.WriteInteger(int64(len(snap.GetOrderedElements()) + 1))
 	}
+
 	return
 }
 
 func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 2 {
 		w.WriteWrongNumArguments("lpos")
+
 		return
 	}
 
@@ -900,50 +1079,69 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		case "RANK":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			r, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok {
 				w.WriteError("ERR value is not an integer or out of range")
+
 				return
 			}
+
 			if r == 0 {
 				w.WriteError("ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list")
+
 				return
 			}
 			// Check for overflow: -MinInt64 overflows to MinInt64
 			if r == math.MinInt64 {
 				w.WriteError("ERR value is out of range")
+
 				return
 			}
+
 			rank = int(r)
 		case optionCount:
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			c, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || c < 0 {
 				w.WriteError("ERR COUNT can't be negative")
+
 				return
 			}
+
 			count = int(c)
 		case "MAXLEN":
 			if i+1 >= len(cmd.Args) {
 				w.WriteSyntaxError()
+
 				return
 			}
+
 			i++
+
 			m, ok := shared.ParseInt64(cmd.Args[i])
 			if !ok || m < 0 {
 				w.WriteError("ERR MAXLEN can't be negative")
+
 				return
 			}
+
 			maxlen = int(m)
 		default:
 			w.WriteSyntaxError()
+
 			return
 		}
 	}
@@ -955,22 +1153,28 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		snap, _, exists, wrongType, err := getListSnapshot(cmd, key)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !exists {
 			if count >= 0 {
 				w.WriteArray(0)
 			} else {
 				w.WriteNullBulkString()
 			}
-			return
-		}
-		if wrongType {
-			w.WriteWrongType()
+
 			return
 		}
 
-		elements := snap.OrderedElements
+		if wrongType {
+			w.WriteWrongType()
+
+			return
+		}
+
+		elements := snap.GetOrderedElements()
+
 		listLen := len(elements)
 		if listLen == 0 {
 			if count >= 0 {
@@ -978,15 +1182,18 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
 
 		// Determine search direction and starting point based on RANK
 		var matches []int64
+
 		matchesNeeded := count
 		if matchesNeeded == 0 {
 			matchesNeeded = listLen // COUNT 0 means return all matches
 		}
+
 		if count < 0 {
 			matchesNeeded = 1 // No COUNT specified, just need one match
 		}
@@ -1000,19 +1207,23 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		comparisons := 0
+
 		if rank > 0 {
 			// Search from head to tail
 			for idx := range listLen {
 				if maxlen > 0 && comparisons >= maxlen {
 					break
 				}
+
 				comparisons++
 
-				if bytes.Equal(elements[idx].Data.Decompress(), element) {
+				if bytes.Equal(elements[idx].GetData().Decompress(), element) {
 					if skipCount > 0 {
 						skipCount--
+
 						continue
 					}
+
 					matches = append(matches, int64(idx))
 					if len(matches) >= matchesNeeded {
 						break
@@ -1025,13 +1236,16 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				if maxlen > 0 && comparisons >= maxlen {
 					break
 				}
+
 				comparisons++
 
-				if bytes.Equal(elements[idx].Data.Decompress(), element) {
+				if bytes.Equal(elements[idx].GetData().Decompress(), element) {
 					if skipCount > 0 {
 						skipCount--
+
 						continue
 					}
+
 					matches = append(matches, int64(idx))
 					if len(matches) >= matchesNeeded {
 						break
@@ -1044,6 +1258,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		if count >= 0 {
 			// COUNT was specified, return array
 			w.WriteArray(len(matches))
+
 			for _, pos := range matches {
 				w.WriteInteger(pos)
 			}
@@ -1056,6 +1271,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 			}
 		}
 	}
+
 	return
 }
 
@@ -1064,6 +1280,7 @@ func handleLPos(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 3 {
 		w.WriteWrongNumArguments("lmpop")
+
 		return
 	}
 
@@ -1071,12 +1288,14 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	numKeys, ok := shared.ParseInt64(cmd.Args[0])
 	if !ok || numKeys < 1 {
 		w.WriteError("ERR numkeys should be greater than 0")
+
 		return
 	}
 
 	// Check we have enough args: numkeys + keys + direction
 	if len(cmd.Args) < int(numKeys)+2 {
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -1089,7 +1308,9 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 	// Parse direction (LEFT or RIGHT)
 	dirIdx := int(numKeys) + 1
 	direction := shared.ToUpper(cmd.Args[dirIdx])
+
 	var left bool
+
 	switch string(direction) {
 	case directionLeft:
 		left = true
@@ -1097,25 +1318,33 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		left = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
 	// Parse optional COUNT
 	count := int64(1)
+
 	if len(cmd.Args) > dirIdx+1 {
 		if len(cmd.Args) != dirIdx+3 {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		countArg := shared.ToUpper(cmd.Args[dirIdx+1])
 		if string(countArg) != optionCount {
 			w.WriteError("ERR syntax error")
+
 			return
 		}
+
 		var ok bool
+
 		count, ok = shared.ParseInt64(cmd.Args[dirIdx+2])
 		if !ok || count < 1 {
 			w.WriteError("ERR count should be greater than 0")
+
 			return
 		}
 	}
@@ -1129,10 +1358,13 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			_, _, exists, wrongType, err := getListSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
+
 			if exists && wrongType {
 				w.WriteWrongType()
+
 				return
 			}
 		}
@@ -1142,39 +1374,46 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			snap, tips, exists, _, err := getListSnapshot(cmd, key)
 			if err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
-			if !exists || len(snap.OrderedElements) == 0 {
+
+			if !exists || len(snap.GetOrderedElements()) == 0 {
 				continue
 			}
 
-			elements := snap.OrderedElements
+			elements := snap.GetOrderedElements()
 			n := min(int(count), len(elements))
 
 			cmd.Context.BeginTx()
+
 			if err := cmd.Context.Emit(&pb.Effect{
 				Key:  []byte(key),
 				Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 			}, tips); err != nil {
 				w.WriteError(err.Error())
+
 				return
 			}
 
 			popped := make([][]byte, n)
 			if left {
 				for i := range n {
-					popped[i] = elements[i].Data.Decompress()
-					if err := emitListRemove(cmd, key, elements[i].Data.Id); err != nil {
+					popped[i] = elements[i].GetData().Decompress()
+					if err := emitListRemove(cmd, key, elements[i].GetData().GetId()); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
 			} else {
 				for i := range n {
 					idx := len(elements) - 1 - i
-					popped[i] = elements[idx].Data.Decompress()
-					if err := emitListRemove(cmd, key, elements[idx].Data.Id); err != nil {
+
+					popped[i] = elements[idx].GetData().Decompress()
+					if err := emitListRemove(cmd, key, elements[idx].GetData().GetId()); err != nil {
 						w.WriteError(err.Error())
+
 						return
 					}
 				}
@@ -1183,14 +1422,17 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			w.WriteArray(2)
 			w.WriteBulkStringStr(key)
 			w.WriteArray(n)
+
 			for _, elem := range popped {
 				w.WriteBulkString(elem)
 			}
+
 			return
 		}
 
 		w.WriteNullArray()
 	}
+
 	return
 }
 
@@ -1199,6 +1441,7 @@ func handleLMPop(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 4 {
 		w.WriteWrongNumArguments("lmove")
+
 		return
 	}
 
@@ -1209,6 +1452,7 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 
 	// Parse directions
 	var popLeft, pushLeft bool
+
 	switch string(whereFrom) {
 	case directionLeft:
 		popLeft = true
@@ -1216,8 +1460,10 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		popLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
+
 	switch string(whereTo) {
 	case directionLeft:
 		pushLeft = true
@@ -1225,6 +1471,7 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		pushLeft = false
 	default:
 		w.WriteError("ERR syntax error")
+
 		return
 	}
 
@@ -1235,18 +1482,23 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 		elem, errMsg, ok, err := doLMove(cmd, source, destination, popLeft, pushLeft)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !ok {
 			if errMsg != "" {
 				w.WriteError(errMsg)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		w.WriteBulkString(elem)
 	}
+
 	return
 }
 
@@ -1255,6 +1507,7 @@ func handleLMove(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 func handleRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) != 2 {
 		w.WriteWrongNumArguments("rpoplpush")
+
 		return
 	}
 
@@ -1269,18 +1522,23 @@ func handleRPopLPush(cmd *shared.Command, w *shared.Writer, db *shared.Database)
 		elem, errMsg, ok, err := doLMove(cmd, source, destination, false, true)
 		if err != nil {
 			w.WriteError(err.Error())
+
 			return
 		}
+
 		if !ok {
 			if errMsg != "" {
 				w.WriteError(errMsg)
 			} else {
 				w.WriteNullBulkString()
 			}
+
 			return
 		}
+
 		w.WriteBulkString(elem)
 	}
+
 	return
 }
 
@@ -1295,37 +1553,44 @@ func doLMove(cmd *shared.Command, source, destination string, popLeft, pushLeft 
 	if err != nil {
 		return nil, "", false, err
 	}
+
 	if !srcExists {
 		return nil, "", false, nil
 	}
+
 	if srcWrongType {
 		return nil, "WRONGTYPE Operation against a key holding the wrong kind of value", false, nil
 	}
-	if len(srcSnap.OrderedElements) == 0 {
+
+	if len(srcSnap.GetOrderedElements()) == 0 {
 		return nil, "", false, nil
 	}
 
 	// Check destination type (if different from source)
 	var dstTips []effects.Tip
+
 	if source != destination {
 		_, dt, _, dstWrongType, err := getListSnapshot(cmd, destination)
 		if err != nil {
 			return nil, "", false, err
 		}
+
 		if dstWrongType {
 			return nil, "WRONGTYPE Operation against a key holding the wrong kind of value", false, nil
 		}
+
 		dstTips = dt
 	}
 
 	// Pick element to pop
 	var elem *pb.ReducedElement
 	if popLeft {
-		elem = srcSnap.OrderedElements[0]
+		elem = srcSnap.GetOrderedElements()[0]
 	} else {
-		elem = srcSnap.OrderedElements[len(srcSnap.OrderedElements)-1]
+		elem = srcSnap.GetOrderedElements()[len(srcSnap.GetOrderedElements())-1]
 	}
-	value := elem.Data.Decompress()
+
+	value := elem.GetData().Decompress()
 
 	// Begin transaction: read source (+ dest if different), remove from source, insert to dest
 	cmd.Context.BeginTx()
@@ -1349,7 +1614,7 @@ func doLMove(cmd *shared.Command, source, destination string, popLeft, pushLeft 
 	}
 
 	// Remove from source
-	if err := emitListRemove(cmd, source, elem.Data.Id); err != nil {
+	if err := emitListRemove(cmd, source, elem.GetData().GetId()); err != nil {
 		return nil, "", false, err
 	}
 
@@ -1358,6 +1623,7 @@ func doLMove(cmd *shared.Command, source, destination string, popLeft, pushLeft 
 	if pushLeft {
 		placement = pb.Placement_PLACE_HEAD
 	}
+
 	if err := emitListInsert(cmd, destination, placement, value); err != nil {
 		return nil, "", false, err
 	}

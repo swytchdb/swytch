@@ -53,9 +53,11 @@ func TestHandleGeoSearch_ByRadius_FromLonLat(t *testing.T) {
 	if !strings.Contains(got, "Palermo") {
 		t.Fatalf("expected Palermo in results, got %q", got)
 	}
+
 	if !strings.Contains(got, "Catania") {
 		t.Fatalf("expected Catania in results, got %q", got)
 	}
+
 	if strings.Contains(got, "Rome") {
 		t.Fatalf("did not expect Rome in results, got %q", got)
 	}
@@ -77,6 +79,7 @@ func TestHandleGeoSearch_ByRadius_FromMember(t *testing.T) {
 	if !strings.Contains(got, "Palermo") {
 		t.Fatalf("expected Palermo in results, got %q", got)
 	}
+
 	if !strings.Contains(got, "Catania") {
 		t.Fatalf("expected Catania in results, got %q", got)
 	}
@@ -98,6 +101,7 @@ func TestHandleGeoSearch_ByBox(t *testing.T) {
 	if !strings.Contains(got, "Palermo") {
 		t.Fatalf("expected Palermo in results, got %q", got)
 	}
+
 	if !strings.Contains(got, "Catania") {
 		t.Fatalf("expected Catania in results, got %q", got)
 	}
@@ -140,8 +144,10 @@ func TestHandleGeoSearch_ASC(t *testing.T) {
 	if !strings.Contains(got, "Palermo") || !strings.Contains(got, "Catania") || !strings.Contains(got, "Rome") {
 		t.Fatalf("expected all three cities, got %q", got)
 	}
+
 	palermoIdx := strings.Index(got, "Palermo")
 	cataniaIdx := strings.Index(got, "Catania")
+
 	romeIdx := strings.Index(got, "Rome")
 	if palermoIdx > cataniaIdx || cataniaIdx > romeIdx {
 		t.Fatalf("expected ASC order: Palermo < Catania < Rome, got positions %d, %d, %d", palermoIdx, cataniaIdx, romeIdx)
@@ -163,6 +169,7 @@ func TestHandleGeoSearch_DESC(t *testing.T) {
 		},
 	})
 	romeIdx := strings.Index(got, "Rome")
+
 	palermoIdx := strings.Index(got, "Palermo")
 	if romeIdx > palermoIdx {
 		t.Fatalf("expected DESC order: Rome before Palermo, got positions %d, %d", romeIdx, palermoIdx)
@@ -306,6 +313,7 @@ func TestHandleGeoSearchStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSnapshot: %v", err)
 	}
+
 	if snap == nil {
 		t.Fatal("expected destkey to exist")
 	}
@@ -333,13 +341,16 @@ func TestHandleGeoSearchStore_StoreDist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSnapshot: %v", err)
 	}
+
 	if snap == nil {
 		t.Fatal("expected destkey to exist")
 	}
+
 	score, found := geoMemberScore(snap, "Palermo")
 	if !found {
 		t.Fatal("expected Palermo in destkey")
 	}
+
 	if score > 1.0 {
 		t.Fatalf("expected Palermo distance ~0, got %f", score)
 	}
@@ -408,6 +419,7 @@ func TestHandleGeoRadius(t *testing.T) {
 	if !strings.Contains(got, "Palermo") {
 		t.Fatalf("expected Palermo in results, got %q", got)
 	}
+
 	if !strings.Contains(got, "Catania") {
 		t.Fatalf("expected Catania in results, got %q", got)
 	}
@@ -458,6 +470,7 @@ func TestHandleGeoRadiusByMember(t *testing.T) {
 	if !strings.Contains(got, "Palermo") {
 		t.Fatalf("expected Palermo in results, got %q", got)
 	}
+
 	if !strings.Contains(got, "Catania") {
 		t.Fatalf("expected Catania in results, got %q", got)
 	}
