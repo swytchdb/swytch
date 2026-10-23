@@ -731,11 +731,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		cmd := result.cmd
 
-		lifecycleCtx := cs.conn.Ctx
+		lifecycleCtx := connCtx
+
 		var lifecycleSpan trace.Span
 		if tracing.Enabled() {
-			lifecycleCtx, lifecycleSpan = tracing.Tracer().Start(cs.conn.Ctx, "server.command_lifecycle")
-			cs.conn.Ctx = lifecycleCtx
+			lifecycleCtx, lifecycleSpan = tracing.Tracer().Start(connCtx, "server.command_lifecycle")
+			cs.conn.Ctx = lifecycleCtx //nolint:fatcontext // Each command derives from connCtx, not the previous command's context.
 		}
 
 		// Track last command for CLIENT LIST

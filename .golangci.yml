@@ -1,0 +1,31 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - wsl_v5
+    - nlreturn
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - copyloopvar
+    - durationcheck
+    - embeddedstructfieldcheck
+    - exhaustive
+    - fatcontext
+    - gocheckcompilerdirectives
+    - goconst
+    - importas
+    - iotamixing
+    - loggercheck
+    - nosprintfhostport
+    - prealloc
+    - predeclared
+    - protogetter
+    - sloglint
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
