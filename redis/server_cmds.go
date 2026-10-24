@@ -545,6 +545,19 @@ func (h *Handler) handleConfigGet(pattern string, w *shared.Writer) {
 	// Build list of matching config key-value pairs
 	var results []string
 
+	for _, name := range []string{clusterSafeModeConfig, keySafeModeConfig} {
+		if configMatchPattern(pattern, name) {
+			value, err := h.safetyConfigGet(name)
+			if err != nil {
+				w.WriteError("ERR " + err.Error())
+
+				return
+			}
+
+			results = append(results, name, value)
+		}
+	}
+
 	// proto-max-bulk-len
 	if configMatchPattern(pattern, "proto-max-bulk-len") {
 		results = append(results, "proto-max-bulk-len", fmt.Sprintf("%d", h.protoMaxBulkLen))
@@ -575,6 +588,13 @@ func (h *Handler) handleConfigGet(pattern string, w *shared.Writer) {
 }
 
 func (h *Handler) handleConfigSet(args [][]byte, w *shared.Writer) {
+	updates, err := safetyConfigEffects(args)
+	if err != nil {
+		w.WriteError("ERR " + err.Error())
+
+		return
+	}
+
 	// Process key-value pairs
 	for i := 0; i < len(args); i += 2 {
 		key := string(args[i])
@@ -654,6 +674,12 @@ func (h *Handler) handleConfigSet(args [][]byte, w *shared.Writer) {
 		default:
 			// Silently accept unknown config options for compatibility
 		}
+	}
+
+	if err := h.writeSafetyConfig(updates); err != nil {
+		w.WriteError("ERR " + err.Error())
+
+		return
 	}
 
 	w.WriteOK()

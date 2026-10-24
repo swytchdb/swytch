@@ -557,11 +557,10 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 		}
 	}
 
-	// Block writes to internal __swytch:* keys — these are reserved for
-	// cluster membership and other internal effects.
+	// Safety policies are editable engine keys; other internal keys remain reserved.
 	if valid && entry.Flags&shared.FlagWrite != 0 && len(keys) > 0 {
 		for _, key := range keys {
-			if strings.HasPrefix(key, "__swytch:") {
+			if strings.HasPrefix(key, "__swytch:") && key != effects.ClusterSafetyKey && key != effects.KeySafetyKey {
 				w.WriteError("ERR cannot write to internal key '" + key + "'")
 
 				return
