@@ -1084,14 +1084,14 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		results := make([]mgetResult, len(keys))
-		for i, key := range keys {
-			snap, _, err := cmd.Context.GetSnapshot(key)
-			if err != nil {
-				w.WriteError(err.Error())
+		snapshots, err := cmd.Context.GetSnapshots(keys)
+		if err != nil {
+			w.WriteError(err.Error())
 
-				return
-			}
+			return
+		}
 
+		for i, snap := range snapshots {
 			if snap == nil {
 				continue
 			}
