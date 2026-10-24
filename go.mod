@@ -2,6 +2,8 @@ module github.com/swytchdb/swytch
 
 go 1.27.0
 
+replace github.com/swytchdb/engine => ../engine
+
 require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jeroenrinzema/psql-wire v0.20.0
