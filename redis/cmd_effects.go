@@ -44,6 +44,7 @@ type EffectsConfig struct {
 	AdvertiseAddr      string
 	MemoryLimit        int64
 	MemoryLimitPercent float64
+	DataDir            string
 	Compress           bool
 	Port               int // main Redis port, used to compute default ClusterPort
 }
@@ -51,6 +52,7 @@ type EffectsConfig struct {
 // RegisterEffectsFlags adds effects-specific flags to the flag set.
 func RegisterEffectsFlags(fs *flag.FlagSet) *EffectsConfig {
 	cfg := &EffectsConfig{}
+	fs.StringVar(&cfg.DataDir, "data-dir", "", "Directory for local restart recovery (empty = memory-only; writes sync asynchronously)")
 	fs.StringVar(&cfg.ClusterPassphrase, "cluster-passphrase", "", "Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)")
 	fs.StringVar(&cfg.Cloud, "cloud", "", "Swytch Cloud connection secret (generate with: swytch gen-passphrase --cloud); derives cluster identity and discovers peers via cloud, so it replaces --cluster-passphrase and --join")
 	fs.StringVar(&cfg.JoinAddr, "join", "", "DNS name to resolve for cluster peer discovery")
@@ -88,6 +90,7 @@ func InitializeEffects(cfg *EffectsConfig) error {
 	rt, err := beacon.NewRuntime(context.Background(), beacon.RuntimeConfig{
 		MemoryLimit:        cfg.MemoryLimit,
 		MemoryLimitPercent: cfg.MemoryLimitPercent,
+		DataDir:            cfg.DataDir,
 		ClusterPassphrase:  cfg.ClusterPassphrase,
 		ConnectionSecret:   cfg.Cloud,
 		JoinAddr:           cfg.JoinAddr,
@@ -221,6 +224,10 @@ func StopCluster() {
 
 // PrintEffectsConfig prints effects configuration to stdout.
 func PrintEffectsConfig(cfg *EffectsConfig) {
+	if cfg.DataDir != "" {
+		fmt.Printf("  Data directory: %s\n", cfg.DataDir)
+	}
+
 	if cfg.Enabled && activeRuntime != nil {
 		fmt.Printf("  Effects engine: node %d\n", activeRuntime.Engine.NodeID())
 	}
@@ -241,6 +248,10 @@ func PrintEffectsConfig(cfg *EffectsConfig) {
 // EffectsUsage returns the usage string for effects flags.
 func EffectsUsage() string {
 	return `
+Local durability:
+  --data-dir=<path>            Directory for local restart recovery (default: memory-only;
+                                writes sync asynchronously)
+
 Cluster options:
   --cluster-passphrase=<pass>   Shared passphrase for cluster mTLS (generate with: swytch gen-passphrase)
   --cloud=<secret>              Swytch Cloud connection secret (generate with: swytch gen-passphrase --cloud);

@@ -66,6 +66,8 @@ func Run(args []string) error {
 		"Address:port this node advertises to peers (default: auto-detect)")
 	maxMemoryStr := fs.String("maxmemory", "64mb",
 		"Max effects-engine memory (e.g. 256mb, 4gb)")
+	dataDir := fs.String("data-dir", "",
+		"Directory for local restart recovery (empty = memory-only; writes sync asynchronously)")
 
 	// Telemetry
 	noTelemetry := fs.Bool("no-telemetry", false, "Disable anonymous usage telemetry")
@@ -132,6 +134,7 @@ func Run(args []string) error {
 	rt, err := beacon.NewRuntime(context.Background(), beacon.RuntimeConfig{
 		MemoryLimit:        maxMemoryBytes,
 		MemoryLimitPercent: maxMemoryPct,
+		DataDir:            *dataDir,
 		ClusterPassphrase:  *clusterPassphrase,
 		ConnectionSecret:   *cloudSecret,
 		JoinAddr:           *joinAddr,

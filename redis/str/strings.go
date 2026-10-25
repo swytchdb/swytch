@@ -1084,6 +1084,7 @@ func handleMGet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		results := make([]mgetResult, len(keys))
+
 		snapshots, err := cmd.Context.GetSnapshots(keys)
 		if err != nil {
 			w.WriteError(err.Error())

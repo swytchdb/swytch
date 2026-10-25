@@ -149,8 +149,9 @@ Commands:
 
 Examples:
   swytch redis --port 6379 --maxmemory 256mb
-  swytch redis --persistent --db-path /data/redis.db
+  swytch redis --data-dir /data/redis
   swytch sql --listen :5433
+  swytch sql --listen :5433 --data-dir /data/sql
   swytch gen-passphrase
   swytch gen-passphrase --cloud
   swytch gen-passphrase --cloud --json
