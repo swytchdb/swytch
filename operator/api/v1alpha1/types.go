@@ -14,6 +14,7 @@ var GroupVersion = schema.GroupVersion{Group: "swytch.getswytch.com", Version: "
 func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion, &Swytch{}, &SwytchList{})
 	metav1.AddToGroupVersion(s, GroupVersion)
+
 	return nil
 }
 
@@ -47,8 +48,9 @@ type SwytchSpec struct {
 	Deployment string              `json:"deployment"`
 	Memory     resource.Quantity   `json:"memory"`
 	Requests   corev1.ResourceList `json:"requests,omitempty"`
-	Limits     Limits              `json:"limits,omitempty"`
+	Limits     Limits              `json:"limits"`
 	Image      string              `json:"image,omitempty"`
+	SSI        bool                `json:"ssi,omitempty"`
 	Sidecar    *Sidecar            `json:"sidecar,omitempty"`
 	Server     *Server             `json:"server,omitempty"`
 	Discovery  Discovery           `json:"discovery"`
@@ -61,23 +63,27 @@ type SwytchStatus struct {
 
 type Swytch struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              SwytchSpec   `json:"spec"`
-	Status            SwytchStatus `json:"status,omitempty"`
+	metav1.ObjectMeta `json:"metadata"`
+
+	Spec   SwytchSpec   `json:"spec"`
+	Status SwytchStatus `json:"status"`
 }
 
 type SwytchList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []Swytch `json:"items"`
+	metav1.ListMeta `json:"metadata"`
+
+	Items []Swytch `json:"items"`
 }
 
 func (s *Swytch) DeepCopy() *Swytch {
 	if s == nil {
 		return nil
 	}
+
 	out := *s
 	out.ObjectMeta = *s.ObjectMeta.DeepCopy()
+
 	out.Spec.Memory = s.Spec.Memory.DeepCopy()
 	if s.Spec.Requests != nil {
 		out.Spec.Requests = make(corev1.ResourceList, len(s.Spec.Requests))
@@ -85,31 +91,39 @@ func (s *Swytch) DeepCopy() *Swytch {
 			out.Spec.Requests[k] = v.DeepCopy()
 		}
 	}
+
 	if s.Spec.Limits.CPU != nil {
 		q := s.Spec.Limits.CPU.DeepCopy()
 		out.Spec.Limits.CPU = &q
 	}
+
 	if s.Spec.Sidecar != nil {
 		v := *s.Spec.Sidecar
 		out.Spec.Sidecar = &v
 	}
+
 	if s.Spec.Server != nil {
 		v := *s.Spec.Server
+
 		out.Spec.Server = &v
 		if v.Replicas != nil {
 			n := *v.Replicas
 			out.Spec.Server.Replicas = &n
 		}
 	}
+
 	if s.Spec.Discovery.DNS != nil {
 		v := *s.Spec.Discovery.DNS
 		out.Spec.Discovery.DNS = &v
 	}
+
 	if s.Spec.Discovery.Cloud != nil {
 		v := *s.Spec.Discovery.Cloud
 		out.Spec.Discovery.Cloud = &v
 	}
+
 	out.Status.Conditions = append([]metav1.Condition(nil), s.Status.Conditions...)
+
 	return &out
 }
 
@@ -119,11 +133,14 @@ func (s *SwytchList) DeepCopyObject() runtime.Object {
 	if s == nil {
 		return nil
 	}
+
 	out := *s
-	out.ListMeta = *s.ListMeta.DeepCopy()
+	out.ListMeta = *s.DeepCopy()
+
 	out.Items = make([]Swytch, len(s.Items))
 	for i := range s.Items {
 		out.Items[i] = *s.Items[i].DeepCopy()
 	}
+
 	return &out
 }

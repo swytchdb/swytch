@@ -2,6 +2,7 @@ package workload
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,22 +22,43 @@ func pod() *corev1.Pod {
 
 func TestResourceBudget(t *testing.T) {
 	s := profile()
+
 	c := Container(s, "swytch:test")
 	if c.Resources.Requests != nil {
 		t.Fatal("requests must be omitted by default")
 	}
+
 	if c.Resources.Limits.Memory().Cmp(s.Spec.Memory) != 0 {
 		t.Fatal("wrong memory limit")
 	}
+
 	s.Spec.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi"), corev1.ResourceCPU: resource.MustParse("100m")}
 	q := resource.MustParse("500m")
 	s.Spec.Limits.CPU = &q
+
 	c = Container(s, "swytch:test")
 	if !reflect.DeepEqual(c.Resources.Requests, s.Spec.Requests) {
 		t.Fatal("explicit requests lost")
 	}
+
 	if c.Resources.Limits.Cpu().Cmp(q) != 0 {
 		t.Fatal("CPU limit lost")
+	}
+}
+
+func TestSidecarSSI(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		s := profile()
+		s.Spec.SSI = enabled
+
+		p := pod()
+		if err := Inject(p, s, "swytch:test"); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := slices.Contains(p.Spec.InitContainers[0].Args, "--ssi"); got != enabled {
+			t.Fatalf("SSI flag present = %v, want %v", got, enabled)
+		}
 	}
 }
 
@@ -45,33 +67,42 @@ func TestDiscoveryAndTransport(t *testing.T) {
 		for _, transport := range []string{"tcp", "unix"} {
 			t.Run(mode+"/"+transport, func(t *testing.T) {
 				s := profile()
+
 				s.Spec.Sidecar = &api.Sidecar{Transport: transport}
 				if mode == "cloud" {
 					s.Spec.Discovery.Cloud = s.Spec.Discovery.DNS
 					s.Spec.Discovery.DNS = nil
 				}
+
 				p := pod()
 				if err := Inject(p, s, "swytch:test"); err != nil {
 					t.Fatal(err)
 				}
+
 				c := p.Spec.InitContainers[0]
+
 				args := strings.Join(c.Args, " ")
 				if c.RestartPolicy == nil || *c.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 					t.Fatal("not a native sidecar")
 				}
+
 				if mode == "dns" && (!strings.Contains(args, "--join=swytch-cache-peers.apps.svc") || strings.Contains(args, "--cloud")) {
 					t.Fatal(args)
 				}
+
 				if mode == "cloud" && (!strings.Contains(args, "--cloud=$(SWYTCH_SECRET)") || strings.Contains(args, "--join") || strings.Contains(args, "--cluster-passphrase")) {
 					t.Fatal(args)
 				}
+
 				if c.Env[1].ValueFrom.SecretKeyRef.Name != "credentials" || c.Env[1].Value != "" {
 					t.Fatal("not a secret reference")
 				}
+
 				if transport == "unix" {
 					if len(p.Spec.Volumes) != 1 || len(p.Spec.Containers[0].VolumeMounts) != 1 || !strings.Contains(args, "--unixsocket=") {
 						t.Fatal("socket not shared")
 					}
+
 					for _, a := range c.Args {
 						if strings.HasPrefix(a, "--bind=") && a != "--bind=" {
 							t.Fatal("TCP enabled for Unix transport")
@@ -80,10 +111,12 @@ func TestDiscoveryAndTransport(t *testing.T) {
 				} else if len(p.Spec.Volumes) != 0 || !strings.Contains(args, "--bind=127.0.0.1") {
 					t.Fatal("incorrect TCP transport")
 				}
+
 				before := p.DeepCopy()
 				if err := Inject(p, s, "swytch:test"); err != nil {
 					t.Fatal(err)
 				}
+
 				if !reflect.DeepEqual(before, p) {
 					t.Fatal("reinjection changed Pod")
 				}
@@ -106,19 +139,24 @@ func TestRejectConflicts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := pod()
 			mutate(p)
+
 			if Inject(p, profile(), "image") == nil {
 				t.Fatal("conflict accepted")
 			}
 		})
 	}
+
 	s := profile()
 	s.Spec.Sidecar = &api.Sidecar{Transport: "unix"}
 	p := pod()
+
 	p.Spec.Volumes = []corev1.Volume{{Name: SocketVolume}}
 	if Inject(p, s, "image") == nil {
 		t.Fatal("volume collision accepted")
 	}
+
 	p = pod()
+
 	p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "other", MountPath: SocketDir}}
 	if Inject(p, s, "image") == nil {
 		t.Fatal("mount collision accepted")
@@ -145,6 +183,7 @@ func TestValidate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := profile()
 			mutate(s)
+
 			if Validate(s) == nil {
 				t.Fatal("invalid profile accepted")
 			}

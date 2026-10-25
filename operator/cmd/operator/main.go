@@ -28,6 +28,7 @@ func main() {
 	options.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&options)))
+
 	if err := run(*image, *pullSecrets, *certDir, *leader); err != nil {
 		ctrl.Log.Error(err, "operator stopped")
 		os.Exit(1)
@@ -39,30 +40,40 @@ func run(image, secrets, certDir string, leader bool) error {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return err
 	}
+
 	if err := api.AddToScheme(scheme); err != nil {
 		return err
 	}
+
 	server := webhook.NewServer(webhook.Options{Port: 9443, CertDir: certDir})
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, WebhookServer: server, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: ":8081", LeaderElection: leader, LeaderElectionID: "swytch-operator.swytch.getswytch.com"})
 	if err != nil {
 		return err
 	}
+
 	var refs []corev1.LocalObjectReference
-	for _, name := range strings.Split(secrets, ",") {
+
+	for name := range strings.SplitSeq(secrets, ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			refs = append(refs, corev1.LocalObjectReference{Name: name})
 		}
 	}
+
 	r := &controller.Reconciler{Client: mgr.GetClient(), Scheme: scheme, DefaultImage: image, ImagePullSecrets: refs}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return err
 	}
+
 	mgr.GetWebhookServer().Register("/mutate-pods", &admission.Webhook{Handler: &injector.Handler{Reader: mgr.GetAPIReader(), DefaultImage: image, ImagePullSecrets: refs}})
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return err
 	}
+
 	if err := mgr.AddReadyzCheck("webhook", server.StartedChecker()); err != nil {
 		return err
 	}
+
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

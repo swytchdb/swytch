@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	api "github.com/swytchdb/swytch/operator/api/v1alpha1"
@@ -25,22 +26,28 @@ func TestReconcile(t *testing.T) {
 	s := &api.Swytch{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "apps", UID: "uid"}, Spec: api.SwytchSpec{Deployment: "server", Memory: resource.MustParse("512Mi"), Discovery: api.Discovery{DNS: &api.DiscoveryConfig{SecretKeyRef: api.SecretKeyRef{Name: "secret", Key: "key"}}}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(s, &appsv1.Deployment{}).WithObjects(s).Build()
 	r := &Reconciler{Client: c, Scheme: scheme, DefaultImage: "swytch:test"}
+
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: s.Name, Namespace: s.Namespace}}
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatal(err)
 	}
+
 	d := &appsv1.Deployment{}
+
 	key := types.NamespacedName{Name: workload.Name(s), Namespace: s.Namespace}
 	if err := c.Get(ctx, key, d); err != nil {
 		t.Fatal(err)
 	}
+
 	if !metav1.IsControlledBy(d, s) || *d.Spec.Replicas != 1 || d.Spec.Template.Spec.Containers[0].Resources.Requests != nil {
 		t.Fatal("incorrect server deployment")
 	}
+
 	peer := &corev1.Service{}
 	if err := c.Get(ctx, types.NamespacedName{Name: workload.PeerName(s), Namespace: s.Namespace}, peer); err != nil {
 		t.Fatal(err)
 	}
+
 	if peer.Spec.ClusterIP != "None" || !peer.Spec.PublishNotReadyAddresses || peer.Spec.Ports[0].Protocol != corev1.ProtocolUDP {
 		t.Fatal("incorrect DNS service")
 	}
@@ -49,35 +56,69 @@ func TestReconcile(t *testing.T) {
 	if err := c.Update(ctx, d); err != nil {
 		t.Fatal(err)
 	}
+
 	version := d.ResourceVersion
+
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := c.Get(ctx, key, d); err != nil {
 		t.Fatal(err)
 	}
+
 	if d.ResourceVersion != version {
 		t.Fatal("reconciliation overwrote API defaults")
 	}
+
+	for _, enabled := range []bool{false, true, false} {
+		if err := c.Get(ctx, req.NamespacedName, s); err != nil {
+			t.Fatal(err)
+		}
+
+		s.Spec.SSI = enabled
+		if err := c.Update(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := c.Get(ctx, key, d); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := slices.Contains(d.Spec.Template.Spec.Containers[0].Args, "--ssi"); got != enabled {
+			t.Fatalf("SSI flag present = %v, want %v", got, enabled)
+		}
+	}
+
 	if err := c.Get(ctx, req.NamespacedName, s); err != nil {
 		t.Fatal(err)
 	}
+
 	zero := int32(0)
 	s.Spec.Server = &api.Server{Replicas: &zero}
 	s.Spec.Discovery.Cloud = s.Spec.Discovery.DNS
+
 	s.Spec.Discovery.DNS = nil
 	if err := c.Update(ctx, s); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := c.Get(ctx, key, d); err != nil {
 		t.Fatal(err)
 	}
+
 	if *d.Spec.Replicas != 0 {
 		t.Fatal("scale to zero ignored")
 	}
+
 	if err := c.Get(ctx, types.NamespacedName{Name: workload.PeerName(s), Namespace: s.Namespace}, peer); err == nil {
 		t.Fatal("Cloud left DNS service behind")
 	}
@@ -90,6 +131,7 @@ func TestDoesNotAdoptUnrelatedService(t *testing.T) {
 	s := &api.Swytch{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "apps", UID: "uid"}}
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: workload.PeerName(s), Namespace: s.Namespace}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(svc).Build()
+
 	r := &Reconciler{Client: c, Scheme: scheme}
 	if err := r.service(context.Background(), s, true); err == nil {
 		t.Fatal("adopted unrelated service")

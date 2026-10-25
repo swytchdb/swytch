@@ -24,42 +24,54 @@ func (h *Handler) Handle(ctx context.Context, req admission.Request) admission.R
 	if req.Operation != admissionv1.Create || req.Resource.Group != "" || req.Resource.Resource != "pods" || req.SubResource != "" {
 		return admission.Allowed("not a Pod creation")
 	}
+
 	p := &corev1.Pod{}
 	if err := json.Unmarshal(req.Object.Raw, p); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+
 	name, annotated := p.Annotations[workload.Annotation]
 	if !annotated {
 		return admission.Allowed("no Swytch annotation")
 	}
+
 	if name == "" {
 		return admission.Denied("Swytch profile annotation must not be empty")
 	}
+
 	s := &api.Swytch{}
 	if err := h.Reader.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: name}, s); err != nil {
 		return admission.Denied("Swytch profile is unavailable in this namespace: " + err.Error())
 	}
+
 	if !s.DeletionTimestamp.IsZero() {
 		return admission.Denied("Swytch profile is being deleted")
 	}
+
 	if err := workload.Inject(p, s, h.DefaultImage); err != nil {
 		return admission.Denied(err.Error())
 	}
+
 	for _, secret := range h.ImagePullSecrets {
 		found := false
+
 		for _, existing := range p.Spec.ImagePullSecrets {
 			if existing.Name == secret.Name {
 				found = true
+
 				break
 			}
 		}
+
 		if !found {
 			p.Spec.ImagePullSecrets = append(p.Spec.ImagePullSecrets, secret)
 		}
 	}
+
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
+
 	return admission.PatchResponseFromRaw(req.Object.Raw, raw)
 }

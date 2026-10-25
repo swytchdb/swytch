@@ -22,6 +22,7 @@ func TestAdmission(t *testing.T) {
 	s := &api.Swytch{ObjectMeta: metav1.ObjectMeta{Name: "cache", Namespace: "apps", UID: "uid"}, Spec: api.SwytchSpec{Deployment: "sidecar", Memory: resource.MustParse("512Mi"), Discovery: api.Discovery{Cloud: &api.DiscoveryConfig{SecretKeyRef: api.SecretKeyRef{Name: "secret", Key: "key"}}}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(s).Build()
 	h := Handler{Reader: c, DefaultImage: "swytch:test"}
+
 	for _, tc := range []struct {
 		name, namespace, profile string
 		annotated, allowed       bool
@@ -37,14 +38,18 @@ func TestAdmission(t *testing.T) {
 			if tc.annotated {
 				p.Annotations = map[string]string{workload.Annotation: tc.profile}
 			}
+
 			raw, _ := json.Marshal(p)
+
 			resp := h.Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Namespace: tc.namespace, Resource: metav1.GroupVersionResource{Version: "v1", Resource: "pods"}, Object: runtime.RawExtension{Raw: raw}}})
 			if resp.Allowed != tc.allowed {
 				t.Fatalf("unexpected response: %+v", resp)
 			}
+
 			if tc.name == "valid" && len(resp.Patches) == 0 {
 				t.Fatal("no injection patch")
 			}
+
 			if !tc.annotated && len(resp.Patches) != 0 {
 				t.Fatal("patched unannotated Pod")
 			}

@@ -125,6 +125,24 @@ creates a Deployment and ClusterIP Service. Replicas default to one; zero is val
 Server profiles cannot be referenced by a sidecar annotation. Deployment mode is
 immutable; create another profile to change it.
 
+## SSI transactions
+
+Set `spec.ssi: true` on a server or sidecar profile to pass `--ssi` to Swytch:
+
+```yaml
+spec:
+  ssi: true
+```
+
+SSI returns immediate command results from a snapshot inside `MULTI` and commits
+at `EXEC`. It is disabled by default. Use clients that support these transaction
+responses. Server profile changes roll the Deployment; sidecar changes apply to
+new Pods.
+
+This setting requires an operator and Swytch image with SSI support, plus the
+updated CRD from `swytch-helm`. Apply that CRD before upgrading the operator, as
+described below.
+
 ## Discovery and credentials
 
 DNS profiles get a headless Service named `swytch-PROFILE-peers`. It publishes Pod
