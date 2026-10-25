@@ -71,6 +71,9 @@ type ServerConfig struct {
 	// DebugLogging enables debug-level command logging
 	DebugLogging bool
 
+	// SSI enables immediate snapshot results inside MULTI/EXEC.
+	SSI bool
+
 	// TCPKeepAlive enables TCP keepalive
 	TCPKeepAlive time.Duration
 
@@ -199,6 +202,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 			ACLFile:      config.ACLFile,
 			RequireAuth:  config.Password != "" || config.ACLFile != "",
 			DebugLogging: config.DebugLogging,
+			SSI:          config.SSI,
 		}
 		handler = NewHandler(handlerCfg)
 
@@ -508,6 +512,10 @@ func (s *Server) getConnState(conn net.Conn, ctx context.Context) *connState {
 }
 
 func putConnState(cs *connState) {
+	if cs.conn != nil && cs.conn.EffectsCtx != nil {
+		cs.conn.EffectsCtx.Abort()
+	}
+
 	cs.reader = nil
 	cs.writer = nil
 	cs.parser = nil

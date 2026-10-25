@@ -625,10 +625,7 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 	errors := make(chan string, 10)
 
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			ctx := context.Background()
 			conn := &shared.Connection{User: testUser, Ctx: ctx}
 
@@ -647,7 +644,7 @@ func TestConcurrentSmallTimeouts(t *testing.T) {
 			if buf.String() != "*-1\r\n" {
 				errors <- "unexpected response: " + buf.String()
 			}
-		}()
+		})
 	}
 
 	done := make(chan struct{})

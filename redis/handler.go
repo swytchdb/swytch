@@ -57,6 +57,7 @@ type HandlerConfig struct {
 	RequireAuth  bool   // Deprecated: use ACLFile instead
 	ACLFile      string // Path to ACL file for user authentication
 	DebugLogging bool
+	SSI          bool // Return immediate results inside MULTI using an engine snapshot
 	// Engine, if set, enables effects-based data access for migrated modules
 	Engine *effects.Engine
 }
@@ -94,6 +95,7 @@ type Handler struct {
 
 	// engine is the effects engine for migrated modules (nil if not configured)
 	engine *effects.Engine
+	ssi    bool
 
 	pubsubManager *pubsub.Manager
 }
@@ -137,6 +139,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		protoMaxBulkLen: 512 * 1024 * 1024,        // defaultProtoMaxBulkLen
 		scriptEngine:    scripting.NewEngine(nil), // executor set below after h is created
 		engine:          cfg.Engine,
+		ssi:             cfg.SSI,
 	}
 
 	// Set up the pub/sub broker via shared accessor
@@ -375,6 +378,10 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	// Check ACL command permission (skip for AUTH and QUIT)
 	if conn.User != nil && cmd.Type != shared.CmdAuth && cmd.Type != shared.CmdQuit {
 		if err := h.aclManager.CheckCommand(conn.User, cmd.Type); err != nil {
+			if conn.SSITransaction {
+				conn.TxnAborted = true
+			}
+
 			h.aclManager.LogDenied("command", "toplevel", cmd.Type.String(), conn.Username, conn.RemoteAddr)
 			w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to run the '%s' command", cmd.Type.String()))
 
@@ -428,14 +435,14 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 	// where SSI reads must subscribe) uses the full write context.
 	if h.engine != nil && conn.EffectsCtx != nil {
 		cmd.Runtime = h.engine
-		if entry != nil && entry.Flags&shared.FlagWrite == 0 && !conn.InTransaction && conn.ReadOnlyCtx != nil {
+		if entry != nil && entry.Flags&(shared.FlagWrite|shared.FlagNoQueue) == 0 && !conn.InTransaction && conn.ReadOnlyCtx != nil {
 			cmd.Context = conn.ReadOnlyCtx
 		} else {
 			cmd.Context = conn.EffectsCtx
 		}
 	}
 
-	// If in transaction mode, queue commands instead of executing
+	// Transactions prepare commands here; SSI runs them on the MULTI snapshot.
 	if conn.InTransaction {
 		noQueue := entry != nil && entry.Flags&shared.FlagNoQueue != 0
 		if !noQueue {
@@ -860,6 +867,14 @@ func (h *Handler) handleHello(cmd *shared.Command, w *shared.Writer, conn *share
 
 // queueCommand adds a command to the transaction queue using the registry.
 func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shared.Connection, db *shared.Database) {
+	if conn.SSITransaction && !ssiCommandAllowed(cmd.Type) {
+		conn.TxnAborted = true
+
+		w.WriteError("ERR command '" + cmd.Type.String() + "' cannot be used inside an SSI transaction")
+
+		return
+	}
+
 	entry := h.cmds.Lookup(cmd.Type)
 	if entry == nil {
 		w.WriteError("ERR unknown command '" + cmd.Type.String() + "'")
@@ -912,6 +927,47 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 		return
 	}
 
+	if conn.SSITransaction {
+		// TxnPrepare may omit keys (for example EVAL); use the registry's
+		// extractor as well before exposing any snapshot data.
+		if entry.Keys != nil {
+			keys = append(keys, entry.Keys(cmdCopy)...)
+		}
+
+		isWrite := entry.Flags&shared.FlagWrite != 0
+
+		for _, key := range keys {
+			if conn.User != nil {
+				if err := h.aclManager.CheckKey(conn.User, key, isWrite); err != nil {
+					conn.TxnAborted = true
+
+					h.aclManager.LogDenied("key", key, cmd.Type.String(), conn.Username, conn.RemoteAddr)
+					w.WriteError(fmt.Sprintf("NOPERM this user has no permissions to access key '%s'", key))
+
+					return
+				}
+			}
+
+			if isWrite && strings.HasPrefix(key, "__swytch:") && key != effects.ClusterSafetyKey && key != effects.KeySafetyKey {
+				conn.TxnAborted = true
+
+				w.WriteError("ERR cannot write to internal key '" + key + "'")
+
+				return
+			}
+		}
+
+		start := w.Buffer().Len()
+
+		runner()
+
+		if !conn.InScript {
+			conn.BufferedResults = append(conn.BufferedResults, bytes.Clone(w.Buffer().Bytes()[start:]))
+		}
+
+		return
+	}
+
 	conn.QueuedCmds = append(conn.QueuedCmds, shared.QueuedCommand{
 		Type:   cmdCopy.Type,
 		Args:   argsCopy,
@@ -920,6 +976,20 @@ func (h *Handler) queueCommand(cmd *shared.Command, w *shared.Writer, conn *shar
 	})
 
 	w.WriteQueued()
+}
+
+// These handlers operate outside the transaction context, or enumerate the
+// live index rather than the snapshot. They cannot provide SSI semantics.
+func ssiCommandAllowed(cmd shared.CommandType) bool {
+	//exhaustive:ignore
+	switch cmd {
+	case shared.CmdFlushDB, shared.CmdFlushAll, shared.CmdPublish,
+		shared.CmdSubscribe, shared.CmdUnsubscribe, shared.CmdPSubscribe, shared.CmdPUnsubscribe,
+		shared.CmdKeys, shared.CmdScan, shared.CmdRandomKey, shared.CmdDBSize:
+		return false
+	default:
+		return true
+	}
 }
 
 // handleMulti starts a transaction
@@ -934,6 +1004,17 @@ func (h *Handler) handleMulti(cmd *shared.Command, w *shared.Writer, conn *share
 		w.WriteError("ERR MULTI calls can not be nested")
 
 		return
+	}
+
+	if h.ssi {
+		if conn.EffectsCtx == nil {
+			w.WriteError("ERR SSI requires the effects engine")
+
+			return
+		}
+
+		conn.EffectsCtx.BeginTx()
+		conn.SSITransaction = true
 	}
 
 	conn.InTransaction = true
@@ -956,8 +1037,8 @@ func (h *Handler) handleDiscard(cmd *shared.Command, w *shared.Writer, conn *sha
 		return
 	}
 
+	cmd.Context.Abort()
 	conn.ResetTransaction()
-	cmd.Context.ClearWatches()
 	w.WriteOK()
 }
 
@@ -1018,8 +1099,8 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 
 	// Check if transaction was aborted due to command errors during queueing
 	if conn.TxnAborted {
+		cmd.Context.Abort()
 		conn.ResetTransaction()
-		cmd.Context.ClearWatches()
 		// Check if the abort was due to BUSY (script timeout)
 		if h.scriptEngine.IsScriptTimedOut() {
 			w.WriteError("EXECABORT Transaction discarded because of previous errors. BUSY Redis is busy running a script.")
@@ -1032,8 +1113,8 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 
 	// Check if there's a timed-out script running - EXEC must fail with BUSY
 	if h.scriptEngine.IsScriptTimedOut() {
+		cmd.Context.Abort()
 		conn.ResetTransaction()
-		cmd.Context.ClearWatches()
 		w.WriteError("EXECABORT Transaction discarded because of: BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")
 
 		return
@@ -1041,7 +1122,7 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 
 	// Adaptive serialization: forward the entire EXEC to the leader if any
 	// queued command touches a serialized key.
-	if effects.ForwardingEnabled() && cmd.Runtime != nil {
+	if !conn.SSITransaction && effects.ForwardingEnabled() && cmd.Runtime != nil {
 		fwdCmds := make([]effects.ForwardCommand, len(conn.QueuedCmds))
 		for i, qcmd := range conn.QueuedCmds {
 			fwdCmds[i] = effects.ForwardCommand{
@@ -1071,8 +1152,23 @@ func (h *Handler) handleExec(cmd *shared.Command, w *shared.Writer, conn *shared
 	cmd.Context.BeginTx()
 
 	if !cmd.Context.CheckWatches() {
+		cmd.Context.Abort()
 		conn.ResetTransaction()
 		w.WriteNullArray()
+
+		return
+	}
+
+	if conn.SSITransaction {
+		// Results have already been observed. Never replay or forward these
+		// commands against a different snapshot; Flush decides the commit.
+		w.WriteArray(len(conn.BufferedResults))
+
+		for _, result := range conn.BufferedResults {
+			w.WriteRaw(result)
+		}
+
+		conn.ResetTransaction()
 
 		return
 	}

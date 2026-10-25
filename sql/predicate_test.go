@@ -52,11 +52,16 @@ func TestPredicateCmpInt(t *testing.T) {
 		lit  int64
 		want bool
 	}{
-		{OpEq, 7, true}, {OpEq, 8, false},
-		{OpLt, 8, true}, {OpLt, 7, false},
-		{OpLe, 7, true}, {OpLe, 6, false},
-		{OpGt, 6, true}, {OpGt, 7, false},
-		{OpGe, 7, true}, {OpGe, 8, false},
+		{OpEq, 7, true},
+		{OpEq, 8, false},
+		{OpLt, 8, true},
+		{OpLt, 7, false},
+		{OpLe, 7, true},
+		{OpLe, 6, false},
+		{OpGt, 6, true},
+		{OpGt, 7, false},
+		{OpGe, 7, true},
+		{OpGe, 8, false},
 	}
 	for _, c := range cases {
 		p := PCmp(0, c.op, IntVal(c.lit))
@@ -74,8 +79,10 @@ func TestPredicateCmpFloat(t *testing.T) {
 		lit  float64
 		want bool
 	}{
-		{OpEq, 1.5, true}, {OpEq, 2.0, false},
-		{OpLt, 2.0, true}, {OpGt, 1.0, true},
+		{OpEq, 1.5, true},
+		{OpEq, 2.0, false},
+		{OpLt, 2.0, true},
+		{OpGt, 1.0, true},
 	}
 	for _, c := range cases {
 		p := PCmp(0, c.op, FloatVal(c.lit))

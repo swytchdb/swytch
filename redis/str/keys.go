@@ -462,20 +462,21 @@ func handleDelEx(cmd *shared.Command, w *shared.Writer, db *shared.Database) (va
 			return
 		}
 
+		savepoint := cmd.Context.TakeSavepoint()
 		cmd.Context.BeginTx()
 
 		if err := cmd.Context.Emit(&pb.Effect{
 			Key:  []byte(key),
 			Kind: &pb.Effect_Noop{Noop: &pb.NoopEffect{}},
 		}, tips); err != nil {
-			cmd.Context.Abort()
+			cmd.Context.RestoreSavepoint(savepoint)
 			w.WriteError(err.Error())
 
 			return
 		}
 
 		if err := emitDeleteKey(cmd, key); err != nil {
-			cmd.Context.Abort()
+			cmd.Context.RestoreSavepoint(savepoint)
 			w.WriteError(err.Error())
 
 			return
@@ -555,6 +556,7 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 			return
 		}
 
+		savepoint := cmd.Context.TakeSavepoint()
 		cmd.Context.BeginTx()
 
 		if err := func() error {
@@ -615,8 +617,9 @@ func handleRename(cmd *shared.Command, w *shared.Writer, db *shared.Database) (v
 		}(); err != nil {
 			// The tx buffer holds a half-built rename; the post-runner Flush
 			// would commit it anyway (key moved, groups lost) while the
-			// client sees an error. Abort so nothing moves.
-			cmd.Context.Abort()
+			// client sees an error. Restore this command without losing an
+			// enclosing MULTI snapshot or its earlier writes.
+			cmd.Context.RestoreSavepoint(savepoint)
 			w.WriteError(err.Error())
 
 			return
@@ -673,6 +676,7 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 			return
 		}
 
+		savepoint := cmd.Context.TakeSavepoint()
 		cmd.Context.BeginTx()
 
 		if err := func() error {
@@ -710,9 +714,9 @@ func handleRenameNX(cmd *shared.Command, w *shared.Writer, db *shared.Database) 
 
 			return nil
 		}(); err != nil {
-			// Same as handleRename: abort so the post-runner Flush can't
+			// Same as handleRename: roll back so the post-runner Flush can't
 			// commit a half-built rename behind the reported error.
-			cmd.Context.Abort()
+			cmd.Context.RestoreSavepoint(savepoint)
 			w.WriteError(err.Error())
 
 			return
@@ -807,6 +811,7 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		// Transactional like handleRename: the copy touches the destination
 		// key plus its stream-group sub-keys, and a partial commit would
 		// surface a replaced destination without its groups (or vice versa).
+		savepoint := cmd.Context.TakeSavepoint()
 		cmd.Context.BeginTx()
 
 		if err := func() error {
@@ -838,7 +843,7 @@ func handleCopy(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 
 			return nil
 		}(); err != nil {
-			cmd.Context.Abort()
+			cmd.Context.RestoreSavepoint(savepoint)
 			w.WriteError(err.Error())
 
 			return

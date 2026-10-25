@@ -81,8 +81,10 @@ func SetStreamNodeMaxEntries(v int64) {
 }
 
 // IDMP config defaults
-var defaultIDMPDuration atomic.Int64
-var defaultIDMPMaxSize atomic.Int64
+var (
+	defaultIDMPDuration atomic.Int64
+	defaultIDMPMaxSize  atomic.Int64
+)
 
 func init() {
 	defaultIDMPDuration.Store(100)

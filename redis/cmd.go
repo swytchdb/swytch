@@ -52,7 +52,7 @@ func Main(args []string) {
 	port := fs.Int("port", 6379, "TCP port to listen on")
 	bind := fs.String("bind", "127.0.0.1", "Bind address")
 	unixSocket := fs.String("unixsocket", "", "Unix socket path")
-	unixSocketPerm := fs.Int("unixsocketperm", 0700, "Unix socket permissions")
+	unixSocketPerm := fs.Int("unixsocketperm", 0o700, "Unix socket permissions")
 	maxMemoryStr := fs.String("maxmemory", "64mb", "Max memory (e.g., 256mb, 4gb)")
 	requirePass := fs.String("requirepass", "", "Require password for AUTH (deprecated, use --aclfile)")
 	aclFile := fs.String("aclfile", "", "Path to ACL file for user authentication")
@@ -67,6 +67,7 @@ func Main(args []string) {
 
 	// Swytch extensions
 	threads := fs.Int("threads", 0, "Number of threads (0 = use all CPUs)")
+	ssi := fs.Bool("ssi", false, "Return immediate MULTI results from an SSI snapshot; commit at EXEC")
 
 	// Profiling and metrics
 	pprofAddr := fs.String("pprof", "", "Enable pprof on this address (e.g., localhost:6060)")
@@ -125,6 +126,7 @@ Telemetry:
   --invite-me=<email>       Register as an early adopter (overrides --no-telemetry)
 
 Swytch extensions:
+  --ssi                    Return snapshot results during MULTI instead of QUEUED
   --pprof=<addr>            Enable pprof profiling on this address (e.g., localhost:6060)
   --metrics-port=<port>     Enable Prometheus metrics on this port (e.g., 9090)
 %s
@@ -236,6 +238,7 @@ Examples:
 		ACLFile:        *aclFile,
 		MaxConnections: *maxClients,
 		DebugLogging:   *debug,
+		SSI:            *ssi,
 		TLSCertFile:    *tlsCert,
 		TLSKeyFile:     *tlsKey,
 		TLSCAFile:      *tlsCA,

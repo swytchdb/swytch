@@ -25,9 +25,7 @@ import (
 	"strings"
 )
 
-var (
-	errBadPath = errors.New("invalid path")
-)
+var errBadPath = errors.New("invalid path")
 
 type segKind uint8
 

@@ -49,17 +49,18 @@ type Connection struct {
 	RemoteAddr    string          // Client remote address for logging
 
 	// Transaction state
-	InTransaction bool            // True if inside MULTI block
-	TxnAborted    bool            // True if watched key was modified
-	QueuedCmds    []QueuedCommand // Commands queued for EXEC
-	WatchedKeys   []WatchedKey    // Keys being watched with their versions
+	InTransaction  bool            // True if inside MULTI block
+	SSITransaction bool            // Commands execute immediately on the MULTI snapshot
+	TxnAborted     bool            // True if watched key was modified
+	QueuedCmds     []QueuedCommand // Commands queued for EXEC
+	WatchedKeys    []WatchedKey    // Keys being watched with their versions
 
 	// Script state
 	InScript bool // True if executing commands from a Lua script (blocking commands become non-blocking)
 
 	// SI Transaction state (for CRDT handler with Snapshot Isolation)
 	SITransaction   any      // Active SI transaction (nil if not in SI mode)
-	BufferedResults [][]byte // Results captured during non-SI MULTI for EXEC
+	BufferedResults [][]byte // Results captured during SSI MULTI for EXEC
 
 	// Blocking command support
 	Ctx           context.Context // Context for blocking operations (cancellation on disconnect)
@@ -99,10 +100,12 @@ type WatchedKey struct {
 // ResetTransaction clears transaction state
 func (c *Connection) ResetTransaction() {
 	c.InTransaction = false
+	c.SSITransaction = false
 	c.TxnAborted = false
 	c.QueuedCmds = c.QueuedCmds[:0]
 	c.WatchedKeys = c.WatchedKeys[:0]
 	c.SITransaction = nil
+	clear(c.BufferedResults)
 	c.BufferedResults = c.BufferedResults[:0]
 }
 

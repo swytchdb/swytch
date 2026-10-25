@@ -278,7 +278,7 @@ func TestACLManager_LoadSaveFile(t *testing.T) {
 user alice on >secret123 ~app:* +@read +@write
 user bob off >password ~admin:* +@all
 `
-	if err := os.WriteFile(aclFile, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(aclFile, []byte(content), 0o600); err != nil {
 		t.Fatalf("failed to write ACL file: %v", err)
 	}
 
@@ -678,7 +678,7 @@ func TestACLManager_RuleCaseSensitivity_AclFile(t *testing.T) {
 	aclFile := filepath.Join(tmpDir, "acl.conf")
 
 	content := "user demo on >MixedCasePw ~KeyPattern:* &*\n"
-	if err := os.WriteFile(aclFile, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(aclFile, []byte(content), 0o600); err != nil {
 		t.Fatalf("failed to write ACL file: %v", err)
 	}
 

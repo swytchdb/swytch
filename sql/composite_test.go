@@ -296,8 +296,11 @@ func TestCompositeIndexRange(t *testing.T) {
 		status string
 		ts     int64
 	}{
-		{"active", 100}, {"active", 200}, {"active", 300},
-		{"done", 100}, {"done", 200},
+		{"active", 100},
+		{"active", 200},
+		{"active", 300},
+		{"done", 100},
+		{"done", 200},
 	} {
 		q := "INSERT INTO t VALUES (" + itoaN(int64(i+1)) + ", '" + row.status + "', " + itoaN(row.ts) + ")"
 		if _, err := db.Exec(q); err != nil {

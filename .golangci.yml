@@ -32,3 +32,6 @@ linters:
     - unparam
     - usestdlibvars
     - wastedassign
+formatters:
+  enable:
+    - gofumpt

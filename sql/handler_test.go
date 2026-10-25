@@ -65,10 +65,14 @@ func TestStripPgTypeCasts(t *testing.T) {
 		in, want string
 	}{
 		{"SELECT 1", "SELECT 1"},
-		{"INSERT INTO lists (k, v) VALUES (('3'::int4), ('518'::int8))",
-			"INSERT INTO lists (k, v) VALUES (('3'), ('518'))"},
-		{"SELECT v FROM t WHERE k = ('0'::int4)",
-			"SELECT v FROM t WHERE k = ('0')"},
+		{
+			"INSERT INTO lists (k, v) VALUES (('3'::int4), ('518'::int8))",
+			"INSERT INTO lists (k, v) VALUES (('3'), ('518'))",
+		},
+		{
+			"SELECT v FROM t WHERE k = ('0'::int4)",
+			"SELECT v FROM t WHERE k = ('0')",
+		},
 		{"SELECT 'a::b'", "SELECT 'a::b'"},     // inside literal
 		{"SELECT \"a::b\"", "SELECT \"a::b\""}, // inside quoted ident
 		{"SELECT 1::varchar(32)", "SELECT 1"},
