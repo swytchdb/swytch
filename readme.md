@@ -21,6 +21,7 @@ Learn more:
 - [read the docs](https://docs.getswytch.com)
 - [check out the engine](https://github.com/swytchdb/engine)
 - [read the paper](https://arxiv.org/abs/2605.09114)
+- [watch the video](https://www.youtube.com/watch?v=kn3Pw7BaXFc)
 
 ## Install
 
