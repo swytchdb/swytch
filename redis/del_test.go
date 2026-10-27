@@ -28,6 +28,12 @@ func (r delFailingCloudReader) CloudTips(ctx context.Context, key string) ([]eff
 }
 
 func TestDelFailureRollback(t *testing.T) {
+	testDeleteFailureRollback(t, "DEL")
+}
+
+func testDeleteFailureRollback(t *testing.T, command string) {
+	t.Helper()
+
 	for _, failure := range []struct {
 		name string
 		key  string
@@ -85,17 +91,17 @@ func TestDelFailureRollback(t *testing.T) {
 							want = "+OK\r\n"
 						}
 
-						// Include an earlier write to the same key DEL will remove.
+						// Include an earlier write to the same key deletion will remove.
 						wantReply(want, "SET", "first", "new")
 						wantReply(want, "SET", "before", "value")
 					}
 
 					h.engine.SetCloudReader(delFailingCloudReader{key: failure.key})
 
-					reply := run("DEL", "first", failure.last)
+					reply := run(command, "first", failure.last)
 					if mode == "queued" {
 						if reply != "+QUEUED\r\n" {
-							t.Fatalf("queue DEL: %q", reply)
+							t.Fatalf("queue %s: %q", command, reply)
 						}
 
 						reply = run("EXEC")
@@ -135,7 +141,7 @@ func TestDelFailureRollback(t *testing.T) {
 					ssiWant(t, h, other, groups, "XINFO", "GROUPS", "stream")
 					ssiWant(t, h, other, pending, "XPENDING", "stream", "group")
 					// Once the failure is gone the same deletion can be retried.
-					ssiWant(t, h, other, ":2\r\n", "DEL", "first", "stream", "first")
+					ssiWant(t, h, other, ":2\r\n", command, "first", "stream", "first")
 					ssiWant(t, h, other, ":0\r\n", "EXISTS", "first", "stream")
 				})
 			}

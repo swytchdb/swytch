@@ -179,6 +179,7 @@ var commandCategories = map[CommandType][]CommandCategory{
 
 	// Key commands
 	CmdDel:         {CatWrite, CatKeyspace, CatFast},
+	CmdUnlink:      {CatWrite, CatKeyspace, CatFast},
 	CmdDelEx:       {CatWrite, CatKeyspace, CatFast},
 	CmdExists:      {CatRead, CatKeyspace, CatFast},
 	CmdExpire:      {CatWrite, CatKeyspace, CatFast},

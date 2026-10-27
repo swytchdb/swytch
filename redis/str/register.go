@@ -55,6 +55,7 @@ func init() {
 
 		// Key commands
 		shared.ModuleEntry{Cmd: shared.CmdDel, Entry: &shared.CommandEntry{Handler: handleDel, Keys: shared.KeysAll, Flags: shared.FlagWrite}},
+		shared.ModuleEntry{Cmd: shared.CmdUnlink, Entry: &shared.CommandEntry{Handler: handleDel, Keys: shared.KeysAll, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdDelEx, Entry: &shared.CommandEntry{Handler: handleDelEx, Keys: shared.KeysAll, Flags: shared.FlagWrite}},
 		shared.ModuleEntry{Cmd: shared.CmdExists, Entry: &shared.CommandEntry{Handler: handleExists}},
 		shared.ModuleEntry{Cmd: shared.CmdRename, Entry: &shared.CommandEntry{Handler: handleRename, Keys: shared.KeysFirstTwo, Flags: shared.FlagWrite}},

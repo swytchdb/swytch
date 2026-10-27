@@ -159,9 +159,11 @@ func typeTagToString(tag pb.ValueType) string {
 	}
 }
 
+// handleDel implements DEL and UNLINK. Both use the same synchronous effects
+// and stream cleanup path; UNLINK does not schedule background memory freeing.
 func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (valid bool, keys []string, runner shared.CommandRunner) {
 	if len(cmd.Args) < 1 {
-		w.WriteWrongNumArguments("del")
+		w.WriteWrongNumArguments(cmd.Type.String())
 
 		return
 	}

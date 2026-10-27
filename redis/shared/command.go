@@ -327,6 +327,9 @@ const (
 	CmdJSONResp
 	CmdJSONDebug
 
+	// Key deletion alias (shares DEL's synchronous effects path).
+	CmdUnlink
+
 	// CmdMax is a sentinel marking the end of the CommandType enum.
 	// Must remain last. Used to size the registry array.
 	CmdMax
@@ -429,6 +432,7 @@ var commandNames = map[string]CommandType{
 	"GET":         CmdGet,
 	"SET":         CmdSet,
 	"DEL":         CmdDel,
+	"UNLINK":      CmdUnlink,
 	"DELEX":       CmdDelEx,
 	"EXISTS":      CmdExists,
 	"EXPIRE":      CmdExpire,
@@ -722,6 +726,7 @@ var commandStrings = map[CommandType]string{
 	CmdGet:                 "get",
 	CmdSet:                 "set",
 	CmdDel:                 "del",
+	CmdUnlink:              "unlink",
 	CmdDelEx:               "delex",
 	CmdExists:              "exists",
 	CmdExpire:              "expire",
