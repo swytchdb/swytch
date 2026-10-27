@@ -65,7 +65,7 @@
             name = "swytch-redis";
             runtimeInputs = [ package ];
             text = ''
-              exec swytch redis "$@"
+              exec swytch redis --maxmemory 85% "$@"
             '';
           };
 
