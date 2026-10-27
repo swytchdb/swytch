@@ -174,11 +174,15 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 	valid = true
 
 	runner = func() {
+		// The dispatcher flushes even after an error. Roll back this command's
+		// deletes and stream cleanup without losing earlier transaction writes.
+		savepoint := cmd.Context.TakeSavepoint()
 		deleted := int64(0)
 
 		for _, key := range keys {
 			snap, err := getAnySnapshot(cmd, key)
 			if err != nil {
+				cmd.Context.RestoreSavepoint(savepoint)
 				w.WriteError(err.Error())
 
 				return
@@ -194,12 +198,14 @@ func handleDel(cmd *shared.Command, w *shared.Writer, db *shared.Database) (vali
 			// leaks sub-keys that resurface as stale groups if the key is
 			// ever recreated as a stream.
 			if err := cleanupStreamGroups(cmd, key); err != nil {
+				cmd.Context.RestoreSavepoint(savepoint)
 				w.WriteError(err.Error())
 
 				return
 			}
 
 			if err := emitDeleteKey(cmd, key); err != nil {
+				cmd.Context.RestoreSavepoint(savepoint)
 				w.WriteError(err.Error())
 
 				return
