@@ -84,7 +84,7 @@ jobs:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # Defaults
-          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","none-counter","none-set","none-sorted-set","none-elle-causal","attrition-counter"]'
+          DEFAULT_WORKLOADS='["safe-counter","safe-set","safe-sorted-set","none-counter","none-set","none-sorted-set","none-elle-causal","none-elle-ssi","attrition-counter"]'
           TIME_LIMIT=60
           JEPSEN_REF=main
           SINGLE_WORKLOAD=""
@@ -99,7 +99,7 @@ jobs:
           # Tokenize on whitespace (no quoting support — we don't need it)
           read -r -a tokens <<<"$rest"
 
-          valid_workloads='safe-counter safe-set safe-sorted-set none-counter none-set none-sorted-set none-elle-causal attrition-counter'
+          valid_workloads='safe-counter safe-set safe-sorted-set none-counter none-set none-sorted-set none-elle-causal none-elle-ssi attrition-counter'
 
           for tok in "${tokens[@]}"; do
             case "$tok" in
@@ -320,6 +320,7 @@ jobs:
             none-set)         N=none; W=set ;;
             none-sorted-set)  N=none; W=sorted-set ;;
             none-elle-causal) N=none; W=elle-causal ;;
+            none-elle-ssi)    N=none; W=elle-ssi ;;
             attrition-counter) N=attrition; W=counter ;;
             *) echo "::error::unknown workload $WORKLOAD"; exit 1 ;;
           esac
@@ -628,12 +629,15 @@ jobs:
             });
 
             const anyInvalid = workloads.some(w => (results[w]?.valid === 'false'));
+            const anyUnknown = workloads.some(w => (results[w]?.valid === 'unknown'));
             const anyMissing = workloads.some(w => !results[w] || results[w].valid === 'missing');
             const heading = anyInvalid
               ? '### Jepsen run: ❌ anomalies detected'
               : anyMissing
                 ? '### Jepsen run: ⚠️ completed with missing results'
-                : '### Jepsen run: ✅ all workloads valid';
+                : anyUnknown
+                  ? '### Jepsen run: ❔ inconclusive results'
+                  : '### Jepsen run: ✅ all workloads valid';
 
             const body = [
               heading,
