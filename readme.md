@@ -33,6 +33,9 @@ brew install swytch
 # macOS / Linux (curl)
 curl -fsSL https://getswytch.com/scripts/install.sh | sh
 
+# NixOS (flakes)
+nix profile add github:swytchdb/swytch#swytch
+
 # Windows (PowerShell)
 iwr -useb https://getswytch.com/scripts/install.ps1 | iex
 ```
