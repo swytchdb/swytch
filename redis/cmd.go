@@ -288,10 +288,14 @@ Examples:
 		os.Exit(1)
 	}
 
+	// The engine resolves a percentage-valued --maxmemory to a byte target at
+	// startup; report that target instead of the unresolved zero absolute.
+	effectiveMaxMemory := effectiveMemoryLimit(maxMemory, GetActiveEngine())
+
 	// Start license heartbeat if license is provided
 	// Metrics adapter is always created (lightweight wrapper); metrics
 	// server only starts when --metrics-port is set.
-	adapter := NewMetricsAdapter(server.Stats(), server.Handler(), maxMemory)
+	adapter := NewMetricsAdapter(server.Stats(), server.Handler(), effectiveMaxMemory)
 
 	var metricsServer *metrics.Server
 	if *metricsPort > 0 {
@@ -379,7 +383,7 @@ Examples:
 		fmt.Printf("  Unix Socket: %s\n", *unixSocket)
 	}
 
-	fmt.Printf("  Max Memory: %s\n", formatBytes(uint64(maxMemory)))
+	fmt.Printf("  Max Memory: %s\n", formatBytes(uint64(effectiveMaxMemory)))
 	fmt.Printf("  Threads: %d\n", runtime.GOMAXPROCS(0))
 
 	if *requirePass != "" {

@@ -261,3 +261,19 @@ Cluster options:
   --cluster-advertise=<addr>    Address:port this node advertises to peers (default: auto-detect)
 `
 }
+
+// effectiveMemoryLimit resolves the byte budget the running engine enforces.
+// A percentage-valued --maxmemory parses to zero absolute bytes; the engine
+// resolves it against the memory available to the process at startup, so ask
+// the engine for that target when it has one. Absolute limits pass through
+// unchanged, and the fallback keeps a nil engine (or an unresolved target)
+// reporting the configured value.
+func effectiveMemoryLimit(absolute int64, engine *effects.Engine) int64 {
+	if engine != nil {
+		if target := engine.MemoryTarget(); target > 0 {
+			return target
+		}
+	}
+
+	return absolute
+}
