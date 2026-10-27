@@ -4,8 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/swytchdb/swytch/main/scripts/install.sh | sh
 #
 # environment:
-#   SWYTCH_VERSION   release tag to install (default: latest)
-#   SWYTCH_INSTALL   install directory (default: $HOME/.local/bin, fallback /usr/local/bin)
+#   SWYTCH_VERSION   release tag to install (default: latest release, or default branch with Nix)
+#   SWYTCH_INSTALL   install directory; bypasses Nix (default: Nix profile when available,
+#                    otherwise $HOME/.local/bin, fallback /usr/local/bin)
 #   SWYTCH_VERIFY    set to 0 to skip checksum verification (not recommended)
 
 set -eu
@@ -18,18 +19,6 @@ info() { printf 'install: %s\n' "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || err "missing required command: $1"; }
 need uname
-need tar
-need mktemp
-
-if command -v curl >/dev/null 2>&1; then
-    fetch() { curl -fsSL "$1" -o "$2"; }
-    fetch_stdout() { curl -fsSL "$1"; }
-elif command -v wget >/dev/null 2>&1; then
-    fetch() { wget -qO "$2" "$1"; }
-    fetch_stdout() { wget -qO- "$1"; }
-else
-    err "need curl or wget"
-fi
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
@@ -46,6 +35,45 @@ case "$raw_arch" in
     arm64|aarch64) arch="arm64" ;;
     *) err "unsupported architecture: $raw_arch" ;;
 esac
+
+# Match the systems exported by flake.nix. An explicit destination keeps the
+# release-binary path, including on machines that also have Nix installed.
+case "$os/$arch" in
+    linux/x86_64|linux/arm64|darwin/arm64)
+        if [ -z "${SWYTCH_INSTALL:-}" ] && command -v nix >/dev/null 2>&1; then
+            flake="github:$REPO"
+            version="${SWYTCH_VERSION:-}"
+            if [ -n "$version" ]; then
+                case "$version" in
+                    v*) ;;
+                    *) version="v$version" ;;
+                esac
+                flake="$flake/$version"
+            fi
+            info "installing $flake into your Nix profile"
+            nix --extra-experimental-features 'nix-command flakes' profile install "$flake" \
+                || err "Nix installation failed; a pinned release must contain flake.nix. Set SWYTCH_INSTALL to a directory to install a release binary instead."
+            info "installed $BIN into your Nix profile"
+            if ! command -v "$BIN" >/dev/null 2>&1; then
+                info "open a new shell with your Nix profile on PATH to run $BIN"
+            fi
+            exit 0
+        fi
+        ;;
+esac
+
+need tar
+need mktemp
+
+if command -v curl >/dev/null 2>&1; then
+    fetch() { curl -fsSL "$1" -o "$2"; }
+    fetch_stdout() { curl -fsSL "$1"; }
+elif command -v wget >/dev/null 2>&1; then
+    fetch() { wget -qO "$2" "$1"; }
+    fetch_stdout() { wget -qO- "$1"; }
+else
+    err "need curl or wget"
+fi
 
 version="${SWYTCH_VERSION:-}"
 if [ -z "$version" ]; then
