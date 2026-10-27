@@ -627,7 +627,11 @@ func handleHTTL(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 				w.WriteInteger(-1)
 			} else {
 				remaining := time.Until(expiresAt)
-				w.WriteInteger(int64(remaining.Seconds()))
+				seconds := remaining / time.Second
+				if remaining > 0 && remaining%time.Second != 0 {
+					seconds++
+				}
+				w.WriteInteger(int64(seconds))
 			}
 		}
 	}
