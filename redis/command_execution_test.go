@@ -2,6 +2,7 @@ package redis
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -103,13 +104,25 @@ func TestDataCommandRollback(t *testing.T) {
 					}
 
 					kind := shared.ParseCommandType([]byte(tc.name))
-					withCommandFault(h, kind, func(_ *shared.Command) func() {
+					withCommandFault(h, kind, func(cmd *shared.Command) func() {
+						injected := false
+
 						if kind == shared.CmdMSet {
 							h.engine.SetBroadcaster(&commandPartition{})
+
+							injected = true
 						} else {
 							h.engine.SetOnLocalEffect(func(_ effects.Tip, eff *pb.Effect) {
-								if string(eff.GetKey()) == "source" && eff.GetData().GetOp() == pb.EffectOp_REMOVE_OP {
+								if !injected && string(eff.GetKey()) == "source" && eff.GetData().GetOp() == pb.EffectOp_REMOVE_OP {
+									injected = true
+
 									h.engine.SetBroadcaster(&commandPartition{})
+									// The destination's absent read now subscribes before
+									// removal. Fail a fresh transactional read explicitly
+									// so the next write fails regardless of subscriptions.
+									if _, _, err := cmd.Context.GetSnapshot("rollback-fault"); !errors.Is(err, effects.ErrRegionPartitioned) {
+										t.Errorf("fault read: got %v, want region partitioned", err)
+									}
 								}
 							})
 						}
@@ -117,6 +130,10 @@ func TestDataCommandRollback(t *testing.T) {
 						return func() {
 							h.engine.SetOnLocalEffect(nil)
 							h.engine.SetBroadcaster(nil)
+
+							if !injected {
+								t.Error("command fault was not injected")
+							}
 						}
 					})
 
@@ -158,6 +175,86 @@ func TestDataCommandRollback(t *testing.T) {
 						if got := run("GET", key); got != "$5\r\nvalue\r\n" {
 							t.Fatalf("lost surrounding write to %s: %q", key, got)
 						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMovePartitionPreventsCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		seed  []string
+		cmd   []string
+		read  []string
+		reply string
+	}{
+		{"SMOVE", []string{"SADD", "source", "member"}, []string{"SMOVE", "source", "dest", "member"}, []string{"SMEMBERS", "source"}, ":1\r\n"},
+		{"LMOVE", []string{"RPUSH", "source", "member"}, []string{"LMOVE", "source", "dest", "LEFT", "RIGHT"}, []string{"LRANGE", "source", "0", "-1"}, "$6\r\nmember\r\n"},
+		{"BLMOVE", []string{"RPUSH", "source", "member"}, []string{"BLMOVE", "source", "dest", "LEFT", "RIGHT", "0"}, []string{"LRANGE", "source", "0", "-1"}, "$6\r\nmember\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []string{"queued", "ssi"} {
+				t.Run(mode, func(t *testing.T) {
+					h := newSSIHandler(t)
+					h.ssi = mode == "ssi"
+					run := commandClient(h)
+
+					if reply := run(tc.seed...); strings.HasPrefix(reply, "-") {
+						t.Fatal(reply)
+					}
+
+					partitioned, inserted := false, false
+
+					withCommandFault(h, shared.ParseCommandType([]byte(tc.name)), func(_ *shared.Command) func() {
+						h.engine.SetOnLocalEffect(func(_ effects.Tip, eff *pb.Effect) {
+							if string(eff.GetKey()) == "source" && eff.GetData().GetOp() == pb.EffectOp_REMOVE_OP {
+								partitioned = true
+
+								h.engine.SetBroadcaster(&commandPartition{})
+							}
+
+							if string(eff.GetKey()) == "dest" && eff.GetData().GetOp() == pb.EffectOp_INSERT_OP {
+								inserted = true
+							}
+						})
+
+						// Keep the partition in place until EXEC has checked it.
+						return func() { h.engine.SetOnLocalEffect(nil) }
+					})
+
+					if reply := run("MULTI"); reply != "+OK\r\n" {
+						t.Fatal(reply)
+					}
+
+					run("SET", "before", "value")
+
+					want := "+QUEUED\r\n"
+					if mode == "ssi" {
+						want = tc.reply
+					}
+
+					if reply := run(tc.cmd...); reply != want {
+						t.Fatalf("move reply: got %q, want %q", reply, want)
+					}
+
+					if reply := run("EXEC"); reply != "-TRYAGAIN "+effects.ErrRegionPartitioned.Error()+"\r\n" {
+						t.Fatalf("partitioned transaction committed: %q", reply)
+					}
+
+					h.engine.SetBroadcaster(nil)
+
+					if !partitioned || !inserted {
+						t.Fatalf("did not exercise provisional destination write during partition: partitioned=%v inserted=%v", partitioned, inserted)
+					}
+
+					if got := run(tc.read...); got != "*1\r\n$6\r\nmember\r\n" {
+						t.Fatalf("aborted move changed source: %q", got)
+					}
+
+					if got := run("EXISTS", "dest", "before"); got != ":0\r\n" {
+						t.Fatalf("aborted transaction leaked writes: %q", got)
 					}
 				})
 			}
