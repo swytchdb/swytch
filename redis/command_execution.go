@@ -1,9 +1,23 @@
 package redis
 
 import (
+	"errors"
+
 	"github.com/swytchdb/engine/effects"
 	"github.com/swytchdb/swytch/redis/shared"
 )
+
+// writeFlushError preserves uncertainty as a distinct Redis error code. Clients
+// can parse AMBIGUOUS normally, but must decide whether retrying is safe.
+func writeFlushError(w *shared.Writer, err error) {
+	if errors.Is(err, effects.ErrTxnAmbiguous) {
+		w.WriteError("AMBIGUOUS " + err.Error())
+
+		return
+	}
+
+	w.WriteError("TRYAGAIN " + err.Error())
+}
 
 // runDataCommand rolls back a failed data-write command, including its partial
 // reply. It does not roll back an enclosing transaction or an entire script:
