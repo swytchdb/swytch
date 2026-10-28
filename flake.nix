@@ -21,17 +21,21 @@
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
 
-          swytch = pkgs.buildGoLatestModule (finalAttrs: {
+          swytch = pkgs.buildGo127Module (finalAttrs: {
             pname = "swytch";
-            version = self.shortRev or "dev";
+            version = "1.6.1";
 
-            src = self;
+            src = pkgs.fetchFromGitHub {
+              owner = "swytchdb";
+              repo = "swytch";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-riJQAreafllverdvCbvitMKWwwL1G+724tSKjAUnXoI=";
+            };
 
-            vendorHash = "sha256-rjX0bB4WsFS3T6ETdCH9P08jXSVshj5dmbfmkmVM4mA=";
+            vendorHash = "sha256-VrP5VR/Ik3hjPh3D8hACQNWhVfNUjMZsJHswcUUBXNg=";
 
             __structuredAttrs = true;
             subPackages = [ "." ];
-
             env.CGO_ENABLED = "0";
 
             ldflags = [
