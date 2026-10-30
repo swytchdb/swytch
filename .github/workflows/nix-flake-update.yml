@@ -1,0 +1,24 @@
+name: Nix
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Check flake
+        run: nix flake check --show-trace
+
+      - name: Build Swytch
+        run: nix build .#swytch

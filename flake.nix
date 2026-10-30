@@ -23,17 +23,14 @@
 
           swytch = pkgs.buildGo127Module (finalAttrs: {
             pname = "swytch";
-            version = "1.6.1";
 
-            src = pkgs.fetchFromGitHub {
-              owner = "swytchdb";
-              repo = "swytch";
-              tag = "v${finalAttrs.version}";
-              hash = "sha256-riJQAreafllverdvCbvitMKWwwL1G+724tSKjAUnXoI=";
-            };
+            #Unpinned the version 1.6.1
+            version = self.shortRev or "dev";
+            overrideModAttrs = _: _: { name = "swytch-go-modules"; };
+
+            src = self;
 
             vendorHash = "sha256-VrP5VR/Ik3hjPh3D8hACQNWhVfNUjMZsJHswcUUBXNg=";
-
             __structuredAttrs = true;
             subPackages = [ "." ];
             env.CGO_ENABLED = "0";
