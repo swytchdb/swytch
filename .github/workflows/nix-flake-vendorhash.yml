@@ -1,0 +1,81 @@
+#Workflow to update flake.nix vendorhash upon dependency changes 
+name: Update Nix vendor hash
+
+on:
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "*.go"
+      - "**/*.go"
+      - "flake.nix"
+      - "flake.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  update-vendor-hash:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Verify Go module files
+        run: nix develop --command go mod tidy -diff
+
+      - name: Recalculate vendorHash
+        run: |
+          nix run github:Mic92/nix-update -- \
+            swytch --flake --version=skip
+
+      - name: Build Swytch
+        run: nix build .#swytch --show-trace -L
+
+      - name: Check flake
+        run: nix flake check --show-trace -L
+
+      - name: Commit updated hash
+        run: |
+          if git diff --quiet -- flake.nix; then
+            echo "vendorHash is already correct."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add flake.nix
+          git commit -m "chore(nix): update Go vendor hash"
+          
+          
+      - name: Push updated hash
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+          NIX_UPDATE_TOKEN: ${{ secrets.NIX_UPDATE_TOKEN }}
+        shell: bash
+        run: |
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          printf '%s\n' "$NIX_UPDATE_TOKEN"
+          EOF
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            git -c credential.helper= \
+              -c credential.username=x-access-token \
+              push "https://github.com/${GITHUB_REPOSITORY}.git" \
+              "HEAD:${PR_BRANCH}"
