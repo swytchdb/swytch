@@ -116,8 +116,15 @@ func handleSAdd(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		added := 0
+		seen := make(map[string]struct{}, len(members))
 
 		for _, m := range members {
+			member := string(m)
+			if _, duplicate := seen[member]; duplicate {
+				continue
+			}
+			seen[member] = struct{}{}
+
 			if snap != nil && snap.NetAdds != nil {
 				if _, has := snap.GetNetAdds()[string(m)]; has {
 					continue
@@ -180,8 +187,15 @@ func handleSRem(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		removed := 0
+		seen := make(map[string]struct{}, len(members))
 
 		for _, m := range members {
+			member := string(m)
+			if _, duplicate := seen[member]; duplicate {
+				continue
+			}
+			seen[member] = struct{}{}
+
 			if snap.NetAdds != nil {
 				if _, has := snap.GetNetAdds()[string(m)]; has {
 					removed++
