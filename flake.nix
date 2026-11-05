@@ -26,7 +26,7 @@
 
             #Unpinned the version 1.6.1
             version = self.shortRev or "dev";
-            overrideModAttrs = _: _: { name = "swytch-go-modules"; };
+            overrideModAttrs = _: _: {name = "swytch-go-modules-${self.rev or self.dirtyRev or "dev"}";};
 
             src = self;
 
