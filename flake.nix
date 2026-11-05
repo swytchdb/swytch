@@ -30,7 +30,7 @@
 
             src = self;
 
-            vendorHash = "sha256-+gYxSVByRnqLcNSJuiVa8i5ZrMX6cW4Dr9hwfK9J0rU=";
+            vendorHash = "sha256-Sm9IeNnfX2E9DsYf4mODjeCDsLLfZCtdgW+iczPyKD8=";
             __structuredAttrs = true;
             subPackages = [ "." ];
             env.CGO_ENABLED = "0";
