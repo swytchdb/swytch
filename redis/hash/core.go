@@ -237,16 +237,21 @@ func handleHSet(cmd *shared.Command, w *shared.Writer, db *shared.Database) (val
 		}
 
 		added := 0
+		seen := make(map[string]struct{}, len(fieldValues)/2)
 
 		for i := 0; i < len(fieldValues); i += 2 {
 			field := fieldValues[i]
 			value := fieldValues[i+1]
+			fieldKey := string(field)
 
-			// Count new fields (not already in snap)
-			if snap == nil || snap.NetAdds == nil {
-				added++
-			} else if _, has := snap.GetNetAdds()[string(field)]; !has {
-				added++
+			if _, duplicate := seen[fieldKey]; !duplicate {
+				seen[fieldKey] = struct{}{}
+				// Count new fields (not already in snap)
+				if snap == nil || snap.NetAdds == nil {
+					added++
+				} else if _, has := snap.GetNetAdds()[string(field)]; !has {
+					added++
+				}
 			}
 
 			if err := emitHashInsert(cmd, key, field, value); err != nil {
