@@ -520,7 +520,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 				if err != nil {
 					slog.Error("effects flush failed", "error", err)
 					w.Buffer().Truncate(savedLen)
-					w.WriteError("TRYAGAIN " + err.Error())
+					writeFlushError(w, err)
 				}
 			}
 
@@ -640,7 +640,7 @@ func (h *Handler) ExecuteInto(cmd *shared.Command, w *shared.Writer, conn *share
 				if err != nil {
 					slog.Error("effects flush failed", "error", err)
 					w.Buffer().Truncate(savedLen)
-					w.WriteError("TRYAGAIN " + err.Error())
+					writeFlushError(w, err)
 				}
 			}
 
@@ -1396,7 +1396,7 @@ func (h *Handler) HandleForwardedTransaction(tx *pb.ForwardedTransaction) *pb.Fo
 				} else {
 					// Preserve the Redis error code. Transport-level ErrorMessage
 					// is prefixed with ERR by the forwarding engine.
-					w.WriteError("TRYAGAIN " + err.Error())
+					writeFlushError(w, err)
 				}
 			}
 		}
