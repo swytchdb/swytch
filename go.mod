@@ -7,7 +7,7 @@ require (
 	github.com/jeroenrinzema/psql-wire v0.20.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
-	github.com/swytchdb/engine v1.2.2
+	github.com/swytchdb/engine v1.3.0
 	github.com/yuin/gopher-lua v1.1.2
 	github.com/zeebo/xxh3 v1.1.0
 	go.opentelemetry.io/otel v1.47.0
@@ -32,7 +32,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
-	github.com/klauspost/compress v1.20.3 // indirect
+	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
